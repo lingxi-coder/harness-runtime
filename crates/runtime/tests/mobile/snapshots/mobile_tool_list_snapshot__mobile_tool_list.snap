@@ -17,6 +17,7 @@ expression: names
 - ListAgents
 - NotebookEdit
 - ObserverReport
+- ProposeGoal
 - PushNotification
 - Read
 - RemoteTrigger
