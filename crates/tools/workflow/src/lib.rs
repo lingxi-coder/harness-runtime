@@ -1678,6 +1678,10 @@ impl Tool for WorkflowTool {
         "Running a workflow".into()
     }
 
+    fn prompt_is_dynamic(&self) -> bool {
+        true
+    }
+
     async fn prompt(&self, options: &PromptOptions) -> Utf16JsonProjection {
         // Binary (2.1.267): `async prompt(e){ return Epn(nre(e?.tools)) +
         // Kvn(ne().workflowSizeGuideline) + ct() }` — the assembled description

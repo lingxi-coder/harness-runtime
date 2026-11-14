@@ -905,23 +905,55 @@ impl StdioControlPermissionGate {
         let _notify_guard =
             PermissionPromptNotifyGuard::arm(self.prompt_notifier.get(), &display_name);
         fields.push(("input".to_owned(), input.clone()));
-        if name == "Bash" && input.string_units("/description").is_some_and(|units| !units.is_empty()) {
-            fields.push(("description".to_owned(), input.subprojection("/description")
-                .expect("the supplied Bash description is a source string")));
+        if name == "Bash"
+            && input
+                .string_units("/description")
+                .is_some_and(|units| !units.is_empty())
+        {
+            fields.push((
+                "description".to_owned(),
+                input
+                    .subprojection("/description")
+                    .expect("the supplied Bash description is a source string"),
+            ));
         }
         // 2.1.322's SDK request builder inserts these shared members in this
         // order. Preserve additional LingXi facts after the shared contract.
         const NATIVE_ORDER: &[&str] = &[
-            "subtype", "tool_name", "mcp_server", "title", "display_name", "input", "description",
-            "tool_kind", "permission_suggestions", "blocked_path", "decision_reason",
-            "decision_reason_type", "decision_reason_code", "decision_reason_rule_source",
-            "decision_reason_hook_event", "decision_reason_hook_source", "decision_reason_hook_plugin_id",
-            "server_policy_ask_only", "matched_ask_rule", "classifier_approvable", "tool_use_id",
-            "agent_id", "plugin", "suppress_always_allow_rule", "default_to_no", "provenance_prompt_line",
+            "subtype",
+            "tool_name",
+            "mcp_server",
+            "title",
+            "display_name",
+            "input",
+            "description",
+            "tool_kind",
+            "permission_suggestions",
+            "blocked_path",
+            "decision_reason",
+            "decision_reason_type",
+            "decision_reason_code",
+            "decision_reason_rule_source",
+            "decision_reason_hook_event",
+            "decision_reason_hook_source",
+            "decision_reason_hook_plugin_id",
+            "server_policy_ask_only",
+            "matched_ask_rule",
+            "classifier_approvable",
+            "tool_use_id",
+            "agent_id",
+            "plugin",
+            "suppress_always_allow_rule",
+            "default_to_no",
+            "provenance_prompt_line",
             "requires_user_interaction",
         ];
-        fields.sort_by_key(|(key, _)| NATIVE_ORDER.iter().position(|native| *native == key)
-            .unwrap_or(usize::MAX));
+        fields.sort_by_key(|(key, _)| {
+            NATIVE_ORDER
+                .iter()
+                .position(|native| *native == key)
+                .unwrap_or(usize::MAX)
+        });
         let request = Utf16JsonProjection::object(fields)
             .expect("permission request has unique source members");
         let (request_id, rx) = self.plane.send_request(request, Some(tool_use_id)).await;
@@ -2149,8 +2181,23 @@ mod tests {
         );
         assert_eq!(frame["request"]["decision_reason"], "needs review");
         assert_eq!(frame["request"]["description"], "List fixture files");
-        assert_eq!(frame["request"].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
-            ["subtype", "tool_name", "display_name", "input", "description", "decision_reason", "tool_use_id"]);
+        assert_eq!(
+            frame["request"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "subtype",
+                "tool_name",
+                "display_name",
+                "input",
+                "description",
+                "decision_reason",
+                "tool_use_id"
+            ]
+        );
         let req_id = frame["request_id"].as_str().unwrap().to_string();
 
         plane

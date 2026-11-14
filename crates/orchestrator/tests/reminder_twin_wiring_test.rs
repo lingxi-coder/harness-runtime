@@ -119,6 +119,8 @@ fn driver_sources() -> Vec<(String, String)> {
 /// deferred-tools attachment is produced before reminder collection and has a
 /// separate guard below. Task notifications have two mutually exclusive call
 /// sites: the bare-mode early return and the ordinary reminder fan-out.
+/// Changed-file and MCP ingress producers each have two mutually exclusive
+/// sites for cached initial preparation and fresh continuation preparation.
 const TWIN_REMINDERS: &[(&str, usize)] = &[
     ("brief_mode_reminder_message", 1),
     ("output_style_reminder_message", 1),
@@ -128,17 +130,17 @@ const TWIN_REMINDERS: &[(&str, usize)] = &[
     ("nested_memory_reminder_messages", 1),
     ("new_diagnostics_reminder_message", 1),
     ("agent_listing_reminder_message", 1),
-    ("changed_files_reminder_messages", 1),
+    ("changed_files_reminders_for_delivery", 2),
     ("todo_reminder_message", 1),
     ("tool_search_usage_reminder_message", 1),
     ("async_hook_response_mod_messages", 1),
-    ("task_notification_reminder_messages_in_turn", 2),
+    ("task_notification_reminder_messages_for_step", 2),
     ("memory_update_reminder_messages", 1),
     ("relevant_memory_reminder_messages", 1),
     ("skill_discovery_reminder_message", 1),
     ("silent_turn_reminder_message", 1),
     ("total_tokens_reminder_message", 1),
-    ("mcp_instructions_reminder_message", 1),
+    ("mcp_instructions_prompt_ingress_attachment", 2),
     // These model-facing rows are positioned separately from `transient`, but
     // are produced in the shared preparation path for both turn drivers.
     // The typed deferred-tools row is produced earlier in `prepare_turn_step`;
@@ -185,7 +187,7 @@ fn source_between<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a
 /// the numbers disagree until its row is added.
 ///
 /// Counting leans on the naming convention: every producer is named
-/// `*_message`, `*_messages` or `*_messages_in_turn` (`persist_message_to_jsonl`
+/// `*_message`, `*_messages` or the delivery/step adapters below (`persist_message_to_jsonl`
 /// does not match, because the `(` must follow). A future producer named
 /// outside that convention would not be counted here and would need its row
 /// added by hand — the same hazard one level further out, and the reason the
@@ -194,12 +196,15 @@ fn source_between<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a
 fn twin_reminder_list_covers_every_producer_in_shared_preparation() {
     let message_shaped_calls = COLLECTOR.matches("_message(").count()
         + COLLECTOR.matches("_messages(").count()
-        + COLLECTOR.matches("_messages_in_turn(").count();
+        + COLLECTOR.matches("_messages_in_turn(").count()
+        + COLLECTOR.matches("_reminders_for_delivery(").count()
+        + COLLECTOR.matches("_reminder_messages_for_step(").count()
+        + call_sites(COLLECTOR, "mcp_instructions_prompt_ingress_attachment");
     // These calls only render previously-created model-history rows; they do
     // not produce a per-turn reminder. Their suffix matches the producer
-    // naming convention, so exclude the two explicit formatting call sites.
+    // naming convention, so exclude the explicit formatting call site.
     let rendered_history_rows = COLLECTOR.matches("rendered_system_message(").count();
-    assert_eq!(rendered_history_rows, 2);
+    assert_eq!(rendered_history_rows, 1);
     let producer_calls = message_shaped_calls - rendered_history_rows;
     let listed_calls = TWIN_REMINDERS
         .iter()
@@ -229,7 +234,7 @@ fn shared_preparation_invokes_every_per_turn_reminder() {
 
 #[test]
 fn bare_and_full_paths_each_collect_task_notifications_once() {
-    const TASK_NOTIFICATIONS: &str = "task_notification_reminder_messages_in_turn";
+    const TASK_NOTIFICATIONS: &str = "task_notification_reminder_messages_for_step";
     let bare_path = source_between(
         COLLECTOR,
         "if self.config.bare {",
@@ -276,8 +281,14 @@ fn staged_prompt_ingress_is_consumed_without_duplicate_producer_calls() {
     assert!(compact_prepare_step.contains(
         ".deferred_tools_prompt_ingress_attachment(&current_wire_tool_names,self.native_tool_pool_refresh_callback_available(),)"
     ));
-    assert!(compact_prepare_step
-        .contains("self.deferred_tools_prompt_ingress_attachment(&current_wire_tool_names,None)"));
+    assert!(compact_prepare_step.contains(
+        "self.deferred_tools_prompt_ingress_attachment(&current_wire_tool_names,native_nar_ingress.then(||self.native_tool_pool_refresh_callback_available()).flatten(),)"
+    ));
+    assert_eq!(
+        call_sites(prepare_step, "collect_turn_reminders_for_prompt_ingress"),
+        1,
+        "both drivers must enter the source-classified shared collector through preparation"
+    );
     assert!(compact_prepare_step.contains(
         "cache_prompt_ingress_producer_rows_pending(self,\"deferred_tools_delta\",rows.clone(),)"
     ));
@@ -413,6 +424,11 @@ fn neither_driver_reaches_a_reminder_behind_the_collector() {
             "{file} calls collect_turn_reminders directly. It belongs to \
              prepare_turn_step; a second call drains this step's consume-once \
              sources again, and the second drain returns None."
+        );
+        assert_eq!(
+            call_sites(source, "collect_turn_reminders_for_prompt_ingress"),
+            0,
+            "{file} bypasses prepare_turn_step to drain the production reminder collector"
         );
     }
 

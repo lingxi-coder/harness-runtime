@@ -3,7 +3,7 @@
 //! Source: Claude Code 2.1.263, src_160738762.js and src_172372449.js.
 
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 /// Snapshot of the host terminal at startup.
@@ -65,16 +65,24 @@ pub fn is_inside_iterm() -> bool {
         || std::env::var("terminal").as_deref() == Ok("iTerm.app")
 }
 
-static IT2_COMMAND: OnceLock<String> = OnceLock::new();
+static IT2_COMMAND: RwLock<Option<String>> = RwLock::new(None);
 
-pub(crate) fn it2_command() -> &'static str {
-    IT2_COMMAND.get().map_or("it2", String::as_str)
+pub(crate) fn it2_command() -> String {
+    IT2_COMMAND
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(|| "it2".into())
 }
 
 /// Probe API connectivity, resolving login-shell PATH with the upstream
 /// two-second limit. A reachable executable alone does not enable iTerm2.
 pub(crate) fn probe_it2() -> bool {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    probe_it2_with_shell(&shell)
+}
+
+fn probe_it2_with_shell(shell: impl AsRef<std::ffi::OsStr>) -> bool {
     let resolved = Command::new(shell)
         .args(["-lc", "command -v it2"])
         .stdout(Stdio::piped())
@@ -119,7 +127,9 @@ pub(crate) fn probe_it2() -> bool {
         result = Command::new(command).args(["session", "list"]).output();
     }
     if result.is_ok_and(|output| output.status.success()) {
-        let _ = IT2_COMMAND.set(command.to_owned());
+        *IT2_COMMAND
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.to_owned());
         return true;
     }
     false
@@ -203,4 +213,36 @@ const NO_PANE_BACKEND: &str = "To use agent swarms, install tmux:\n  sudo apt in
 pub fn pick_backend(env: &TerminalEnv) -> BackendChoice {
     select_backend(env, TeammateMode::Auto, true, false)
         .expect("auto mode always supports in-process execution")
+}
+
+#[cfg(all(test, unix))]
+mod relocation_cache_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn successful_reprobe_replaces_a_removed_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let resolver = root.path().join("resolved");
+        let shell = root.path().join("shell");
+        for path in [&first, &second] {
+            std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(&shell, format!("#!/bin/sh\ncat '{}'\n", resolver.display())).unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&resolver, first.to_str().unwrap()).unwrap();
+        assert!(probe_it2_with_shell(&shell));
+        assert_eq!(it2_command(), first.to_str().unwrap());
+        std::fs::remove_file(&first).unwrap();
+        std::fs::write(&resolver, second.to_str().unwrap()).unwrap();
+        assert!(probe_it2_with_shell(&shell));
+        assert_eq!(it2_command(), second.to_str().unwrap());
+        assert!(Command::new(it2_command())
+            .args(["session", "list"])
+            .status()
+            .unwrap()
+            .success());
+    }
 }

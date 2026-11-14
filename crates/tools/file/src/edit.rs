@@ -1143,7 +1143,7 @@ impl Tool for FileEditTool {
             let new_mtime_ms = result
                 .modified
                 .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-            state.set_after_write_with_requested_aliases_and_units(
+            state.set_after_write_with_identity(
                 commit_requested.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content: String::from_utf16_lossy(&published_units),
@@ -1157,6 +1157,7 @@ impl Tool for FileEditTool {
                 true,
                 vec![commit_requested, commit_path],
                 Some(published_units),
+                result.identity,
             );
             Ok(result)
         })

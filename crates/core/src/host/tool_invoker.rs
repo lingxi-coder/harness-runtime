@@ -15,6 +15,40 @@ use std::any::Any;
 use std::sync::Arc;
 use thiserror::Error;
 
+/// An immutable output contract retained for one tool dispatch. Implementations
+/// may own compiled-plan leases; parsing never consults a mutable catalog.
+#[async_trait]
+pub trait ToolOutputParser: Send + Sync {
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolInvokerError>;
+}
+
+/// Host-only handoff from an authorized physical call to its Mod boundary.
+/// Each dispatch owns a fresh capture; retries may replace it before settling.
+#[derive(Clone, Default)]
+pub struct ToolOutputParserCapture {
+    parser: Arc<std::sync::Mutex<Option<Arc<dyn ToolOutputParser>>>>,
+}
+
+impl ToolOutputParserCapture {
+    pub fn set(&self, parser: Arc<dyn ToolOutputParser>) {
+        *self
+            .parser
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(parser);
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Option<Arc<dyn ToolOutputParser>> {
+        self.parser
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// Resolve a Native `tool.call` middleware `ref` to a zero-based core-run
 /// index. The wire reference is one-based; Native applies JavaScript's
 /// `runs[ref - 1]`, including its `ToNumber` coercion, before the bounded array
@@ -711,6 +745,27 @@ pub trait ToolInvoker: Send + Sync + Any {
         Err(ToolInvokerError::Internal(
             "Source tool output parser is unavailable".into(),
         ))
+    }
+
+    /// Snapshot a dynamic output contract without invoking or dialing a tool.
+    /// Static tools may leave this unsupported and use their native parser.
+    async fn output_parser_snapshot(
+        &self,
+        _name: &str,
+    ) -> Result<Option<Arc<dyn ToolOutputParser>>, ToolInvokerError> {
+        Ok(None)
+    }
+
+    /// Invoke with a dispatch-owned parser handoff. Permission gates must run
+    /// before the physical call fills the capture.
+    async fn invoke_detailed_with_output_parser(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+        _capture: ToolOutputParserCapture,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
+        self.invoke_detailed(name, input, ctx).await
     }
 
     /// Resolve concurrency safety from the actual registered tool selected for

@@ -80,6 +80,8 @@ pub fn write_account_credential_version_locked(
             return Ok(());
         }
     }
+    #[cfg(feature = "test-support")]
+    publication_pause::before_write(root)?;
     let version = AccountCredentialVersion {
         account_id: account.account_id.clone(),
         identity_generation: account.identity_generation,
@@ -89,6 +91,102 @@ pub fn write_account_credential_version_locked(
         serde_json::to_vec(&version).map_err(|_| "account credential version encoding failed")?;
     rooted_fs::atomic_write(root, &relative(account)?, &bytes, Default::default())
         .map_err(|_| "account credential version commit failed".into())
+}
+
+/// Pause the next ledger write after its version read, before atomic publication.
+/// The guard is root-scoped and releases a paused worker when dropped, including
+/// on a failed test assertion. No hook is compiled into ordinary builds.
+#[cfg(feature = "test-support")]
+pub use publication_pause::{pause_next_account_version_write, AccountVersionWritePause};
+
+#[cfg(feature = "test-support")]
+mod publication_pause {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct State {
+        used: AtomicBool,
+        entered: tokio::sync::Notify,
+        released: Mutex<bool>,
+        wake: Condvar,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<PathBuf, Weak<State>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<PathBuf, Weak<State>>>> = OnceLock::new();
+        PAUSES.get_or_init(Mutex::default)
+    }
+
+    /// Root-scoped fixture gate; dropping it releases a paused publication.
+    pub struct AccountVersionWritePause {
+        root: PathBuf,
+        state: Arc<State>,
+    }
+
+    /// Arm one write pause after its version check and before atomic publication.
+    pub fn pause_next_account_version_write(root: &Path) -> AccountVersionWritePause {
+        let state = Arc::new(State::default());
+        pauses()
+            .lock()
+            .unwrap()
+            .insert(root.to_owned(), Arc::downgrade(&state));
+        AccountVersionWritePause {
+            root: root.to_owned(),
+            state,
+        }
+    }
+
+    impl AccountVersionWritePause {
+        /// Wait until the blocking ledger writer has reached the pause.
+        pub async fn entered(&self) {
+            self.state.entered.notified().await;
+        }
+
+        /// Let a paused writer finish; idempotent and also called by Drop.
+        pub fn release(&self) {
+            *self.state.released.lock().unwrap() = true;
+            self.state.wake.notify_all();
+        }
+    }
+
+    impl Drop for AccountVersionWritePause {
+        fn drop(&mut self) {
+            self.release();
+            let mut pauses = pauses().lock().unwrap();
+            if pauses
+                .get(&self.root)
+                .is_some_and(|state| Weak::ptr_eq(state, &Arc::downgrade(&self.state)))
+            {
+                pauses.remove(&self.root);
+            }
+        }
+    }
+
+    pub(super) fn before_write(root: &Path) -> Result<(), String> {
+        let state = pauses().lock().unwrap().get(root).and_then(Weak::upgrade);
+        let Some(state) = state else {
+            return Ok(());
+        };
+        if state.used.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        state.entered.notify_one();
+        let (released, _) = state
+            .wake
+            .wait_timeout_while(
+                state.released.lock().unwrap(),
+                Duration::from_secs(10),
+                |released| !*released,
+            )
+            .unwrap();
+        if !*released {
+            return Err("account version fixture publication timed out".into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

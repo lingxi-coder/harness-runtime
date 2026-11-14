@@ -137,11 +137,11 @@ pub use provider_adapter::ProviderApiAdapter;
 pub use request_context::PromptIngressKind;
 pub use request_context::RequestContextTranscriptAttachment;
 pub use resume::{
-    client_state_tool_results_from_messages, deferred_tool_replays_from_messages,
-    prompt_snapshot_from_messages, replay_deferred_tools_after_resume, replay_session_state,
-    replay_unfinished_read_only_tool_calls,
-    runtime_metadata_from_messages, state_from_messages, ReplayedSession, ResumeError,
-    ResumeRuntimeMetadata, CLIENT_STATE_TOOLS,
+    client_state_tool_results_from_messages, deferred_tool_replays_for_session,
+    deferred_tool_replays_from_messages, prompt_snapshot_from_messages,
+    replay_deferred_tools_after_resume, replay_session_state,
+    replay_unfinished_read_only_tool_calls, runtime_metadata_from_messages, state_from_messages,
+    ReplayedSession, ResumeError, ResumeRuntimeMetadata, CLIENT_STATE_TOOLS,
 };
 pub use stop_hook_snapshot::{
     build_background_tasks, build_session_crons, CronSnapshotInput, StopHookSnapshotProvider,

@@ -73,6 +73,26 @@ mod seed_content_tests {
     }
 }
 
+fn deferred_token_cache_key(
+    cache_key: &WireToolSchemaCacheKey,
+    wire: &[lingxi_core::host::SourceToolWireDefinition],
+    tools: &[Arc<dyn tool_api::tool_trait::Tool>],
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    cache_key.hash(&mut hasher);
+    for tool in tools.iter().filter(|tool| tool.prompt_is_dynamic()) {
+        if let Some(definition) = wire
+            .iter()
+            .find(|definition| definition.name == tool.name())
+        {
+            definition.name.hash(&mut hasher);
+            definition.description.string_units("").hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 impl ConversationOrchestrator {
     /// Main requests advertise and dispatch against their own physical route.
     /// Outside that scope (including child invokers), retain the owning
@@ -188,6 +208,40 @@ impl ConversationOrchestrator {
         true
     }
 
+    /// Verify a frozen instruction body against one admitted descriptor. Only
+    /// bytes matching that body may supply its timestamp; a later pathname stat
+    /// could associate an earlier model observation with unseen edits.
+    async fn memory_seed_mtime(&self, file: &crate::prompt::MemoryFile) -> i64 {
+        use tokio::io::AsyncReadExt;
+
+        let Some(reader) = self.tools.find_registered("Read") else {
+            return i64::MIN;
+        };
+        let Ok(Some(opened)) = reader.open_file_for_compaction(&file.path).await else {
+            return i64::MIN;
+        };
+        let opened = tokio::fs::File::from_std(opened);
+        let Ok(metadata) = opened.metadata().await else {
+            return i64::MIN;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return i64::MIN;
+        };
+        let max_bytes = u64::try_from(file.raw_content.len()).unwrap_or(u64::MAX);
+        let mut bytes = Vec::new();
+        if opened
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .is_err()
+            || bytes.len() > file.raw_content.len()
+            || String::from_utf8_lossy(&bytes) != file.raw_content
+        {
+            return i64::MIN;
+        }
+        tool_api::read_file_state::mtime_ms_floor(modified)
+    }
+
     /// Seed the loaded memory files (LINGXI.md + `.lingxi/rules/**`) into the
     /// shared read-state registry — the port of claude-code's startup loop
     /// `xCt` (2.1.220 @245883373):
@@ -224,10 +278,10 @@ impl ConversationOrchestrator {
     ///   the renderer so the two cannot drift. A `paths:`-gated conditional rule
     ///   is NOT rendered, so it seeds with `false` — its content is NOT in
     ///   context and must never dedup.
-    /// - **`mtime_ms`** = the on-disk mtime for a rendered file (`FQ(path)`),
-    ///   `Date.now()` otherwise. ANY stat error falls back to `now` — the
-    ///   oracle wraps the whole thing in `try{…}catch{Ao=Date.now()}`, so this
-    ///   never propagates and never panics.
+    /// - **`mtime_ms`** comes from a rooted descriptor whose complete decoded
+    ///   body still matches the frozen acquisition. Missing metadata, changed
+    ///   bytes or unavailable Read authority use the oldest timestamp, so a
+    ///   later mutation must verify the model's observation against disk.
     /// - **`content`**. LingXi-local adaptation, deliberate: the oracle
     ///   normalizes the non-differing branch with `X9` (BOM strip + CRLF→LF),
     ///   but LingXi's `Read` stores `decode_utf8_strict`
@@ -272,24 +326,7 @@ impl ConversationOrchestrator {
                 continue;
             }
             let in_context = crate::prompt::memory_block::is_rendered_into_context(f);
-            let now_ms = i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis()),
-            )
-            .unwrap_or(i64::MAX);
-            // `try{Ao = jn ? FQ(Fr.path) : Date.now()}catch{Ao = Date.now()}`.
-            let mtime_ms = if in_context {
-                match tokio::fs::metadata(&f.path)
-                    .await
-                    .and_then(|m| m.modified())
-                {
-                    Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
-                    Err(_) => now_ms,
-                }
-            } else {
-                now_ms
-            };
+            let mtime_ms = self.memory_seed_mtime(f).await;
             // `contentDiffersFromDisk ? (rawContent ?? content) : X9(content)`,
             // with LingXi's BOM-strip-only normalization (see the doc above).
             let content = if f.content_differs_from_disk {
@@ -300,8 +337,16 @@ impl ConversationOrchestrator {
                     .unwrap_or(&f.raw_content)
                     .replace("\r\n", "\n")
             };
-            tool_api::read_file_state::set_with_requested_path(
-                &self.prompt_runtime.read_state_map,
+            let mut state = self
+                .prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A real Read may have completed while verifying the frozen body.
+            if state.contains(&key) {
+                continue;
+            }
+            state.set_with_requested_path(
                 key.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content,
@@ -622,20 +667,7 @@ impl ConversationOrchestrator {
         // Native nested-memory seeding preserves the current lexical path as
         // its read-state key, aligned with `seedMemoryFile` and `VE(file_path)`.
         let key = normalize_absolute_lexical_read_path(&f.path);
-        let now_ms = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis()),
-        )
-        .unwrap_or(i64::MAX);
-        // `try{s=FQ(i.path)}catch{s=Date.now()}` — unconditional mtime.
-        let mtime_ms = match tokio::fs::metadata(&f.path)
-            .await
-            .and_then(|m| m.modified())
-        {
-            Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
-            Err(_) => now_ms,
-        };
+        let mtime_ms = self.memory_seed_mtime(f).await;
         let content = if f.content_differs_from_disk {
             f.raw_content.clone()
         } else {
@@ -846,7 +878,18 @@ impl ConversationOrchestrator {
                     .filter(|entry| entry.key == cache_key)
                     .map(|entry| entry.wire.clone())
             };
-            if let Some(wire) = cached_wire {
+            if let Some(mut wire) = cached_wire {
+                for tool in tools.iter().filter(|tool| tool.prompt_is_dynamic()) {
+                    if let Some(definition) = wire
+                        .iter_mut()
+                        .find(|definition| definition.name == tool.name())
+                    {
+                        definition.description =
+                            tool_api::wire::tool_to_wire(tool.as_ref(), &prompt_options)
+                                .await
+                                .description;
+                    }
+                }
                 wire
             } else {
                 let wire = tool_api::wire::tools_to_wire(&tools, &prompt_options).await;
@@ -866,12 +909,6 @@ impl ConversationOrchestrator {
                 wire
             }
         };
-        let token_cache_key = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            cache_key.hash(&mut hasher);
-            hasher.finish()
-        };
         // Structured-output strict mode (claude-code `tengu_structured_output_strict`
         // + `strictInputJSONSchema`): when the flag is on, mark the forced
         // `StructuredOutput` tool `strict` so the Anthropic codec sends its
@@ -888,6 +925,11 @@ impl ConversationOrchestrator {
         let base_wire = wire.clone();
         self.apply_mod_tool_descriptions(mod_host.as_ref(), &tools, &mut wire, false, true)
             .await;
+        // Live descriptions can change while Tool/Schema identities stay the
+        // same. Partition exact counts by those bytes as well, so a late count
+        // from an earlier description cannot refill the current cache key.
+        let token_cache_key = deferred_token_cache_key(&cache_key, &wire, &tools);
+
         let tool_search_present = tools.iter().any(|tool| tool.name() == "ToolSearch");
         let has_deferred_candidates = tools.iter().any(|tool| {
             self.tools
@@ -1677,4 +1719,172 @@ pub(crate) fn canonical_main_loop_model(
         trimmed
     };
     (!base.is_empty()).then(|| base.to_string())
+}
+
+#[cfg(test)]
+mod live_prompt_cache_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tool_api::tool_trait::*;
+    struct FixtureTool {
+        schema: Utf16JsonProjection,
+        version: Arc<AtomicUsize>,
+        dynamic: bool,
+    }
+    #[async_trait]
+    impl Tool for FixtureTool {
+        fn name(&self) -> &str {
+            if self.dynamic {
+                "LiveFixture"
+            } else {
+                "StaticFixture"
+            }
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            &self.schema
+        }
+        fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
+            true
+        }
+        async fn check_permissions(
+            &self,
+            _: &Utf16JsonProjection,
+            _: &tool_api::context::ToolUseContext,
+        ) -> permission::PermissionResult {
+            unreachable!()
+        }
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+            "fixture".into()
+        }
+        fn prompt_is_dynamic(&self) -> bool {
+            self.dynamic
+        }
+        async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+            format!("version {}", self.version.load(Ordering::SeqCst)).into()
+        }
+        async fn call(
+            &self,
+            _: Utf16JsonProjection,
+            _: tool_api::context::ToolUseContext,
+            _: tool_api::progress::ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            unreachable!()
+        }
+    }
+    #[tokio::test]
+    async fn warm_wire_cache_refreshes_live_descriptions_and_reuses_static_descriptions() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let version = Arc::new(AtomicUsize::new(0));
+        let mut tools = tool_api::ToolRegistry::new();
+        let mut fixtures: Vec<Arc<dyn Tool>> = Vec::new();
+        for dynamic in [false, true] {
+            let tool: Arc<dyn Tool> = Arc::new(FixtureTool {
+                schema: generated_builtin_schema(&serde_json::json!({"type":"object"})),
+                version: version.clone(),
+                dynamic,
+            });
+            tools.register_builtin(tool.clone());
+            fixtures.push(tool);
+        }
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tools),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        );
+        let first = orch.build_wire_tools().await.unwrap().0;
+        assert!(orch
+            .prompt_runtime
+            .wire_tool_schema_cache
+            .lock()
+            .await
+            .is_some());
+        let schema_key = orch
+            .prompt_runtime
+            .wire_tool_schema_cache
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .key
+            .clone();
+        let old_token_key = deferred_token_cache_key(&schema_key, &first, &fixtures);
+        orch.prompt_runtime
+            .deferred_tool_token_cache
+            .lock()
+            .await
+            .insert(old_token_key, Some(250));
+        version.store(1, Ordering::SeqCst);
+        let second = orch.build_wire_tools().await.unwrap().0;
+        let new_token_key = deferred_token_cache_key(&schema_key, &second, &fixtures);
+        assert_ne!(
+            old_token_key, new_token_key,
+            "a live description changes exact token-count ownership"
+        );
+        assert!(
+            !orch
+                .prompt_runtime
+                .deferred_tool_token_cache
+                .lock()
+                .await
+                .contains_key(&new_token_key),
+            "an old description's token count must not be reused"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .find(|tool| tool.name == "LiveFixture")
+                .unwrap()
+                .description
+                .string_at(""),
+            Some("version 0")
+        );
+        assert_eq!(
+            second
+                .iter()
+                .find(|tool| tool.name == "LiveFixture")
+                .unwrap()
+                .description
+                .string_at(""),
+            Some("version 1")
+        );
+        assert_eq!(
+            second
+                .iter()
+                .find(|tool| tool.name == "StaticFixture")
+                .unwrap()
+                .description
+                .string_at(""),
+            Some("version 0")
+        );
+    }
 }

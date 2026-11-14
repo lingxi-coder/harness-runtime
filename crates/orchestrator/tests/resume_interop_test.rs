@@ -52,6 +52,14 @@ async fn write_then_resume_then_append_then_read_full_chain_intact() {
     // (1) initial 2-turn write via the M5-07 writer.
     let writer = Arc::new(JsonlWriter::new(path.clone(), fs.clone()));
     writer
+        .initialize_fixed_session_mode(
+            &sid.to_string(),
+            lingxi_core::host::session_context::ConversationMode::Code,
+            0,
+        )
+        .await
+        .unwrap();
+    writer
         .append(&build_msg("user", m1, None, sid, &cwd, "hi"))
         .await
         .unwrap();

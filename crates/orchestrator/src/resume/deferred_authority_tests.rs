@@ -130,19 +130,31 @@ impl Tool for CountingTool {
         }
         if let (Some(map), Some(path)) = (&self.read_state, &self.read_path) {
             if input.at_pointer("/read").and_then(JsonValueView::as_bool) == Some(true) {
-                tool_api::read_file_state::set(
-                    map,
-                    path.clone(),
-                    tool_api::read_file_state::ReadFileEntry {
-                        content: "known read bytes".into(),
-                        mtime_ms: 17,
-                        offset: None,
-                        limit: None,
-                        from_read: true,
-                        seeded_from_context: false,
-                        is_partial_view: false,
-                    },
-                );
+                let exact = input.string_units("/exact_read");
+                let entry = tool_api::read_file_state::ReadFileEntry {
+                    content: exact.as_ref().map_or_else(
+                        || "known read bytes".into(),
+                        |units| String::from_utf16_lossy(units),
+                    ),
+                    mtime_ms: 17,
+                    offset: None,
+                    limit: None,
+                    from_read: true,
+                    seeded_from_context: false,
+                    is_partial_view: false,
+                };
+                if exact.is_some() {
+                    tool_api::read_file_state::set_with_requested_aliases_and_units(
+                        map,
+                        path.clone(),
+                        entry,
+                        true,
+                        vec![path.clone()],
+                        exact,
+                    );
+                } else {
+                    tool_api::read_file_state::set(map, path.clone(), entry);
+                }
             }
             if input
                 .at_pointer("/check_cached_read")
@@ -153,7 +165,10 @@ impl Tool for CountingTool {
                     .map_err(|error| tool_api::ToolError::Internal(error.to_string()))?;
             }
         }
-        let mut result = tool_api::ToolCallResult::from_data("called".into());
+        let mut result = tool_api::ToolCallResult::from_data(
+            Utf16JsonProjection::parse(r#"{"status":"called","detail":"left\ud800right"}"#)
+                .unwrap(),
+        );
         if self.modifier_failure {
             result.context_modifier = Some(Box::new(|mut context| {
                 context.options.main_loop_model = "unresolvable-modifier-model".into();
@@ -406,6 +421,39 @@ async fn replay_accepts_writer_owned_append() {
         .unwrap();
     assert_eq!(permissions.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let source = std::fs::read_to_string(&fixture.path).unwrap();
+    let loaded = session::jsonl::route_lines(&source);
+    assert!(
+        loaded.messages_in_order.iter().any(|row| row
+            .tool_use_result_projection
+            .as_ref()
+            .is_some_and(|result| result.string_at("/status") == Some("called"))),
+        "accepted deferred results must publish raw sidecars before persistence"
+    );
+    let (cold, permissions, calls) = fixture.orchestrator(None);
+    replay_deferred_tools_after_resume(&cold, deferred(1))
+        .await
+        .unwrap();
+    assert_eq!(permissions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a completed logical call must not execute again"
+    );
+    let source = std::fs::read_to_string(&fixture.path).unwrap();
+    let loaded = session::jsonl::route_lines(&source);
+    let result = loaded
+        .messages_in_order
+        .last()
+        .unwrap()
+        .tool_use_result_projection
+        .as_ref()
+        .unwrap();
+    assert_eq!(result.string_at("/status"), Some("called"));
+    assert_eq!(
+        result.string_units("/detail"),
+        Some(vec![108, 101, 102, 116, 0xd800, 114, 105, 103, 104, 116])
+    );
 }
 
 #[tokio::test]
@@ -596,4 +644,52 @@ async fn recovered_read_completion_restores_cache_before_later_write_guard() {
     assert!(
         matches!(&history[0], ConversationMessage::User { content, .. } if content.iter().all(|block| matches!(block, ContentBlock::ToolResult { is_error, .. } if *is_error != Some(true))))
     );
+}
+
+#[tokio::test]
+async fn completed_read_keeps_exact_units_and_write_fence_after_cold_resume() {
+    let fixture = Fixture::new(true);
+    let path = fixture.source_root.join("utf16.txt");
+    let mut work = deferred(1);
+    work[0].tool_input =
+        Utf16JsonProjection::parse(r#"{"read":true,"exact_read":"left\ud800right"}"#).unwrap();
+    let (first, _, calls) = orchestrator_options(
+        fixture.id,
+        &fixture.source_root,
+        Some(fixture.writer.clone()),
+        None,
+        false,
+        Some(path.clone()),
+    );
+    replay_deferred_tools_after_resume(&first, work.clone())
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let (cold, _, cold_calls) = orchestrator_options(
+        fixture.id,
+        &fixture.source_root,
+        Some(fixture.recaptured_writer()),
+        None,
+        false,
+        Some(path.clone()),
+    );
+    replay_deferred_tools_after_resume(&cold, work)
+        .await
+        .unwrap();
+    assert_eq!(cold_calls.load(Ordering::SeqCst), 0);
+    let expected = vec![108, 101, 102, 116, 0xd800, 114, 105, 103, 104, 116];
+    assert_eq!(
+        tool_api::read_file_state::get_content_units(&cold.prompt_runtime.read_state_map, &path),
+        Some(expected)
+    );
+    for owner in [&first, &cold] {
+        assert!(tool_file::check_read_before_write(
+            &owner.prompt_runtime.read_state_map,
+            &path,
+            18,
+            "left\u{fffd}right",
+            false
+        )
+        .is_err());
+    }
 }

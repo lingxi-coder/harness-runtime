@@ -213,6 +213,14 @@ impl ToolInvoker for ModSubagentToolInvoker {
         self.inner.parse_output(name, output).await
     }
 
+    async fn output_parser_snapshot(
+        &self,
+        name: &str,
+    ) -> Result<Option<Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>, ToolInvokerError>
+    {
+        self.inner.output_parser_snapshot(name).await
+    }
+
     async fn invoke(
         &self,
         name: &str,
@@ -249,7 +257,11 @@ impl ToolInvoker for ModSubagentToolInvoker {
             .ok_or_else(|| ToolInvokerError::Internal("child tool call has no agent id".into()))?;
         let event = tool_call_event(name, &tool_use_id, &agent_id, &input)?;
         let original_input = input.clone();
-        let completed = Arc::new(Mutex::new(Vec::<ToolInvocationResult>::new()));
+        let fallback_parser = self.inner.output_parser_snapshot(name).await;
+        let completed = Arc::new(Mutex::new(Vec::<(
+            ToolInvocationResult,
+            Option<Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>,
+        )>::new()));
         let core_error = Arc::new(Mutex::new(None::<ToolInvokerError>));
         let core_inner = self.inner.clone();
         let core_name = name.to_owned();
@@ -298,7 +310,17 @@ impl ToolInvoker for ModSubagentToolInvoker {
                             ));
                         }
                         let args = tool_call_arguments(&forwarded)?;
-                        let result = match inner.invoke_detailed(&name, args, ctx).await {
+                        let parser_capture =
+                            lingxi_core::host::tool_invoker::ToolOutputParserCapture::default();
+                        let result = match inner
+                            .invoke_detailed_with_output_parser(
+                                &name,
+                                args,
+                                ctx,
+                                parser_capture.clone(),
+                            )
+                            .await
+                        {
                             Ok(result) => result,
                             Err(error) => {
                                 let source = error.model_facing_message();
@@ -330,7 +352,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
                             ("context".into(), result.context.clone()),
                         ])
                         .map_err(|error| ModError::Hook(error.to_string()))?;
-                        completed.push(result);
+                        completed.push((result, parser_capture.snapshot()));
                         Ok(Some(answer))
                     }
                 },
@@ -354,7 +376,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
                 if let Some(core_error) = core_error.lock().await.take() {
                     return Err(core_error);
                 }
-                if let Some(core) = completed.lock().await.last().cloned() {
+                if let Some((core, _)) = completed.lock().await.last().cloned() {
                     return Ok(core);
                 }
                 tracing::warn!(tool = name, error = %error, "nested Mod tool.call failed");
@@ -376,14 +398,21 @@ impl ToolInvoker for ModSubagentToolInvoker {
         };
         let replacement = answer.subprojection("/result").ok();
 
-        if let Some(mut core) = selected_core {
+        if let Some((mut core, output_parser)) = selected_core {
             core.context = model_context(&answer);
             let changed_result = replacement
                 .as_ref()
                 .is_some_and(|value| value != &core.data);
             if changed_result {
                 let raw = replacement.as_ref().expect("changed result is present");
-                let parsed = match self.inner.parse_output(name, raw).await {
+                let parsed = match match output_parser.as_ref() {
+                    Some(parser) => parser.parse_output(raw).await,
+                    None => match &fallback_parser {
+                        Ok(Some(parser)) => parser.parse_output(raw).await,
+                        Ok(None) => self.inner.parse_output(name, raw).await,
+                        Err(error) => Err(ToolInvokerError::Internal(error.model_facing_message())),
+                    },
+                } {
                     Ok(parsed) => parsed,
                     Err(error) => return Ok(wrap_tool_call_error(name, &error)),
                 };
@@ -407,7 +436,19 @@ impl ToolInvoker for ModSubagentToolInvoker {
         }
 
         if let Some(raw) = replacement {
-            let parsed = match self.inner.parse_output(name, &raw).await {
+            let dispatched_parser = completed
+                .lock()
+                .await
+                .last()
+                .and_then(|(_, parser)| parser.clone());
+            let parsed = match match dispatched_parser {
+                Some(parser) => parser.parse_output(&raw).await,
+                None => match fallback_parser {
+                    Ok(Some(parser)) => parser.parse_output(&raw).await,
+                    Ok(None) => self.inner.parse_output(name, &raw).await,
+                    Err(error) => Err(error),
+                },
+            } {
                 Ok(parsed) => parsed,
                 Err(error) => return Ok(wrap_tool_call_error(name, &error)),
             };
@@ -535,10 +576,76 @@ mod tests {
 
     struct Core {
         calls: StdMutex<Vec<Utf16JsonProjection>>,
+        dynamic_parser: std::sync::atomic::AtomicBool,
+        generation: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+    }
+
+    struct RequiredOutput(&'static str);
+    #[async_trait]
+    impl lingxi_core::host::tool_invoker::ToolOutputParser for RequiredOutput {
+        async fn parse_output(
+            &self,
+            output: &Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            if output.get_property(self.0).is_some() {
+                Ok(output.clone())
+            } else {
+                Err(ToolInvokerError::Validation(
+                    format!("required {}", self.0).into(),
+                ))
+            }
+        }
+    }
+
+    impl Core {
+        fn parser(&self) -> Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser> {
+            Arc::new(RequiredOutput(
+                if self.generation.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    "old"
+                } else {
+                    "new"
+                },
+            ))
+        }
     }
 
     #[async_trait]
     impl ToolInvoker for Core {
+        async fn output_parser_snapshot(
+            &self,
+            _: &str,
+        ) -> Result<
+            Option<Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>,
+            ToolInvokerError,
+        > {
+            Ok(self
+                .dynamic_parser
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| self.parser()))
+        }
+
+        async fn invoke_detailed_with_output_parser(
+            &self,
+            name: &str,
+            input: Utf16JsonProjection,
+            ctx: SubagentInvocationContext,
+            capture: lingxi_core::host::tool_invoker::ToolOutputParserCapture,
+        ) -> Result<ToolInvocationResult, ToolInvokerError> {
+            if self
+                .dynamic_parser
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                capture.set(self.parser());
+                if input.at_pointer("/hold").and_then(|value| value.as_bool()) == Some(true) {
+                    self.entered.notify_one();
+                    self.resume.notified().await;
+                }
+            }
+            self.invoke_detailed(name, input, ctx).await
+        }
+
         async fn invoke_supplied_detailed(
             &self,
             name: &str,
@@ -584,6 +691,12 @@ mod tests {
             _name: &str,
             output: &Utf16JsonProjection,
         ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            if self
+                .dynamic_parser
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return self.parser().parse_output(output).await;
+            }
             if output.object_entries().is_some() {
                 Ok(output.clone())
             } else {
@@ -715,9 +828,74 @@ mod tests {
         registry.set_mod_host(host);
         let core = Arc::new(Core {
             calls: StdMutex::new(Vec::new()),
+            dynamic_parser: std::sync::atomic::AtomicBool::new(false),
+            generation: std::sync::atomic::AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
         });
         let invoker = ModSubagentToolInvoker::new(core.clone(), Arc::new(RwLock::new(registry)));
         (invoker, core, session)
+    }
+
+    #[tokio::test]
+    async fn child_mod_replacements_keep_each_concurrent_dispatch_schema_after_refresh() {
+        let (invoker, core, _session) = setup(
+            r#"export function register(on) {
+          on('tool.call', { tool: 'Read' }, async ($, e, next) => {
+            const core = await next(e);
+            return { ...core, result: { [e.field]: true, replaced: true } };
+          });
+        }"#,
+        )
+        .await;
+        core.dynamic_parser
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let invoker = Arc::new(invoker);
+        let first = {
+            let invoker = invoker.clone();
+            tokio::spawn(async move {
+                invoker
+                    .invoke_detailed(
+                        "Read",
+                        source(&json!({"field":"old", "hold":true})),
+                        child_context(AgentId::new()),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), core.entered.notified())
+            .await
+            .unwrap();
+        core.generation
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            invoker.invoke_detailed(
+                "Read",
+                source(&json!({"field":"new"})),
+                child_context(AgentId::new()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!second.is_error);
+        assert!(second.data.get_property("new").is_some());
+        core.resume.notify_one();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !first.is_error,
+            "old run's replacement uses the old parser even after a new run completes"
+        );
+        assert!(first.data.get_property("old").is_some());
+        assert!(
+            core.parse_output("Read", &first.data).await.is_err(),
+            "live parser would reject the old result"
+        );
     }
 
     #[tokio::test]
@@ -1252,4 +1430,7 @@ mod tests {
         assert!(result.context_modifier.is_none());
         assert!(result.context_state.is_none());
     }
+
+    include!("mod_tool_invoker/cache_schema_tests.rs");
+    include!("mod_tool_invoker/refresh_schema_tests.rs");
 }

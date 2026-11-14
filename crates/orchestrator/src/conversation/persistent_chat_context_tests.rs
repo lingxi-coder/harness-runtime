@@ -41,7 +41,9 @@ impl sidequery::SideQueryClient for SummaryClient {
         admission: llm_runtime::RequestDispatchAdmission,
         observer: sidequery::ForkedUsageObserver,
     ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
-        let response = self.query_with_dispatch_admission(request, admission).await?;
+        let response = self
+            .query_with_dispatch_admission(request, admission)
+            .await?;
         observer.observe(response.usage);
         Ok(response)
     }

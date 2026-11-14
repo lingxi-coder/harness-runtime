@@ -45,13 +45,13 @@ mod background_agent;
 mod cron_command;
 pub mod cron_management;
 mod cron_native;
-mod goal_proposal;
 pub mod file_changed_watch;
 pub mod fork_resume;
 #[cfg(test)]
 mod fusion_attempt_composition_test;
 mod fusion_attempts;
 mod fusion_command;
+mod goal_proposal;
 pub use fusion_command::record_fusion_command_failure;
 mod fusion_implement;
 #[cfg(test)]
@@ -873,9 +873,22 @@ fn teammate_backend_selector(
     flag_mode: Option<lingxi_core::settings::schema::TeammateMode>,
     is_tty: bool,
 ) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
-    use platform_posix::swarm::detection::{
-        detect_terminal_env, select_backend, BackendChoice, TeammateMode,
-    };
+    teammate_backend_selector_with_terminal_probe(
+        cwd,
+        flag_mode,
+        is_tty,
+        Arc::new(platform_posix::swarm::detection::detect_terminal_env),
+    )
+}
+
+#[cfg(unix)]
+fn teammate_backend_selector_with_terminal_probe(
+    cwd: std::path::PathBuf,
+    flag_mode: Option<lingxi_core::settings::schema::TeammateMode>,
+    is_tty: bool,
+    terminal_probe: Arc<dyn Fn() -> platform_posix::swarm::detection::TerminalEnv + Send + Sync>,
+) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
+    use platform_posix::swarm::detection::{select_backend, BackendChoice, TeammateMode};
     let backends = std::sync::Mutex::new(std::collections::HashMap::<
         &'static str,
         Arc<dyn lingxi_core::host::SwarmBackend>,
@@ -900,7 +913,7 @@ fn teammate_backend_selector(
             Some(lingxi_core::settings::schema::TeammateMode::ITerm2) => TeammateMode::ITerm2,
             _ => TeammateMode::Auto,
         };
-        let terminal = detect_terminal_env();
+        let terminal = terminal_probe();
         let interactive = is_tty && !lingxi_core::host::session_flags::is_non_interactive_session();
         let selection = select_backend(&terminal, mode, interactive, false);
         let acquisition_error = if mode == TeammateMode::Auto
@@ -1462,8 +1475,15 @@ async fn hydrate_captured_session_before_start(
             "cold resume snapshot does not match the active session".into(),
         ));
     }
-    let loaded = session::jsonl::route_lines(&snapshot.content);
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+    let parsed;
+    let loaded = match cfg.prepared_session_resume() {
+        Some(loaded) => loaded,
+        None => {
+            parsed = session::jsonl::route_lines(&snapshot.content);
+            &parsed
+        }
+    };
+    let (messages, _) = session::jsonl::build_conversation_chain(loaded, &session_id.to_string());
     if messages.is_empty()
         && !loaded
             .mobile_empty_sessions
@@ -1587,8 +1607,9 @@ fn desktop_fusion_executor(
              /fusion will report this until the settings file is fixed"
         );
     }
-    let config_source: Arc<dyn fusion::FusionConfigSource> =
-        Arc::new(DesktopFusionConfigSource { cfg: cfg.clone() });
+    let config_source: Arc<dyn fusion::FusionConfigSource> = Arc::new(DesktopFusionConfigSource {
+        cfg: cfg.clone_for_runtime_controls(),
+    });
     let mut inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
         .with_bus(bus)
         .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)))
@@ -1599,7 +1620,7 @@ fn desktop_fusion_executor(
     }
     Arc::new(DesktopFusionExecutor {
         inner: Arc::new(inner),
-        cfg: cfg.clone(),
+        cfg: cfg.clone_for_runtime_controls(),
     })
 }
 
@@ -3806,7 +3827,7 @@ fn load_merged_settings(
     {
         return Ok(entry.value.clone());
     }
-    let stack = lingxi_core::settings::Settings::load_raw_layer_stack_from_user_path(
+    let stack = lingxi_core::settings::Settings::load_raw_layer_stack_from_user_path_with_reader(
         lingxi_core::settings::LoadInputs {
             env: &env,
             project_dir,
@@ -3815,16 +3836,84 @@ fn load_merged_settings(
         lingxi_core::settings::FileLayerScope::ALL,
         lingxi_core::settings::RawSupplementalLayers::default(),
         lingxi_core::settings::loader::user_settings_path().as_deref(),
+        read_merged_settings_layer,
     )?;
+    let complete = stack.file_load_failures.is_empty();
     let value = stack.into_effective_settings()?;
-    *cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(MergedSettingsCacheEntry {
-        project_dir: project_dir.to_path_buf(),
-        revision,
-        value: value.clone(),
-    });
+    if complete {
+        *cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(MergedSettingsCacheEntry {
+            project_dir: project_dir.to_path_buf(),
+            revision,
+            value: value.clone(),
+        });
+    }
     Ok(value)
+}
+
+#[cfg(test)]
+thread_local! {
+    static MERGED_SETTINGS_READ_FAILURE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+fn read_merged_settings_layer(
+    path: &Path,
+) -> Result<
+    Option<lingxi_core::settings::loader::SettingsLayerSnapshot>,
+    lingxi_core::settings::SettingsError,
+> {
+    #[cfg(test)]
+    if MERGED_SETTINGS_READ_FAILURE.with(|failure| {
+        let mut failure = failure.borrow_mut();
+        if failure.as_deref() == Some(path) {
+            failure.take();
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(lingxi_core::settings::SettingsError::Io {
+            path: path.to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected transient settings read failure",
+            ),
+        });
+    }
+    lingxi_core::settings::loader::read_settings_layer_snapshot(path)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn teammate_selector_retries_a_skipped_settings_read_without_metadata_change() {
+    let root = tempfile::tempdir().unwrap();
+    let path = lingxi_core::settings::loader::project_settings_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, r#"{"teammateMode":"tmux"}"#).unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let select = teammate_backend_selector_with_terminal_probe(
+        root.path().to_owned(),
+        None,
+        true,
+        Arc::new(|| platform_posix::swarm::detection::TerminalEnv {
+            inside_tmux: false,
+            iterm_app: false,
+            tmux_available: true,
+            it2_available: false,
+        }),
+    );
+    MERGED_SETTINGS_READ_FAILURE.with(|failure| *failure.borrow_mut() = Some(path.clone()));
+    let skipped = select();
+    assert!(!skipped.explicit);
+    assert!(skipped.backend.is_none());
+    let restored = select();
+    assert!(restored.explicit);
+    assert!(restored.error.is_none());
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(metadata.len(), after.len());
+    assert_eq!(metadata.modified().unwrap(), after.modified().unwrap());
+    assert!(select().explicit);
 }
 
 /// Resolve the Host's global provider region, including its managed policy.
@@ -6419,6 +6508,10 @@ fn code_review_suggestion_provider(
 #[path = "tests/bash_precommit_skill_wiring_tests.rs"]
 mod bash_precommit_skill_wiring_tests;
 
+#[cfg(test)]
+#[path = "tests/startup_capture_tests.rs"]
+mod startup_capture_tests;
+
 /// Production [`mcp::oauth::OnAuthorizationUrl`] callback for OAuth-configured
 /// remote MCP servers. The MCP OAuth flow ([`mcp::McpRegistry::connect`]) fires
 /// this once per interactive flow with the authorization URL the user must visit
@@ -6814,6 +6907,7 @@ pub use configuration::DesktopEngineConfig;
 pub use configuration::DesktopMcpServices;
 pub use configuration::DesktopRequestIdentity;
 pub use configuration::DesktopSessionComposition;
+pub use configuration::DesktopSessionResumeLoaded;
 pub use configuration::DesktopSessionResumeSnapshot;
 pub use configuration::MAX_PERMISSION_TIMEOUT;
 pub use credentials::api_service_from_stack;

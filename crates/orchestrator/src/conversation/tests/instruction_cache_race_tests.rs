@@ -140,7 +140,8 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
                                     "sessionMode": fixed_mode.as_str(),
                                     "instructionEpoch": 0,
                                 }),
-                            ).unwrap(),
+                            )
+                            .unwrap(),
                         ]),
                         ..Default::default()
                     },

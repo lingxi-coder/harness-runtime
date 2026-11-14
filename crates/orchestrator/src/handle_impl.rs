@@ -625,6 +625,17 @@ impl ConversationOrchestrator {
                     crate::model_validation::TrimmedModelSource::from_projection(&validation_source)
                         .is_ok_and(|trimmed| trimmed.code_units() == option.as_slice())
                 });
+            let validation_cache =
+                self.model_runtime
+                    .native_model_validation_cache
+                    .for_route(format!(
+                        "{:?}:{:?}:{:?}",
+                        route.main,
+                        route_context
+                            .as_ref()
+                            .and_then(|context| context.route.endpoint.as_ref()),
+                        self.api.model_validation_account_generation()
+                    ));
             let decision = prepare_native_model_validation(
                 &validation_source,
                 NativeModelValidationFacts {
@@ -642,7 +653,7 @@ impl ConversationOrchestrator {
                             lingxi_llm_client::protocol::NativeModelSuggestionFacts::unobserved,
                         ),
                 },
-                &self.model_runtime.native_model_validation_cache,
+                &validation_cache,
             )
             .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
             match decision {
@@ -671,13 +682,10 @@ impl ConversationOrchestrator {
                     let probe_model = binding.route_anchor.model.clone();
                     let probe_profile = binding.route_anchor.profile.clone();
                     let probe_source = validation_source.clone();
-                    let mut task = self
-                        .model_runtime
-                        .native_model_validation_cache
-                        .spawn_probe(&payload, async move {
-                            api.probe_model(&probe_model, probe_profile.as_deref(), &probe_source)
-                                .await
-                        });
+                    let mut task = validation_cache.spawn_probe(&payload, async move {
+                        api.probe_model(&probe_model, probe_profile.as_deref(), &probe_source)
+                            .await
+                    });
                     let result = match validation {
                         ModelValidationMode::SlashOuterRaceDetached => task.wait().await,
                         ModelValidationMode::GzrAbortAfterFiveSeconds => {
@@ -1515,6 +1523,7 @@ impl ConversationOrchestrator {
                 self.prompt_runtime
                     .commit_instruction_session_reset(&mut instruction_context);
                 s.session_id = new_session_id_value;
+                self.restore_consumed_reminders_metadata(new_session_id_value, &[]);
                 reports.activate(new_session_id_value);
                 let new_session_id = new_session_id_value.to_string();
                 self.compaction_runtime
@@ -1745,7 +1754,20 @@ impl ConversationOrchestrator {
                 let _transition = self.lifecycle_runtime.goal_transition.lock().await;
                 self.activate_prepared_transcript_switch(prepared_transcript)
                     .await?;
+                // A same-session remount keeps the live diagnostic source's
+                // consumed cursor. Carry its unsent row across the prompt
+                // generation reset; another session must never inherit it.
+                let pending_diagnostics = (old_session_id == session_id)
+                    .then(|| self.pending_diagnostics_reminder())
+                    .flatten();
                 self.reset_session_scoped_runtime().await;
+                if let Some(message) = pending_diagnostics {
+                    self.retain_pending_step_reminder(
+                        "diagnostics",
+                        message,
+                        crate::conversation::pending_reminders::Acknowledgement::Diagnostics,
+                    );
+                }
                 self.prompt_runtime
                     .install_silent_clocks(restored_silent_clocks);
                 self.restore_prompt_suggestion_api_errors(
@@ -1933,6 +1955,13 @@ impl ConversationOrchestrator {
                 drop(s);
                 drop(reports);
                 *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+                self.restore_consumed_reminders_metadata(
+                    session_id,
+                    runtime.transcript_metadata.as_deref().unwrap_or_default(),
+                );
+                if let Some(authority) = runtime.pending_transient_reminder_authority.as_ref() {
+                    self.import_consumed_reminder_authority(session_id, authority);
+                }
                 drop(append);
                 self.sync_thinking_signature_strip_flag_to_api().await;
                 self.restore_main_loop_latest_assistant_usage(
@@ -2028,7 +2057,10 @@ impl ConversationOrchestrator {
             .replace_loaded(runtime.loaded_tool_names);
         self.restore_hot_resume_prompt_state().await;
         // The fixed mode precedes resumed hooks and deferred skill dispatch.
-        profile_result?;
+        profile_result.map_err(|source| HandleError::ResumeCommitted {
+            session_id,
+            source: Box::new(source),
+        })?;
         // The latch resets with the session, and so does the cascade's
         // tried-models list (see `clear_session`).
         self.model_runtime
@@ -2081,7 +2113,12 @@ impl ConversationOrchestrator {
         if !runtime.deferred_tools.is_empty() {
             crate::resume::replay_deferred_tools_after_resume(self, runtime.deferred_tools)
                 .await
-                .map_err(|error| HandleError::ActionFailed(format!("deferred replay: {error}")))?;
+                .map_err(|error| HandleError::ResumeCommitted {
+                    session_id,
+                    source: Box::new(HandleError::ActionFailed(format!(
+                        "deferred replay: {error}"
+                    ))),
+                })?;
         }
         // Restore usage and the selected route before Mods take their first
         // reading; otherwise token-weather keeps the empty boot snapshot.
@@ -2116,6 +2153,11 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
+    fn capture_pending_transient_reminder_authority(
+        &self,
+    ) -> Option<lingxi_core::host::ResumeTransientReminderAuthority> {
+        self.export_consumed_reminder_authority()
+    }
     async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
         self.conversation_profile().await
     }
@@ -6807,6 +6849,7 @@ mod tests {
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
                 lifetime_guard: None,
+                pending_transient_reminder_authority: None,
                 transcript_path: None,
                 transcript_source: None,
                 working_directory: None,

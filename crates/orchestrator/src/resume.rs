@@ -52,11 +52,19 @@ mod compaction_iteration_tests;
 #[cfg(test)]
 mod deferred_authority_tests;
 mod deferred_checkpoint;
-mod file_state;
+#[cfg(test)]
+mod deferred_state_replay_tests;
+pub(crate) mod file_state;
 #[cfg(test)]
 mod file_state_tests;
+#[cfg(test)]
+mod mod_attachment_provenance_tests;
+#[cfg(test)]
+mod nested_memory_mod_recovery_tests;
 mod plan_files;
 pub(crate) mod todo_state;
+#[cfg(test)]
+mod typed_policy_recovery_tests;
 
 /// Errors raised by the resume path. Forwards loader errors verbatim.
 #[derive(Debug, thiserror::Error)]
@@ -520,9 +528,9 @@ pub struct ReplayedSession {
     pub transcript_metadata: Vec<Utf16JsonProjection>,
     /// Replayed session state with `history` populated from the JSONL.
     pub state: SessionState,
-    /// Complete main-thread history for UI transcript replay. This may include
-    /// messages before the latest compact boundary; callers must keep it out
-    /// of the model context and use [`Self::state`] for engine resume.
+    /// Main-thread display history from the latest compact boundary onward.
+    /// Earlier history is loaded by the host on demand. Persistent App Chat
+    /// checkpoints retain their exact full projection for checkpoint identity.
     pub display_history: Vec<ConversationMessage>,
     /// Persisted timestamps for the complete display history, keyed by row UUID.
     pub display_timestamps: std::collections::HashMap<String, i64>,
@@ -566,6 +574,7 @@ impl ReplayedSession {
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
             lifetime_guard: None,
+            pending_transient_reminder_authority: None,
             transcript_path: Some(self.transcript_path.clone()),
             transcript_source: None,
             working_directory: self.working_directory.clone(),
@@ -745,7 +754,33 @@ pub fn replay_captured_session(
     loaded: LoadedTranscript,
     session_id: Uuid,
 ) -> Result<ReplayedSession, ResumeError> {
-    replay_captured_session_inner(transcript_path, source, loaded, session_id, false)
+    replay_captured_session_inner(transcript_path, &source, &loaded, session_id, false, true)
+}
+
+/// Replay an already-routed immutable transcript without cloning its full
+/// parsed entry stream. The caller must validate that `source` and `loaded`
+/// describe the same selected path, session and claimed source revision.
+/// This function performs no filesystem reads.
+pub fn replay_prepared_session(
+    transcript_path: PathBuf,
+    source: &str,
+    loaded: &LoadedTranscript,
+    session_id: Uuid,
+) -> Result<ReplayedSession, ResumeError> {
+    replay_captured_session_inner(transcript_path, source, loaded, session_id, false, true)
+}
+
+/// Project the complete display and model checkpoint from an already-routed
+/// immutable source without recording a session-resume event or executing
+/// deferred tools. Source identity requirements match [`replay_prepared_session`].
+/// This function performs no filesystem reads.
+pub fn project_transcript_checkpoint(
+    transcript_path: PathBuf,
+    source: &str,
+    loaded: &LoadedTranscript,
+    session_id: Uuid,
+) -> Result<ReplayedSession, ResumeError> {
+    replay_captured_session_inner(transcript_path, source, loaded, session_id, false, false)
 }
 
 /// App Chat checkpoints replay exact source units in both canonical and display
@@ -756,39 +791,69 @@ pub(crate) fn replay_persistent_app_chat_session(
     loaded: LoadedTranscript,
     session_id: Uuid,
 ) -> Result<ReplayedSession, ResumeError> {
-    replay_captured_session_inner(transcript_path, source, loaded, session_id, true)
+    replay_captured_session_inner(transcript_path, &source, &loaded, session_id, true, true)
 }
 
 fn replay_captured_session_inner(
     transcript_path: PathBuf,
-    source: String,
-    loaded: LoadedTranscript,
+    source: &str,
+    loaded: &LoadedTranscript,
     session_id: Uuid,
     persistent_app_chat: bool,
+    emit_resumed: bool,
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid_str);
+    let (messages, _) = session::jsonl::build_conversation_chain(loaded, &sid_str);
     if messages.is_empty() {
         return Err(session::jsonl::LoaderError::EmptyDirectory.into());
     }
     let (agent_type, agent_definition) =
-        session::jsonl::loader::agent_resume_state_from_loaded(&loaded, &sid_str);
+        session::jsonl::loader::agent_resume_state_from_loaded(loaded, &sid_str);
     let working_directory =
-        session::jsonl::loader::transcript_workspace_path(&transcript_path, &loaded)
+        session::jsonl::loader::transcript_workspace_path(&transcript_path, loaded)
             .map(PathBuf::from)
             .filter(|path| path.is_dir());
     let worktree_session = loaded.worktree_states.get(&sid_str).cloned();
-    let transcript_metadata = JsonlWriter::capture_session_metadata_source(&source, &sid_str);
-    let transcript_entries = loaded.messages_in_order;
+    let transcript_metadata = JsonlWriter::capture_session_metadata_source(source, &sid_str);
+    let transcript_entries = &loaded.messages_in_order;
+    let lineage_ids = messages
+        .iter()
+        .map(|row| row.uuid.as_str())
+        .collect::<HashSet<_>>();
+    let owns = |row: &JsonlMessage| {
+        Uuid::parse_str(
+            row.session_id
+                .strip_prefix("sess:")
+                .unwrap_or(&row.session_id),
+        )
+        .ok()
+            == Some(session_id)
+    };
     let (mut state, last_uuid, mut runtime_metadata) =
         build_state_from_jsonl_with_text_projection(session_id, &messages, !persistent_app_chat);
-    let display_entries = transcript_entries
+    // Rebuilding pre-compact display rows is independent of restoring model
+    // context and durable metadata. Keep those rows on disk until requested.
+    let display_start = if persistent_app_chat {
+        0
+    } else {
+        transcript_entries
+            .iter()
+            .rposition(|row| {
+                !row.is_sidechain
+                    && lineage_ids.contains(row.uuid.as_str())
+                    && is_compact_boundary(row)
+            })
+            .unwrap_or(0)
+    };
+    let display_entries = transcript_entries[display_start..]
         .iter()
-        .filter(|message| !message.is_sidechain)
+        .filter(|message| {
+            !message.is_sidechain && (owns(message) || lineage_ids.contains(message.uuid.as_str()))
+        })
         .cloned()
         .collect::<Vec<_>>();
     runtime_metadata.historical_read_fence_attachments = historical_read_fence_attachments(
-        &transcript_entries,
+        transcript_entries,
         messages
             .iter()
             .map(|message| message.uuid.clone())
@@ -801,11 +866,14 @@ fn replay_captured_session_inner(
     );
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
-    runtime_metadata.deferred_tools = deferred_tool_replays_from_messages(&transcript_entries);
+    // Off-chain hook attachments are intentional, but only the selected
+    // foreground owner may contribute pending work or resolve its tool IDs.
+    runtime_metadata.deferred_tools =
+        deferred_tool_replays_for_session(transcript_entries, session_id);
     // `load_session` returns only the resumable chain; prompt snapshots are
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
-    let profile_epoch = JsonlWriter::fixed_session_profile_from_source(&source, &sid_str)
+    let profile_epoch = JsonlWriter::fixed_session_profile_from_source(source, &sid_str)
         .map_err(ResumeError::Profile)?
         .instruction_epoch;
     if persistent_app_chat {
@@ -821,17 +889,31 @@ fn replay_captured_session_inner(
             .collect::<Vec<_>>();
         state.model_context_excluded_messages.extend(obsolete);
     }
-    let (snapshot, rendering) =
-        prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
+    let (snapshot, rendering) = prompt_state_for_epoch_from_source(source, &sid_str, profile_epoch);
     runtime_metadata.prompt_snapshot = snapshot;
     runtime_metadata.prompt_snapshot_epoch = Some(profile_epoch);
     runtime_metadata.context_rendering_hint = rendering;
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
-    tracing::info!(
-        event = RESUMED,
-        session_id = %sid_str,
-        message_count = messages.len() as u64,
+    if emit_resumed {
+        tracing::info!(
+            event = RESUMED,
+            session_id = %sid_str,
+            message_count = messages.len() as u64,
+        );
+    }
+    // A displayed result may answer a call before the compact boundary. Keep
+    // only the visible results, but resolve their tool identity in the owner's
+    // full source so structured client state survives that display cut.
+    let visible_results = display_entries
+        .iter()
+        .flat_map(tool_result_ids)
+        .collect::<HashSet<_>>();
+    let client_state_tool_results = client_state_tool_results_from_rows(
+        transcript_entries.iter().filter(|row| {
+            !row.is_sidechain && (owns(row) || lineage_ids.contains(row.uuid.as_str()))
+        }),
+        Some(&visible_results),
     );
     Ok(ReplayedSession {
         transcript_path,
@@ -851,10 +933,7 @@ fn replay_captured_session_inner(
         last_message_uuid: last_uuid,
         messages,
         runtime_metadata,
-        // Built from the DISPLAY entries, which is exactly the history the
-        // hosts lower for the client — and, being non-sidechain, is what makes
-        // this map main-chain-only.
-        client_state_tool_results: client_state_tool_results_from_messages(&display_entries),
+        client_state_tool_results,
     })
 }
 
@@ -1733,11 +1812,40 @@ fn restore_deferred_tool_state_from_history(
     replay_deferred_tool_state_in_order(deferral, ordered_rows, attachments);
 }
 
+fn deferred_records_by_delta(
+    attachments: &std::collections::HashMap<MessageId, Utf16JsonProjection>,
+) -> std::collections::HashMap<&str, Vec<MessageId>> {
+    let mut records_by_delta = std::collections::HashMap::<&str, Vec<MessageId>>::new();
+    // Keep each delta's record IDs in the same attachment-map traversal order
+    // as the former per-delta scan. A record may link several deltas, and a
+    // duplicate link must still admit that record only once for a given delta.
+    for (record_id, record) in attachments {
+        if record.string_at("/type") != Some("deferred_tools_record") {
+            continue;
+        }
+        for index in 0..record
+            .array_len("/nameOnlyAnnouncements")
+            .unwrap_or_default()
+        {
+            let Some(delta_uuid) = record.string_at(&format!("/nameOnlyAnnouncements/{index}"))
+            else {
+                continue;
+            };
+            let record_ids = records_by_delta.entry(delta_uuid).or_default();
+            if record_ids.last() != Some(record_id) {
+                record_ids.push(*record_id);
+            }
+        }
+    }
+    records_by_delta
+}
+
 fn replay_deferred_tool_state_in_order<'a>(
     deferral: &tool_api::DeferralState,
     ordered_rows: impl IntoIterator<Item = (MessageId, &'a Utf16JsonProjection)>,
     attachments: &std::collections::HashMap<MessageId, Utf16JsonProjection>,
 ) {
+    let records_by_delta = deferred_records_by_delta(attachments);
     let mut replayed_records = HashSet::new();
     for (message_id, attachment) in ordered_rows {
         if attachment.string_at("/type") == Some("deferred_tools_delta") {
@@ -1747,18 +1855,14 @@ fn replay_deferred_tool_state_in_order<'a>(
             // find the records that name this delta and replay their set-like
             // latch before folding the history-ordered delta row. The set
             // latch is commutative when multiple record sidecars name a row.
-            for (record_id, record) in attachments.iter().filter(|(_, payload)| {
-                payload.string_at("/type") == Some("deferred_tools_record")
-                    && (0..payload
-                        .array_len("/nameOnlyAnnouncements")
-                        .unwrap_or_default())
-                        .any(|index| {
-                            payload.string_at(&format!("/nameOnlyAnnouncements/{index}"))
-                                == Some(delta_uuid.as_str())
-                        })
-            }) {
-                if replayed_records.insert(*record_id) {
-                    deferral.replay_deferred_tool_state_attachment(record, &record_id.to_string());
+            if let Some(record_ids) = records_by_delta.get(delta_uuid.as_str()) {
+                for record_id in record_ids {
+                    if replayed_records.insert(*record_id) {
+                        deferral.replay_deferred_tool_state_attachment(
+                            &attachments[record_id],
+                            &record_id.to_string(),
+                        );
+                    }
                 }
             }
             deferral.replay_deferred_mcp_status_attachment(attachment);
@@ -1955,14 +2059,19 @@ fn prompt_ingress_sent_sets_from_payloads<'a>(
                 }
             }
             Some("skill_listing") => {
-                if let Some(names) = attachment.at_pointer("/names") {
-                    if let Some(count) = names.array_len() {
-                        for index in 0..count {
-                            if let Some(units) = names
-                                .get_index(index)
-                                .and_then(|value| value.code_units().map(|units| units.to_vec()))
-                            {
-                                skills.insert(units);
+                for (pointer, remove) in [("/removedNames", true), ("/names", false)] {
+                    if let Some(names) = attachment.at_pointer(pointer) {
+                        if let Some(count) = names.array_len() {
+                            for index in 0..count {
+                                if let Some(units) = names.get_index(index).and_then(|value| {
+                                    value.code_units().map(|units| units.to_vec())
+                                }) {
+                                    if remove {
+                                        skills.remove(&units);
+                                    } else {
+                                        skills.insert(units);
+                                    }
+                                }
                             }
                         }
                     }
@@ -2002,9 +2111,13 @@ fn hook_attachment_message_for_api(
                 content.string_units("")?,
             ))
         }
-        "auto_mode" | "auto_mode_exit" => {
-            // These NAr rows are durable model history as well as inputs to
-            // the next auto-mode producer (`latest_auto_mode`). Restore only
+        "auto_mode"
+        | "auto_mode_exit"
+        | "sandbox_instructions"
+        | "attention_budget"
+        | "proactivity" => {
+            // Policy NAr rows are durable model history as well as inputs to
+            // later delta producers. Restore only
             // the exact rendered cache; an absent, empty, or unsupported
             // rendering must not be reconstructed from the raw payload.
             if message
@@ -2204,7 +2317,64 @@ fn queued_task_notification_attachment_message_for_api(
     rendered_prompt_ingress_message_for_api(message, message_uuid)
 }
 
-/// Restore the provenance of model-visible hook attachments from their JSONL
+/// Resolve request-rendering provenance from a typed source, never its rendered
+/// text. Both hot and cold resume use this classification after selecting the
+/// adopted model history.
+fn mod_attachment_descriptor_from_payload(
+    attachment: &Utf16JsonProjection,
+) -> Option<(String, Value)> {
+    let kind = attachment.string_at("/type")?;
+    let is_task_notification = kind == "queued_command"
+        && attachment.string_at("/commandMode") == Some("task-notification");
+    let origin = if is_task_notification
+        || matches!(
+            kind,
+            "sandbox_instructions"
+                | "attention_budget"
+                | "environment"
+                | "model"
+                | "output_style_instructions"
+                | "language"
+                | "deferred_tools_delta"
+                | "mcp_instructions_delta"
+                | "mcp_dropped_tools_delta"
+                | "agent_listing_delta"
+                | "skill_listing"
+                | "nested_memory"
+                | "edited_text_file"
+                | "proactivity"
+                | "auto_mode"
+                | "auto_mode_exit"
+                | "total_tokens_reminder"
+                | "budget_usd"
+                | "unknown_command_fallback"
+        ) {
+        serde_json::json!({"kind":"engine"})
+    } else {
+        match kind {
+            "hook_additional_context"
+                if matches!(
+                    attachment.string_at("/hookName"),
+                    Some("prompt.submit" | "tool.call")
+                ) =>
+            {
+                let event = attachment.string_at("/hookName")?;
+                serde_json::json!({"kind":"plugin","event":event})
+            }
+            "hook_additional_context"
+            | "hook_success"
+            | "hook_stopped_continuation"
+            | "hook_blocking_error" => {
+                let event = attachment.string_at("/hookEvent")?;
+                serde_json::json!({"kind":"hook","event":event})
+            }
+            _ => return None,
+        }
+    };
+    Some((kind.to_owned(), origin))
+}
+
+/// Restore the provenance of model-visible attachments from their JSONL
 /// rows. The replay renderer gives the derived history message the attachment
 /// row's UUID, so the same key identifies its original text on later requests.
 fn mod_attachment_descriptors_from_messages(
@@ -2216,37 +2386,8 @@ fn mod_attachment_descriptors_from_messages(
             let uuid = Uuid::parse_str(&message.uuid).ok()?;
             hook_attachment_message_for_api(message, uuid)?;
             let attachment = attachment_projection(message)?;
-            let kind = attachment.string_at("/type")?;
-            let is_task_notification = kind == "queued_command"
-                && attachment.string_at("/commandMode") == Some("task-notification");
-            let origin = if is_task_notification
-                || matches!(
-                    kind,
-                    "environment"
-                        | "model"
-                        | "deferred_tools_delta"
-                        | "mcp_dropped_tools_delta"
-                        | "agent_listing_delta"
-                        | "skill_listing"
-                        | "edited_text_file"
-                        | "total_tokens_reminder"
-                        | "budget_usd"
-                        | "unknown_command_fallback"
-                ) {
-                serde_json::json!({"kind":"engine"})
-            } else {
-                let hook_name = attachment.string_at("/hookName");
-                if kind == "hook_additional_context"
-                    && matches!(hook_name, Some("prompt.submit" | "tool.call"))
-                {
-                    let event = hook_name?;
-                    serde_json::json!({"kind":"plugin","event":event})
-                } else {
-                    let event = attachment.string_at("/hookEvent")?;
-                    serde_json::json!({"kind":"hook","event":event})
-                }
-            };
-            Some((MessageId::from_uuid(uuid), (kind.to_owned(), origin)))
+            let descriptor = mod_attachment_descriptor_from_payload(attachment)?;
+            Some((MessageId::from_uuid(uuid), descriptor))
         })
         .collect()
 }
@@ -2331,6 +2472,13 @@ pub const CLIENT_STATE_TOOLS: &[&str] = &[
 pub fn client_state_tool_results_from_messages(
     messages: &[JsonlMessage],
 ) -> std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    client_state_tool_results_from_rows(messages.iter(), None)
+}
+
+fn client_state_tool_results_from_rows<'a>(
+    messages: impl Iterator<Item = &'a JsonlMessage>,
+    wanted: Option<&HashSet<&str>>,
+) -> std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection> {
     let mut names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     let mut results = std::collections::HashMap::new();
     for message in messages {
@@ -2349,7 +2497,9 @@ pub fn client_state_tool_results_from_messages(
                         block.get_property("id").and_then(JsonValueView::as_str),
                         block.get_property("name").and_then(JsonValueView::as_str),
                     ) {
-                        names.insert(id, name);
+                        if wanted.is_none_or(|ids| ids.contains(id)) {
+                            names.insert(id, name);
+                        }
                     }
                 }
             }
@@ -2361,6 +2511,9 @@ pub fn client_state_tool_results_from_messages(
         let (Some(only), None) = (ids.next(), ids.next()) else {
             continue;
         };
+        if wanted.is_some_and(|ids| !ids.contains(only)) {
+            continue;
+        }
         if !names
             .get(only)
             .is_some_and(|name| CLIENT_STATE_TOOLS.contains(name))
@@ -2372,11 +2525,42 @@ pub fn client_state_tool_results_from_messages(
     results
 }
 
-/// Extract all persisted deferred hook tools that have no later tool result.
+/// Extract deferred hook tools from an already scoped stream of messages.
+/// Resume entry points must use [`deferred_tool_replays_for_session`] instead.
 #[must_use]
 pub fn deferred_tool_replays_from_messages(
     messages: &[JsonlMessage],
 ) -> Vec<lingxi_core::host::DeferredToolReplay> {
+    scoped_deferred_tool_replays(messages, |_| true)
+}
+
+/// Extract unresolved main-thread hook tools owned by the resumed session.
+/// Foreign results and assistant origins cannot resolve or impersonate its work.
+#[must_use]
+pub fn deferred_tool_replays_for_session(
+    messages: &[JsonlMessage],
+    session_id: Uuid,
+) -> Vec<lingxi_core::host::DeferredToolReplay> {
+    scoped_deferred_tool_replays(messages, |row| {
+        !row.is_sidechain
+            && Uuid::parse_str(
+                row.session_id
+                    .strip_prefix("sess:")
+                    .unwrap_or(&row.session_id),
+            )
+            .ok()
+                == Some(session_id)
+    })
+}
+
+fn scoped_deferred_tool_replays(
+    messages: &[JsonlMessage],
+    include: impl Fn(&JsonlMessage) -> bool,
+) -> Vec<lingxi_core::host::DeferredToolReplay> {
+    let messages = messages
+        .iter()
+        .filter(|row| include(row))
+        .collect::<Vec<_>>();
     let mut resolved: HashSet<&str> = HashSet::new();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut deferred = Vec::new();
@@ -2466,6 +2650,9 @@ struct DeferredReplayOutcome {
     tool_results: Vec<ContentBlock>,
     injected_messages: Vec<(ConversationMessage, ToolUseId)>,
     had_context_modifiers: bool,
+    /// Exact raw sidecar for a completed call restored without re-execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_use_result_json: Option<String>,
 }
 
 async fn replay_deferred_tool_after_resume(
@@ -2552,11 +2739,25 @@ async fn replay_deferred_tool_after_resume(
         crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers)
     })
     .await?;
+    let raw_result = orch
+        .transcript
+        .tool_use_results
+        .lock()
+        .await
+        .get(tool_use_id.as_str())
+        .cloned();
+    let tool_use_result_json = raw_result
+        .map(|result| result.to_json_string())
+        .transpose()
+        .map_err(|error| {
+            crate::OrchestratorError::Internal(format!("deferred result sidecar: {error}"))
+        })?;
     Ok(DeferredReplayOutcome {
         tool_use_id,
         tool_results,
         injected_messages,
         had_context_modifiers,
+        tool_use_result_json,
     })
 }
 
@@ -3959,6 +4160,12 @@ impl ConversationOrchestrator {
         session_id: &str,
         active_epoch: u64,
     ) {
+        if let Some(session) = SessionId::parse_prefixed(session_id) {
+            self.restore_consumed_reminders_metadata(
+                session,
+                &JsonlWriter::capture_session_metadata_source(source, session_id),
+            );
+        }
         let (snapshot, rendering) =
             prompt_state_for_epoch_from_source(source, session_id, active_epoch);
         self.prompt_runtime
@@ -4004,6 +4211,23 @@ impl ConversationOrchestrator {
         *self.prompt_runtime.sent_agent_names.lock().await = agents;
         *self.prompt_runtime.sent_skill_names.lock().await = skills;
         restore_deferred_tool_state_from_history(self.tools.deferral(), &history, &attachments);
+        let active_ids = history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<HashSet<_>>();
+        let descriptors = history.iter().filter_map(|message| {
+            let id = message.id();
+            let attachment = attachments.get(&id)?;
+            Some((id, mod_attachment_descriptor_from_payload(attachment)?))
+        });
+        {
+            // Session activation cleared the old catalog. Retain registrations
+            // produced by accepted resumed-session hooks before this restore,
+            // and rebuild historical rows from their adopted raw sidecars.
+            let mut catalog = self.prompt_runtime.mod_persisted_attachments.lock().await;
+            catalog.retain(|id, _| active_ids.contains(id));
+            catalog.extend(descriptors);
+        }
         self.restore_file_read_state().await;
         self.restore_historical_read_fences_from_sidecars();
     }
@@ -4235,6 +4459,10 @@ impl ConversationOrchestrator {
             *orch.prompt_runtime.context_rendering_hint.lock().await =
                 replayed.runtime_metadata.context_rendering_hint;
             let history = orch.session.lock().await.history.clone();
+            orch.restore_consumed_reminders_metadata(
+                SessionId::from_uuid(session_id),
+                &replayed.transcript_metadata,
+            );
             orch.prompt_runtime.install_silent_clocks(
                 crate::prompt::silent_turn::restore_silent_clocks(&replayed.messages, &history),
             );
@@ -4318,6 +4546,41 @@ mod exact_history_string_tests {
         assert_eq!(loaded.malformed_line_count, 0);
         assert_eq!(loaded.messages_in_order.len(), 1);
         loaded.messages_in_order.pop().unwrap()
+    }
+
+    #[test]
+    fn prepared_replay_can_borrow_one_routed_source_repeatedly() {
+        let session_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let source = concat!(
+            r#"{"type":"fixed-session-mode","sessionId":"11111111-2222-3333-4444-555555555555","sessionMode":"code","instructionEpoch":0}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","message":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","role":"assistant","content":[{"type":"text","text":"你好😀\ud800"}]}}"#,
+        );
+        let loaded = session::jsonl::route_lines(source);
+        let path = PathBuf::from("/fixture/prepared-resume.jsonl");
+        let first = replay_prepared_session(path.clone(), source, &loaded, session_id).unwrap();
+        let second = replay_prepared_session(path.clone(), source, &loaded, session_id).unwrap();
+        let checkpoint =
+            project_transcript_checkpoint(path.clone(), source, &loaded, session_id).unwrap();
+        let owned = replay_captured_session(
+            path,
+            source.to_owned(),
+            session::jsonl::route_lines(source),
+            session_id,
+        )
+        .unwrap();
+        for replayed in [first, second, checkpoint] {
+            assert_eq!(replayed.state.history, owned.state.history);
+            assert_eq!(replayed.display_history, owned.display_history);
+            assert_eq!(replayed.transcript_metadata, owned.transcript_metadata);
+            assert_eq!(replayed.last_message_uuid, owned.last_message_uuid);
+            assert_eq!(
+                replayed.client_state_tool_results,
+                owned.client_state_tool_results
+            );
+        }
+        assert_eq!(loaded.messages_in_order.len(), 1);
+        assert_eq!(loaded.malformed_line_count, 0);
     }
 
     fn row(role: &str, content: &str) -> JsonlMessage {

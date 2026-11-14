@@ -4596,6 +4596,7 @@ fn contract_index_covers_every_dto() {
     };
     let _msg = MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: Some(client::protocol::message::VisualizationContextDto {
@@ -4705,6 +4706,7 @@ fn contract_index_covers_every_dto() {
             message_uuid: String::new(),
             message: MessageDto {
                 transcript_uuid: None,
+                skill_name: None,
                 sent_at_ms: None,
                 role: String::new(),
                 blocks: vec![],

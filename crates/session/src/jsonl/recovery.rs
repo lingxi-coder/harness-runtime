@@ -9,6 +9,11 @@ use std::collections::{HashMap, HashSet};
 
 type Messages<'a> = MessageIndex<'a>;
 
+#[cfg(test)]
+thread_local! {
+    static RECOVERY_OVERLAY_GROUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn same_extra_projection(left: &JsonlMessage, right: &JsonlMessage, key: &str) -> bool {
     match (
         left.extra.contains_property(key),
@@ -435,32 +440,38 @@ pub(super) fn recover_parallel_results(
                 }
             }
         }
-        let mut answered = chain_calls.clone();
-        for row in &direct {
-            answered.extend(tool_results(row));
-        }
-        indirect.sort_by_key(|row| rank(row, &overrides));
-        let after_group = group
-            .iter()
-            .map(|row| order.get(row.uuid.as_str()).copied().unwrap_or(0))
-            .max()
-            .unwrap_or(0)
-            + 1;
-        for row in indirect {
-            let ids = tool_results(row);
-            if !ids.iter().any(|id| {
-                !answered.contains(id)
-                    && call_sources
-                        .get(id)
-                        .copied()
-                        .flatten()
-                        .is_some_and(|owner| member_ids.contains(owner.uuid.as_str()))
-            }) {
-                continue;
+        if !indirect.is_empty() {
+            #[cfg(test)]
+            RECOVERY_OVERLAY_GROUPS.with(|groups| groups.set(groups.get() + 1));
+            // The selected chain is an immutable base. Only this group's
+            // additional answers belong in the overlay; sharing those extras
+            // with another batch would change its identity recovery rules.
+            let mut extra_answered: HashSet<_> =
+                direct.iter().flat_map(|row| tool_results(row)).collect();
+            indirect.sort_by_key(|row| rank(row, &overrides));
+            let after_group = group
+                .iter()
+                .map(|row| order.get(row.uuid.as_str()).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            for row in indirect {
+                let ids = tool_results(row);
+                if !ids.iter().any(|id| {
+                    !chain_calls.contains(id)
+                        && !extra_answered.contains(id)
+                        && call_sources
+                            .get(id)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|owner| member_ids.contains(owner.uuid.as_str()))
+                }) {
+                    continue;
+                }
+                extra_answered.extend(ids);
+                overrides.insert(row.uuid.as_str(), rank(row, &overrides).max(after_group));
+                direct.push(row);
             }
-            answered.extend(ids);
-            overrides.insert(row.uuid.as_str(), rank(row, &overrides).max(after_group));
-            direct.push(row);
         }
         recovered.extend(direct);
         for row in &recovered {
@@ -542,27 +553,49 @@ pub(super) fn recover_parallel_results(
     if spans.is_empty() {
         return chain;
     }
-    let mut output = Vec::new();
+    // Finish the borrowed recovery plan before consuming the selected chain.
+    // Only newly recovered source rows need copies; the chain already owns
+    // its exact projections and any parent/sidechain overlays applied by the
+    // DAG walk.
+    let spans: Vec<_> = spans
+        .into_iter()
+        .map(|span| {
+            let recovered: Vec<_> = span
+                .recovered
+                .into_iter()
+                .map(|row| (rank(row, &overrides), row.clone()))
+                .collect();
+            let anchored: HashMap<_, Vec<_>> = span
+                .anchored
+                .into_iter()
+                .map(|(uuid, tail)| (uuid, tail.into_iter().cloned().collect()))
+                .collect();
+            (span.start, span.end, recovered, anchored)
+        })
+        .collect();
+    let mut output = Vec::with_capacity(chain.len());
+    let mut original = chain.into_iter();
     let mut cursor = 0;
-    for span in spans {
-        output.extend_from_slice(&chain[cursor..=span.start]);
-        let mut recovered = span.recovered.into_iter().peekable();
-        for row in &chain[span.start + 1..span.end] {
+    for (start, end, recovered, mut anchored) in spans {
+        output.extend(original.by_ref().take(start + 1 - cursor));
+        let mut recovered = recovered.into_iter().peekable();
+        for row in original.by_ref().take(end - start - 1) {
             while recovered
                 .peek()
-                .is_some_and(|next| rank(next, &overrides) < order[row.uuid.as_str()])
+                .is_some_and(|(rank, _)| *rank < order[row.uuid.as_str()])
             {
-                output.push(recovered.next().unwrap().clone());
+                output.push(recovered.next().unwrap().1);
             }
-            output.push(row.clone());
-            if let Some(tail) = span.anchored.get(&row.uuid) {
-                output.extend(tail.iter().map(|row| (*row).clone()));
+            let tail = anchored.remove(&row.uuid);
+            output.push(row);
+            if let Some(tail) = tail {
+                output.extend(tail);
             }
         }
-        output.extend(recovered.cloned());
-        cursor = span.end;
+        output.extend(recovered.map(|(_, row)| row));
+        cursor = end;
     }
-    output.extend_from_slice(&chain[cursor..]);
+    output.extend(original);
     output
 }
 
@@ -606,5 +639,228 @@ pub(super) fn append_metadata_descendants(
                 .rev()
                 .copied(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::reader::route_lines;
+    use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use serde_json::{json, Value};
+
+    fn row(uuid: &str, parent: Option<&str>, kind: &str, id: &str, calls: &[&str]) -> Value {
+        let content = match kind {
+            "assistant" => calls
+                .iter()
+                .map(|call| json!({"type":"tool_use", "id":call, "name":"Read", "input":{}}))
+                .collect::<Vec<_>>(),
+            "user" if !calls.is_empty() => calls
+                .iter()
+                .map(|call| json!({"type":"tool_result", "tool_use_id":call, "content":"result"}))
+                .collect(),
+            _ => vec![json!({"type":"text", "text":"text"})],
+        };
+        json!({
+            "type":kind, "uuid":uuid, "parentUuid":parent, "sessionId":"session",
+            "cwd":"/workspace", "timestamp":"2026-11-12T00:00:00.000Z",
+            "message":{"id":id, "role":kind, "content":content},
+        })
+    }
+
+    fn load(rows: &[Value]) -> LoadedTranscript {
+        route_lines(
+            &rows
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    fn recover(loaded: &LoadedTranscript, chain: Vec<JsonlMessage>) -> Vec<JsonlMessage> {
+        let messages = loaded.messages_by_uuid();
+        let ordered = ordered_messages(loaded, &messages);
+        let mut seen = chain.iter().map(|row| row.uuid.clone()).collect();
+        recover_parallel_results(&messages, &ordered, chain, &mut seen)
+    }
+
+    fn select(loaded: &LoadedTranscript, ids: &[&str]) -> Vec<JsonlMessage> {
+        ids.iter()
+            .map(|id| loaded.message(id).unwrap().clone())
+            .collect()
+    }
+
+    fn ids(chain: &[JsonlMessage]) -> Vec<&str> {
+        chain.iter().map(|row| row.uuid.as_str()).collect()
+    }
+
+    fn bytes(row: &JsonlMessage) -> Vec<u8> {
+        crate::jsonl::exact_json::native_message_bytes(row).unwrap()
+    }
+
+    #[test]
+    fn long_serial_tool_history_keeps_no_span_fast_path_and_needs_no_overlays() {
+        let mut rows = vec![row("root", None, "user", "", &[])];
+        let mut parent = "root".to_owned();
+        for n in 0..512 {
+            let assistant = format!("assistant-{n}");
+            let result = format!("result-{n}");
+            let call = format!("call-{n}");
+            rows.push(row(
+                &assistant,
+                Some(&parent),
+                "assistant",
+                &format!("batch-{n}"),
+                &[&call],
+            ));
+            rows.push(row(&result, Some(&assistant), "user", "", &[&call]));
+            parent = result;
+        }
+        let loaded = load(&rows);
+        let chain = loaded.messages_in_order.clone();
+        let allocation = chain.as_ptr();
+        let expected = chain.iter().map(bytes).collect::<Vec<_>>();
+        RECOVERY_OVERLAY_GROUPS.with(|groups| groups.set(0));
+        let recovered = recover(&loaded, chain);
+        assert_eq!(
+            recovered.as_ptr(),
+            allocation,
+            "no recovery must return the original owned vector"
+        );
+        assert_eq!(recovered.iter().map(bytes).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            RECOVERY_OVERLAY_GROUPS.with(|groups| groups.get()),
+            0,
+            "ordinary serial groups must not allocate answered-ID overlays"
+        );
+    }
+
+    #[test]
+    fn recovered_parallel_suffix_moves_original_rows_and_preserves_exact_overlays() {
+        let mut rows = Vec::new();
+        let mut parent = None;
+        let mut prefix = Vec::new();
+        for n in 0..256 {
+            let uuid = format!("prefix-{n}");
+            rows.push(row(&uuid, parent.as_deref(), "user", "", &[]));
+            parent = Some(uuid.clone());
+            prefix.push(uuid);
+        }
+        rows.extend([
+            row("a1", parent.as_deref(), "assistant", "batch", &["call1"]),
+            row("a2", Some("a1"), "assistant", "batch", &["call2"]),
+            row("r1", Some("a1"), "user", "", &["call1"]),
+            row("r2", Some("a2"), "user", "", &["call2"]),
+            row("hook", Some("r2"), "attachment", "", &[]),
+            row("tail", Some("hook"), "system", "", &[]),
+            row("answer", Some("r1"), "assistant", "answer", &[]),
+        ]);
+        let mut loaded = load(&rows);
+        for message in &mut loaded.messages_in_order {
+            if message.uuid.starts_with("prefix") || message.uuid == "r2" {
+                message.message = Utf16JsonProjection::parse(r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"call2","content":"lone\ud800-\udfff"}]}"#).unwrap();
+                // Prefix rows still count as ordinary chain-owned rows; their
+                // exact outer payloads must move with the inner projection.
+                message.extra = Utf16JsonProjection::parse(
+                    r#"{"opaque":"outer\ud800","nested":{"b":2,"a":1}}"#,
+                )
+                .unwrap();
+                message.tool_use_result_projection =
+                    Some(Utf16JsonProjection::parse(r#"{"raw":"\udfff"}"#).unwrap());
+            }
+        }
+        loaded.reindex_messages();
+        let mut chain = prefix
+            .iter()
+            .map(|id| loaded.message(id).unwrap().clone())
+            .collect::<Vec<_>>();
+        chain.extend(select(&loaded, &["a1", "r1", "answer"]));
+        let a1 = chain.iter_mut().find(|row| row.uuid == "a1").unwrap();
+        a1.parent_uuid = Some("native-parent-overlay".into());
+        a1.is_sidechain = true;
+        let original: HashMap<_, _> = chain
+            .iter()
+            .map(|row| (row.uuid.clone(), (row.uuid.as_ptr(), bytes(row))))
+            .collect();
+        let recovered = recover(&loaded, chain);
+        let mut expected = prefix.iter().map(String::as_str).collect::<Vec<_>>();
+        expected.extend(["a1", "a2", "r1", "r2", "hook", "tail", "answer"]);
+        assert_eq!(ids(&recovered), expected);
+        for message in &recovered {
+            if let Some((allocation, expected)) = original.get(&message.uuid) {
+                assert_eq!(
+                    message.uuid.as_ptr(),
+                    *allocation,
+                    "original row {} was cloned",
+                    message.uuid
+                );
+                assert_eq!(
+                    bytes(message),
+                    *expected,
+                    "original row {} lost exact source data or overlays",
+                    message.uuid
+                );
+            } else {
+                assert_eq!(
+                    bytes(message),
+                    bytes(loaded.message(&message.uuid).unwrap())
+                );
+            }
+        }
+        assert_eq!(
+            recovered
+                .iter()
+                .find(|row| row.uuid == "r2")
+                .unwrap()
+                .message
+                .string_units("/content/0/content"),
+            Some(vec![108, 111, 110, 101, 0xd800, 45, 0xdfff])
+        );
+    }
+
+    #[test]
+    fn indirect_answer_overlay_is_ordered_and_isolated_between_groups() {
+        let loaded = load(&[
+            row("root", None, "user", "", &[]),
+            row("a", Some("root"), "assistant", "batch-a", &["call-a"]),
+            row("b", Some("a"), "assistant", "batch-b", &["call-b"]),
+            row("both", Some("root"), "user", "", &["call-a", "call-b"]),
+            row("duplicate-a", Some("root"), "user", "", &["call-a"]),
+            row("own-b", Some("root"), "user", "", &["call-b"]),
+            row("answer", Some("b"), "assistant", "answer", &[]),
+        ]);
+        let recovered = recover(&loaded, select(&loaded, &["root", "a", "b", "answer"]));
+        assert_eq!(ids(&recovered), ["root", "a", "both", "b", "own-b", "answer"], "a multi-ID answer is local to its accepted group; all its IDs suppress later answers only within that group");
+    }
+
+    #[test]
+    fn overlapping_recovery_spans_keep_original_order_and_row_allocations() {
+        let loaded = load(&[
+            row("root", None, "user", "", &[]),
+            row("a1", Some("root"), "assistant", "batch-a", &["a1"]),
+            row("b1", Some("a1"), "assistant", "batch-b", &["b1"]),
+            row("a2", Some("b1"), "assistant", "batch-a", &["a2"]),
+            row("a3", Some("a2"), "assistant", "batch-a", &["a3"]),
+            row("b2", Some("b1"), "assistant", "batch-b", &["b2"]),
+            row("ra", Some("a3"), "user", "", &["a3"]),
+            row("rb", Some("b2"), "user", "", &["b2"]),
+            row("answer", Some("a2"), "assistant", "answer", &[]),
+        ]);
+        let chain = select(&loaded, &["root", "a1", "b1", "a2", "answer"]);
+        let allocations: HashMap<_, _> = chain
+            .iter()
+            .map(|row| (row.uuid.clone(), row.uuid.as_ptr()))
+            .collect();
+        let recovered = recover(&loaded, chain);
+        assert_eq!(
+            ids(&recovered),
+            ["root", "a1", "b1", "a2", "a3", "b2", "ra", "rb", "answer"]
+        );
+        for row in recovered {
+            if let Some(allocation) = allocations.get(&row.uuid) {
+                assert_eq!(row.uuid.as_ptr(), *allocation);
+            }
+        }
     }
 }

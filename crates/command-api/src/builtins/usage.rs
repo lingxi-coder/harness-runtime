@@ -117,9 +117,7 @@ mod tests {
     async fn appends_provider_accounts_without_changing_the_summary() {
         use crate::model::SourceTextTestExt;
         use lingxi_core::host::orchestrator::AccountUsageRow;
-        use lingxi_core::host::provider_accounts::{
-            AccountAuthKind, AccountUsageAttribution,
-        };
+        use lingxi_core::host::provider_accounts::{AccountAuthKind, AccountUsageAttribution};
         let row = AccountUsageRow {
             attribution: Some(AccountUsageAttribution {
                 provider_id: "anthropic".into(),
@@ -147,7 +145,9 @@ mod tests {
         mock.set_cost_snapshot(snap);
         let h = UsageHandler::new(mock);
         match h.handle(&args()).await {
-            CommandResult::Done { display: Some(text) } => {
+            CommandResult::Done {
+                display: Some(text),
+            } => {
                 assert!(text.starts_with(&summary));
                 assert!(text.contains("\n\nUsage by provider account:"));
                 assert!(text.contains("key-a · api key · generation 1"));

@@ -2,7 +2,6 @@
 
 use super::*;
 use hooks::attachment::HookPublicationGuard;
-use hooks::ExactHookText;
 use std::sync::Arc;
 
 const NATIVE_MCP_POLICY_BLOCKED_ERRORS: [&str; 2] = [
@@ -863,12 +862,10 @@ async fn native_changed_file_route_is_unresolved(
 
 async fn attach_async_hook_response(
     orch: &ConversationOrchestrator,
-    text: ExactHookText,
+    message: ConversationMessage,
     hook_event: Option<String>,
     publication_guard: Option<Arc<dyn HookPublicationGuard>>,
 ) -> Option<crate::prompt::async_hook_response::GuardedAsyncHookReminder> {
-    let content = crate::prompt::async_hook_response::render_reminder(&[text])?;
-    let message = crate::prompt::async_hook_response::user_meta_message(MessageId::new(), content);
     let origin = hook_event.map(|event| serde_json::json!({"kind":"hook","event":event}));
     let attached = if let Some(origin) = origin {
         let work = orch.mod_prompt_attachment("async_hook_response", message, origin);
@@ -1223,6 +1220,11 @@ impl ConversationOrchestrator {
     > {
         use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 
+        let membership_generation = self
+            .prompt_runtime
+            .listing_membership_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+
         let Some(provider) = self.prompt_runtime.skill_listing.as_ref() else {
             return Ok(None);
         };
@@ -1233,14 +1235,15 @@ impl ConversationOrchestrator {
         let listing_snapshot = crate::prompt::skill_listing::preparation_snapshot(provider).await?;
         let entries = listing_snapshot.entries.clone();
 
-        // DELTA: keep only skills not yet sent this session, then record them as
-        // sent. Stable membership emits nothing; additions and withdrawals append
-        // small reminders while prior history remains cacheable.
-        let delta = {
-            let mut sent = self.prompt_runtime.sent_skill_names.lock().await;
-            crate::prompt::skill_listing_delta::collect(entries, &mut sent, |entry| {
+        // Build a candidate without acknowledging it. Initial ingress can still
+        // be blocked or cancelled before any catalog row reaches history.
+        let (before, after, delta) = {
+            let before = self.prompt_runtime.sent_skill_names.lock().await.clone();
+            let mut after = before.clone();
+            let delta = crate::prompt::skill_listing_delta::collect(entries, &mut after, |entry| {
                 entry.name.string_units("").expect("skill listing name")
-            })
+            });
+            (before, after, delta)
         };
         let new_entries = delta.added;
         let withdrawn = delta.withdrawn;
@@ -1313,6 +1316,12 @@ impl ConversationOrchestrator {
         let content_units = content_units.to_vec();
         let content = Source::root_string(String::from_utf16_lossy(&content_units), content_units)?;
         let names = Source::array(new_entries.iter().map(|entry| entry.name.clone()).collect())?;
+        let removed_names = Source::array(
+            withdrawn
+                .into_iter()
+                .map(|units| Source::root_string(String::from_utf16_lossy(&units), units))
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
         let skill_count = Source::parse(&new_entries.len().to_string())?;
         let is_initial = Source::from_serde_value(&serde_json::Value::Bool(is_initial))?;
         let payload = Source::object(vec![
@@ -1321,11 +1330,77 @@ impl ConversationOrchestrator {
             ("skillCount".into(), skill_count),
             ("isInitial".into(), is_initial),
             ("names".into(), names),
+            ("removedNames".into(), removed_names),
         ])?;
-        Ok(prompt_ingress_payload(
-            source_user_meta(MessageId::new(), rendered_source),
-            payload,
-        ))
+        let mut row =
+            prompt_ingress_payload(source_user_meta(MessageId::new(), rendered_source), payload);
+        if let Some(row) = &mut row {
+            let membership = crate::request_context::PromptListingMembership::Skills {
+                generation: membership_generation,
+                before,
+                after,
+            };
+            let scoped = crate::request_context::has_prompt_context();
+            if scoped {
+                row.message = self.retain_pending_step_reminder(
+                    "skill_listing",
+                    row.message.clone(),
+                    super::pending_reminders::Acknowledgement::Listing(membership.clone()),
+                );
+            }
+            if crate::request_context::stage_prompt_listing_membership(
+                row.message.id(),
+                membership.clone(),
+            ) {
+                // The initial durable batch now owns this same candidate identity.
+                self.discard_pending_step_reminder("skill_listing");
+            } else if !scoped {
+                self.commit_prompt_listing_membership(membership).await;
+            }
+        }
+        Ok(row)
+    }
+
+    pub(crate) async fn commit_prompt_listing_membership(
+        &self,
+        membership: crate::request_context::PromptListingMembership,
+    ) {
+        use crate::request_context::PromptListingMembership;
+        use std::sync::atomic::Ordering;
+        match membership {
+            PromptListingMembership::Skills {
+                generation,
+                before,
+                after,
+            } => {
+                let mut sent = self.prompt_runtime.sent_skill_names.lock().await;
+                if self
+                    .prompt_runtime
+                    .listing_membership_generation
+                    .load(Ordering::Acquire)
+                    == generation
+                    && *sent == before
+                {
+                    *sent = after;
+                }
+            }
+            PromptListingMembership::Agents {
+                generation,
+                before,
+                after,
+            } => {
+                let mut sent = self.prompt_runtime.sent_agent_names.lock().await;
+                if self
+                    .prompt_runtime
+                    .listing_membership_generation
+                    .load(Ordering::Acquire)
+                    == generation
+                    && *sent == before
+                {
+                    *sent = after;
+                }
+            }
+        }
     }
 
     pub(crate) async fn skill_listing_reminder_message(
@@ -1376,47 +1451,77 @@ impl ConversationOrchestrator {
     pub(crate) async fn async_hook_response_mod_messages(
         &self,
     ) -> Vec<crate::prompt::async_hook_response::GuardedAsyncHookReminder> {
-        let Some(provider) = self.prompt_runtime.async_hook_responses.as_ref() else {
-            return Vec::new();
+        use super::consumed_reminders::ConsumedReminder;
+        let staged = crate::request_context::has_prompt_context();
+        let session = self.session.lock().await.session_id;
+        let responses = if let Some(provider) = self.prompt_runtime.async_hook_responses.as_ref() {
+            provider.take_pending_with_events().await
+        } else {
+            Vec::new()
         };
-        let mut output = Vec::new();
+        // Retain raw messages synchronously after the destructive source drain,
+        // before Mods or any later preparation await can be cancelled.
+        let mut fresh = Vec::new();
         let mut without_event = Vec::new();
-        for response in provider.take_pending_with_events().await {
-            let Some(publication_guard) = response.publication_guard else {
-                if response.hook_event.is_none() {
-                    without_event.push(response.text);
-                    continue;
-                }
-                if let Some(reminder) =
-                    attach_async_hook_response(self, response.text, response.hook_event, None).await
-                {
-                    output.push(reminder);
-                }
-                continue;
-            };
-            if let Some(reminder) = attach_async_hook_response(
-                self,
-                response.text,
-                response.hook_event,
-                Some(publication_guard),
-            )
-            .await
+        for response in responses {
+            if response
+                .publication_guard
+                .as_ref()
+                .is_some_and(|guard| !guard.is_current())
             {
-                output.push(reminder);
+                continue;
             }
-        }
-        // Older providers cannot identify an origin event. Preserve their
-        // established aggregate reminder without fabricating a hook origin.
-        if let Some(content) = crate::prompt::async_hook_response::render_reminder(&without_event) {
-            output.push(
-                crate::prompt::async_hook_response::GuardedAsyncHookReminder {
+            if response.hook_event.is_none() && response.publication_guard.is_none() {
+                without_event.push(response.text);
+                continue;
+            }
+            if let Some(content) =
+                crate::prompt::async_hook_response::render_reminder(&[response.text])
+            {
+                fresh.push(ConsumedReminder {
+                    kind: "async_hook_response",
                     message: crate::prompt::async_hook_response::user_meta_message(
                         MessageId::new(),
                         content,
                     ),
-                    publication_guard: None,
-                },
-            );
+                    hook_event: response.hook_event,
+                    publication_guard: response.publication_guard,
+                });
+            }
+        }
+        // Keep the existing event-less aggregate's placement after event rows.
+        if let Some(content) = crate::prompt::async_hook_response::render_reminder(&without_event) {
+            fresh.push(ConsumedReminder {
+                kind: "async_hook_response",
+                message: crate::prompt::async_hook_response::user_meta_message(
+                    MessageId::new(),
+                    content,
+                ),
+                hook_event: None,
+                publication_guard: None,
+            });
+        }
+        let pending = if staged {
+            self.retain_consumed_reminders(session, fresh);
+            let pending = self.consumed_reminders_for_kind(session, "async_hook_response");
+            self.persist_consumed_reminders(session).await;
+            pending
+        } else {
+            fresh
+        };
+        let mut output = Vec::new();
+        for row in pending {
+            let id = row.message.id();
+            if let Some(reminder) =
+                attach_async_hook_response(self, row.message, row.hook_event, row.publication_guard)
+                    .await
+            {
+                output.push(reminder);
+            } else if staged {
+                // Explicit Mod suppression and retired source authority are
+                // terminal filtering decisions, not an undelivered retry.
+                self.acknowledge_consumed_reminder_ids(&[id]).await;
+            }
         }
         output
     }
@@ -1466,10 +1571,56 @@ impl ConversationOrchestrator {
             .collect()
     }
 
+    /// Only the initial ingress batch owns a replay cache. A new model step
+    /// must observe completions that arrived while its preceding tools ran.
+    pub(crate) async fn task_notification_reminder_messages_for_step(
+        &self,
+        in_human_turn: bool,
+    ) -> Vec<crate::request_context::PromptIngressAttachment> {
+        if crate::request_context::prompt_ingress_batch_finalized() {
+            self.task_notification_reminder_messages_in_turn(in_human_turn)
+                .await
+        } else {
+            crate::request_context::prompt_ingress_producer_rows_or_else(
+                self,
+                "task_notifications",
+                || async {
+                    self.task_notification_reminder_messages_in_turn(in_human_turn)
+                        .await
+                },
+            )
+            .await
+        }
+    }
+
     pub(crate) async fn task_notification_reminder_messages_in_turn(
         &self,
         in_human_turn: bool,
     ) -> Vec<crate::request_context::PromptIngressAttachment> {
+        let session_id = {
+            let session = self.session.lock().await;
+            let mut owner = self
+                .prompt_runtime
+                .task_notification_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut pending = self
+                .prompt_runtime
+                .pending_task_notification_reminders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *owner != Some(session.session_id) {
+                pending.clear();
+                *owner = Some(session.session_id);
+            }
+            pending.retain(|row| {
+                !session
+                    .history
+                    .iter()
+                    .any(|message| message.id() == row.message.id())
+            });
+            session.session_id
+        };
         let Some(provider) = self.prompt_runtime.task_notifications.as_ref() else {
             return Vec::new();
         };
@@ -1529,7 +1680,23 @@ impl ConversationOrchestrator {
                     .expect("task notification rendering yields a system-role cache"),
             );
         }
-        rows
+        let output = {
+            let mut pending = self
+                .prompt_runtime
+                .pending_task_notification_reminders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.extend(rows);
+            pending.clone()
+        };
+        if crate::request_context::has_prompt_context() {
+            // The task producer has advanced, but memory rendering still has
+            // asynchronous filesystem work ahead. Commit its raw queue while
+            // this source publication remains protected from cancellation.
+            self.retain_unrendered_memory_updates(session_id);
+            self.persist_consumed_reminders(session_id).await;
+        }
+        output
     }
 
     /// Cap on [`Self::pending_memory_updates`]; oldest entries are dropped.
@@ -1615,81 +1782,121 @@ impl ConversationOrchestrator {
     ///
     /// Silent in a stock session: nothing queues unless a `dream` task completes.
     pub(crate) async fn memory_update_reminder_messages(&self) -> Vec<ConversationMessage> {
+        use super::consumed_reminders::ConsumedReminder;
+        let staged = crate::request_context::has_prompt_context();
+        let session = self.session.lock().await.session_id;
         let native_updates = self.native_memory_update_reminders().await;
-        let pending: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = {
-            let mut queue = self
-                .prompt_runtime
-                .pending_memory_updates
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::take(&mut *queue)
-        };
-        if pending.is_empty() {
-            return native_updates;
+        let mut fresh = Vec::new();
+        if staged {
+            self.retain_consumed_reminders(
+                session,
+                native_updates
+                    .into_iter()
+                    .map(ConsumedReminder::memory)
+                    .collect(),
+            );
+            // Native sources already advanced. Checkpoint before scanning the
+            // legacy directory so cancelling that I/O cannot lose their rows.
+            self.persist_consumed_reminders(session).await;
+        } else {
+            fresh.extend(native_updates);
         }
-        let Some(memdir) = self
+        let has_pending = !self
             .prompt_runtime
-            .memory_prefetch
-            .as_ref()
-            .and_then(|p| p.user_memdir())
-        else {
-            return native_updates;
-        };
-
-        // Which memdir files moved since the last scan.
-        let since = self
-            .prompt_runtime
-            .last_memory_scan_ms
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
-        self.prompt_runtime
-            .last_memory_scan_ms
-            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
-        let mut paths: Vec<String> = Vec::new();
-        if let Ok(mut entries) = tokio::fs::read_dir(&memdir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                let Ok(meta) = entry.metadata().await else {
-                    continue;
-                };
-                if !meta.is_file() {
-                    continue;
+            .pending_memory_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        if has_pending {
+            if let Some(memdir) = self
+                .prompt_runtime
+                .memory_prefetch
+                .as_ref()
+                .and_then(|p| p.user_memdir())
+            {
+                // Scan while the producer queue and cursor are still intact.
+                // Only after all awaits finish may we consume their snapshot.
+                let since = self
+                    .prompt_runtime
+                    .last_memory_scan_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let now_ms =
+                    tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+                let mut paths = Vec::new();
+                if let Ok(mut entries) = tokio::fs::read_dir(&memdir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        let Ok(meta) = entry.metadata().await else {
+                            continue;
+                        };
+                        if !meta.is_file() {
+                            continue;
+                        }
+                        let Ok(modified) = meta.modified() else {
+                            continue;
+                        };
+                        if tool_api::read_file_state::mtime_ms_floor(modified) > since {
+                            paths.push(path.to_string_lossy().into_owned());
+                        }
+                    }
                 }
-                let Ok(modified) = meta.modified() else {
-                    continue;
+                paths.sort();
+                let in_context = {
+                    let state = self
+                        .prompt_runtime
+                        .read_state_map
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::prompt::memory_update::select_in_context_paths(&paths, |p| {
+                        state.contains(std::path::Path::new(p))
+                    })
                 };
-                if tool_api::read_file_state::mtime_ms_floor(modified) > since {
-                    paths.push(path.to_string_lossy().into_owned());
+                let pending = std::mem::take(
+                    &mut *self
+                        .prompt_runtime
+                        .pending_memory_updates
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                self.prompt_runtime
+                    .last_memory_scan_ms
+                    .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                for queued in pending {
+                    let body = crate::prompt::memory_update::render_memory_update(
+                        &crate::prompt::memory_update::MemoryUpdate {
+                            source: queued.source,
+                            summary: queued.summary,
+                            paths: paths.clone(),
+                            in_context_paths: in_context.clone(),
+                        },
+                    );
+                    fresh.push(source_user_meta(
+                        MessageId::new(),
+                        wrap_system_reminder_source(&body),
+                    ));
                 }
+            } else {
+                // No memory directory means this legacy surfacing channel is disabled.
+                self.prompt_runtime
+                    .pending_memory_updates
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
             }
         }
-        paths.sort();
-
-        let in_context = {
-            let guard = self
-                .prompt_runtime
-                .read_state_map
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            crate::prompt::memory_update::select_in_context_paths(&paths, |p| {
-                guard.contains(std::path::Path::new(p))
-            })
-        };
-
-        native_updates
-            .into_iter()
-            .chain(pending.into_iter().map(|queued| {
-                let body = crate::prompt::memory_update::render_memory_update(
-                    &crate::prompt::memory_update::MemoryUpdate {
-                        source: queued.source,
-                        summary: queued.summary,
-                        paths: paths.clone(),
-                        in_context_paths: in_context.clone(),
-                    },
-                );
-                source_user_meta(MessageId::new(), wrap_system_reminder_source(&body))
-            }))
-            .collect()
+        if !staged {
+            return fresh;
+        }
+        self.retain_consumed_reminders(
+            session,
+            fresh.into_iter().map(ConsumedReminder::memory).collect(),
+        );
+        // No await separates queue consumption from replacing its checkpoint
+        // with the rendered rows (or explicit disabled-channel retirement).
+        self.retain_unrendered_memory_updates(session);
+        let pending = self.consumed_reminders_for_kind(session, "memory_update");
+        self.persist_consumed_reminders(session).await;
+        pending.into_iter().map(|row| row.message).collect()
     }
 
     /// Read the current reminder/tool gates without advancing its cadence.
@@ -2246,6 +2453,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ) -> Option<crate::request_context::PromptIngressAttachment> {
         use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 
+        let membership_generation = self
+            .prompt_runtime
+            .listing_membership_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+
         // Gate on the Agent tool being available this turn (attachments.ts:1497).
         // This is the ONLY structural gate in the binary's `aLe` — it does NOT
         // gate on a wired
@@ -2289,12 +2501,9 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         // longer in the listing — dropping them from the announced set so a
         // type that returns is re-announced (oracle `s.delete(p)`).
         // `is_initial` is captured BEFORE inserting (TS `announced.size === 0`).
-        let (is_initial, new_entries, removed_types): (
-            bool,
-            Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry>,
-            Vec<String>,
-        ) = {
-            let mut sent = self.prompt_runtime.sent_agent_names.lock().await;
+        let (before, after, is_initial, new_entries, removed_types) = {
+            let before = self.prompt_runtime.sent_agent_names.lock().await.clone();
+            let mut sent = before.clone();
             let is_initial = sent.is_empty();
             let current: std::collections::HashSet<String> =
                 entries.iter().map(|e| e.agent_type.clone()).collect();
@@ -2316,7 +2525,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             for e in &delta {
                 sent.insert(e.agent_type.clone());
             }
-            (is_initial, delta, removed)
+            (before, sent, is_initial, delta, removed)
         };
         if new_entries.is_empty() && removed_types.is_empty() {
             return None;
@@ -2425,10 +2634,33 @@ message with multiple tool uses so they run concurrently."
             ("showConcurrencyNote".into(), show_concurrency_note),
         ])
         .ok()?;
-        prompt_ingress_payload(
+        let mut row = prompt_ingress_payload(
             ConversationMessage::user_meta(MessageId::new(), content),
             payload,
-        )
+        )?;
+        let membership = crate::request_context::PromptListingMembership::Agents {
+            generation: membership_generation,
+            before,
+            after,
+        };
+        let scoped = crate::request_context::has_prompt_context();
+        if scoped {
+            row.message = self.retain_pending_step_reminder(
+                "agent_listing_delta",
+                row.message.clone(),
+                super::pending_reminders::Acknowledgement::Listing(membership.clone()),
+            );
+        }
+        if crate::request_context::stage_prompt_listing_membership(
+            row.message.id(),
+            membership.clone(),
+        ) {
+            // The initial durable batch now owns this same candidate identity.
+            self.discard_pending_step_reminder("agent_listing_delta");
+        } else if !scoped {
+            self.commit_prompt_listing_membership(membership).await;
+        }
+        Some(row)
     }
 
     pub(crate) async fn agent_listing_reminder_message(&self) -> Option<ConversationMessage> {
@@ -2540,10 +2772,11 @@ message with multiple tool uses so they run concurrently."
 
     async fn route_still_resolves_to_cached_file(
         &self,
+        reader: &dyn tool_api::Tool,
         route_spellings: &[std::path::PathBuf],
         cached_path: &std::path::Path,
         cancel: Option<&lingxi_core::host::CancellationToken>,
-    ) -> bool {
+    ) -> Option<std::path::PathBuf> {
         // Cache keys can be lexical routes (`/var/...`) or canonical paths
         // (`/private/var/...`), depending on the current producer. Compare the
         // resolved cache identity to each CAPTURED route's resolved identity;
@@ -2551,24 +2784,28 @@ message with multiple tool uses so they run concurrently."
         let Some(cached_result) =
             cancellable_read_io(cancel, tokio::fs::canonicalize(cached_path)).await
         else {
-            return false;
+            return None;
         };
         let Ok(cached_identity) = cached_result else {
-            return false;
+            return None;
         };
         for spelling in route_spellings {
             if !spelling.is_absolute() {
                 continue;
             }
-            let Some(result) = cancellable_read_io(cancel, tokio::fs::canonicalize(spelling)).await
+            let Ok(io_spelling) = reader.read_state_io_path(spelling) else {
+                continue;
+            };
+            let Some(result) =
+                cancellable_read_io(cancel, tokio::fs::canonicalize(io_spelling)).await
             else {
-                return false;
+                return None;
             };
             if result.is_ok_and(|resolved| resolved == cached_identity) {
-                return true;
+                return Some(cached_identity);
             }
         }
-        false
+        None
     }
 
     /// REM-05 — the per-turn `edited_text_file` (changed-files) reminders: one
@@ -2608,7 +2845,9 @@ message with multiple tool uses so they run concurrently."
     ///    seeds marked outside the current model-context set. LingXi records a
     ///    source route when each real producer inserts those entries; only
     ///    route-less, non-model/non-rendered seeds are excluded.
-    /// 2. **Skip partial reads** — `a.offset!==void 0||a.limit!==void 0`.
+    /// 2. **Skip partial reads** — `a.offset!==void 0||a.limit!==void 0`, after
+    ///    dropping missing routes. LingXi also cleans up ranged snapshots so a
+    ///    successful Read refresh cannot leave a deleted symlink in the cache.
     ///    After the actual Read call, Native separately suppresses a newly-read
     ///    text result only when `truncatedByTokenCap` is true. Cached
     ///    `is_partial_view` is not a pre-read filter.
@@ -2632,9 +2871,78 @@ message with multiple tool uses so they run concurrently."
     /// the Native nested `Read` call side effect. No reminder-specific cache
     /// setter is used.
     ///
+    pub(crate) async fn changed_files_reminders_for_delivery(
+        &self,
+        cancel: Option<&lingxi_core::host::CancellationToken>,
+    ) -> Vec<crate::request_context::PromptIngressAttachment> {
+        let retained_budget = self
+            .prompt_runtime
+            .pending_changed_file_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|row| {
+                row.payload
+                    .at_pointer("/snippet")?
+                    .code_units()
+                    .map(<[u16]>::len)
+            })
+            .fold(0usize, usize::saturating_add);
+        let fresh = self
+            .changed_files_reminder_messages_with_budget(cancel, retained_budget)
+            .await;
+        // No await between producing stable rows and retaining them. The Read
+        // publication guard covers this point even before initial assembly.
+        let mut pending = self
+            .prompt_runtime
+            .pending_changed_file_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.extend(fresh);
+        pending.clone()
+    }
+
+    pub(crate) fn complete_changed_file_reminders(
+        &self,
+        rows: &[crate::request_context::PromptIngressAttachment],
+    ) {
+        let delivered_ids = rows
+            .iter()
+            .map(|row| row.message.id())
+            .collect::<std::collections::HashSet<_>>();
+        self.prompt_runtime
+            .pending_task_notification_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|row| !delivered_ids.contains(&row.message.id()));
+        let mut pending = self
+            .prompt_runtime
+            .pending_changed_file_reminders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.is_empty() {
+            return;
+        }
+        let delivered = rows
+            .iter()
+            .map(|row| row.message.id())
+            .collect::<std::collections::HashSet<_>>();
+        pending.retain(|row| !delivered.contains(&row.message.id()));
+    }
+
+    #[cfg(test)]
     pub(crate) async fn changed_files_reminder_messages(
         &self,
         cancel: Option<&lingxi_core::host::CancellationToken>,
+    ) -> Vec<crate::request_context::PromptIngressAttachment> {
+        self.changed_files_reminder_messages_with_budget(cancel, 0)
+            .await
+    }
+
+    async fn changed_files_reminder_messages_with_budget(
+        &self,
+        cancel: Option<&lingxi_core::host::CancellationToken>,
+        retained_budget: usize,
     ) -> Vec<crate::request_context::PromptIngressAttachment> {
         // (1) Snapshot the registry without touching recency. Keep each current
         // source route alongside the cache key; live deny rules may name
@@ -2642,7 +2950,8 @@ message with multiple tool uses so they run concurrently."
         // changed-file Read.
         let candidates: Vec<(
             std::path::PathBuf,
-            tool_api::read_file_state::ReadFileEntry,
+            std::sync::Arc<tool_api::read_file_state::ReadFileEntry>,
+            Option<std::sync::Arc<[u16]>>,
             Vec<Vec<std::path::PathBuf>>,
         )> = {
             let guard = self
@@ -2654,9 +2963,9 @@ message with multiple tool uses so they run concurrently."
                 .changed_file_candidate_keys()
                 .into_iter()
                 .filter_map(|p| {
-                    guard
-                        .peek(&p)
-                        .map(|entry| (p.clone(), entry, guard.requested_path_groups(&p)))
+                    guard.peek_snapshot_with_units(&p).map(|(entry, units)| {
+                        (p.clone(), entry, units, guard.requested_path_groups(&p))
+                    })
                 })
                 .collect()
         };
@@ -2672,42 +2981,114 @@ message with multiple tool uses so they run concurrently."
             return Vec::new();
         };
         let read_tool_name = read_tool.name().to_string();
-        let messages = self.session.lock().await.model_context_history();
-        let mut base_read_context =
-            crate::turn_loop::streaming_tool_context_base(self, messages).await;
-        base_read_context.cancel = cancel.cloned();
+        let mut base_read_context: Option<tool_api::context::ToolUseContext> = None;
         // Native `sy(context)` uses these three current permission facts. A
         // real policy snapshot supplies its live facts; a transport-only gate
         // explicitly reports inactive facts.
         let policy_snapshot = self.perms.read_path_policy_snapshot();
         let native_path_recheck = policy_snapshot.facts().requires_path_recheck();
 
-        let mut changed: Vec<crate::prompt::changed_files::ChangedFile> = Vec::new();
-        for (path, entry, requested_path_groups) in candidates {
-            if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
-                return Vec::new();
+        // Host seeds may retain spellings that Read normalizes to the same
+        // logical key. Once Read publishes that key, retire only the original
+        // alias snapshots so their older mtimes cannot inject the notice again.
+        let mut normalized_aliases = std::collections::HashMap::<_, Vec<_>>::new();
+        for (path, entry, _, _) in &candidates {
+            let requested = read_tool.read_state_request_path(path);
+            if requested.as_os_str() != path.as_os_str() {
+                normalized_aliases
+                    .entry(requested)
+                    .or_default()
+                    .push((path.clone(), entry.clone()));
             }
-            // (2) Native skips only entries previously read with an offset/limit.
-            if entry.offset.is_some() || entry.limit.is_some() {
+        }
+        let normalized_baselines = candidates
+            .iter()
+            .filter(|(path, _, _, _)| normalized_aliases.contains_key(path))
+            .map(|(path, entry, units, _)| (path.clone(), (entry.clone(), units.clone())))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let mut changed: Vec<crate::prompt::changed_files::ChangedFile> = Vec::new();
+        'files: for (path, original_entry, original_units, requested_path_groups) in candidates {
+            if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                break;
+            }
+            if !self
+                .prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .peek_snapshot(&path)
+                .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &original_entry))
+            {
                 continue;
             }
-            // (3) mtime gate; a vanished file drops its entry.
+            // A raw host seed may describe a different on-disk spelling. It
+            // cannot replace the existing complete observation of the logical
+            // file Read will actually open, including its timestamp and diff.
+            let logical_path = read_tool.read_state_request_path(&path);
+            let (entry, entry_units) = normalized_baselines
+                .get(&logical_path)
+                .filter(|(entry, _)| {
+                    entry.offset.unwrap_or(1) <= 1
+                        && !entry.is_partial_view
+                        && entry.limit.is_none_or(|limit| {
+                            !entry.content.is_empty()
+                                && (entry.content.matches('\n').count() as u64 + 1) < limit
+                        })
+                })
+                .cloned()
+                .unwrap_or_else(|| (original_entry.clone(), original_units));
+            // Drop vanished routes before filtering ranged snapshots: Read
+            // records an offset even when refreshing a complete file.
+            // The cache key is model-owned; only its registered reader knows
+            // whether it names a guest route rather than a host pathname.
+            let Ok(io_path) = read_tool.read_state_io_path(&path) else {
+                continue;
+            };
             let Some(metadata_result) =
-                cancellable_read_io(cancel, tokio::fs::metadata(&path)).await
+                cancellable_read_io(cancel, tokio::fs::metadata(&io_path)).await
             else {
-                return Vec::new();
+                break;
             };
             let mtime_ms = match metadata_result.and_then(|m| m.modified()) {
                 Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::NotFound {
                         if let Ok(mut guard) = self.prompt_runtime.read_state_map.lock() {
-                            let _ = guard.remove(&path);
+                            if guard.peek_snapshot(&path).is_some_and(|current| {
+                                std::sync::Arc::ptr_eq(&current, &original_entry)
+                            }) {
+                                let _ = guard.remove(&path);
+                            }
                         }
                     }
                     continue;
                 }
             };
+            // Partial views still suppress content reads and reminders; their
+            // presence must not suppress the missing-route cleanup above.
+            if entry.offset.is_some() || entry.limit.is_some() {
+                // A complete logical Read already owns this observation. Its
+                // offset-one shape follows Native's no-reminder branch; retire
+                // only the unchanged raw seed folded into that same key.
+                if !std::sync::Arc::ptr_eq(&entry, &original_entry) {
+                    let mut state = self
+                        .prompt_runtime
+                        .read_state_map
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if state
+                        .peek_snapshot(&logical_path)
+                        .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &entry))
+                        && state.peek_snapshot(&path).is_some_and(|current| {
+                            std::sync::Arc::ptr_eq(&current, &original_entry)
+                        })
+                    {
+                        state.remove(&path);
+                    }
+                }
+                continue;
+            }
             if mtime_ms <= entry.mtime_ms {
                 continue;
             }
@@ -2733,7 +3114,7 @@ message with multiple tool uses so they run concurrently."
                         native_changed_file_read_path_set(&source_spelling, cancel).await
                     else {
                         if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
-                            return Vec::new();
+                            break 'files;
                         }
                         continue;
                     };
@@ -2741,6 +3122,28 @@ message with multiple tool uses so they run concurrently."
                 } else {
                     vec![source_spelling.clone()]
                 };
+                // A guest source is not resolvable by the host filesystem.
+                // Expand its current translated route too, so a live deny on
+                // an intermediate or final host landing cannot be skipped.
+                let host_spellings = if io_path == source_spelling {
+                    check_spellings.clone()
+                } else if native_path_recheck {
+                    let Some(spellings) = native_changed_file_read_path_set(&io_path, cancel).await
+                    else {
+                        if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                            break 'files;
+                        }
+                        continue;
+                    };
+                    spellings
+                } else {
+                    vec![io_path.clone()]
+                };
+                for spelling in &host_spellings {
+                    if !check_spellings.contains(spelling) {
+                        check_spellings.push(spelling.clone());
+                    }
+                }
                 for spelling in route_spellings.iter().chain(std::iter::once(&path)) {
                     if !check_spellings.contains(spelling) {
                         check_spellings.push(spelling.clone());
@@ -2752,8 +3155,9 @@ message with multiple tool uses so they run concurrently."
                         let check = policy_snapshot.check_path(spelling);
                         if check.denied_by_read_rule
                             == lingxi_core::host::permission_gate::ReadPathPolicyMatch::Match
-                            || check.held_outside
-                                == lingxi_core::host::permission_gate::ReadPathPolicyMatch::Match
+                            || (host_spellings.contains(spelling)
+                                && check.held_outside
+                                    == lingxi_core::host::permission_gate::ReadPathPolicyMatch::Match)
                         {
                             route_denied = true;
                             break;
@@ -2766,19 +3170,39 @@ message with multiple tool uses so they run concurrently."
                         // missing data as either a Native allow or deny.
                     }
                 }
-                let route_still_resolves = self
-                    .route_still_resolves_to_cached_file(&route_spellings, &path, cancel)
-                    .await;
                 if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
-                    return Vec::new();
+                    break 'files;
                 }
-                if route_denied || !route_still_resolves {
+                if route_denied {
                     continue;
                 }
-                reminder_route = Some(source_spelling);
+                let route_still_resolves = self
+                    .route_still_resolves_to_cached_file(
+                        read_tool.as_ref(),
+                        &route_spellings,
+                        &io_path,
+                        cancel,
+                    )
+                    .await;
+                if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                    break 'files;
+                }
+                let Some(approved_target) = route_still_resolves else {
+                    continue;
+                };
+                // The resolver itself can race the earlier spelling scan. Check
+                // the exact captured landing, then carry it through Read's open.
+                if native_path_recheck {
+                    let check = policy_snapshot.check_path(&approved_target);
+                    use lingxi_core::host::permission_gate::ReadPathPolicyMatch::Match;
+                    if check.denied_by_read_rule == Match || check.held_outside == Match {
+                        continue;
+                    }
+                }
+                reminder_route = Some((source_spelling, approved_target));
                 break;
             }
-            let Some(reminder_path) = reminder_route else {
+            let Some((reminder_path, approved_target)) = reminder_route else {
                 continue;
             };
             // (4) Invoke the current registered Read tool directly, matching
@@ -2795,7 +3219,17 @@ message with multiple tool uses so they run concurrently."
             {
                 continue;
             }
-            let read_context = base_read_context.clone();
+            if base_read_context.is_none() {
+                let messages = self.session.lock().await.model_context_history();
+                let mut context =
+                    crate::turn_loop::streaming_tool_context_base(self, messages).await;
+                context.cancel = cancel.cloned();
+                base_read_context = Some(context);
+            }
+            let read_context = base_read_context
+                .as_ref()
+                .expect("Read context initialized")
+                .clone();
             if read_tool
                 .validate_input(&input, &read_context)
                 .await
@@ -2804,24 +3238,51 @@ message with multiple tool uses so they run concurrently."
                 continue;
             }
             if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
-                return Vec::new();
+                break;
             }
+            crate::request_context::mark_changed_files_publication_started();
             let (progress_tx, _progress_rx) = tool_api::progress_channel();
-            let read_result = match read_tool.call(input, read_context, progress_tx).await {
+            let read_result = match tool_api::read_file_state::with_reminder_read_target(
+                reminder_path.clone(),
+                approved_target,
+                read_tool.call(input, read_context, progress_tx),
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(_) => {
                     if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
-                        return Vec::new();
+                        break;
                     }
                     continue;
                 }
             };
-            if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
-                return Vec::new();
+            let published_path = read_tool.read_state_request_path(&reminder_path);
+            if let Some(aliases) = normalized_aliases.get(&published_path) {
+                let mut state = self
+                    .prompt_runtime
+                    .read_state_map
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state
+                    .peek_snapshot(&published_path)
+                    .is_some_and(|published| published.from_read && published.mtime_ms >= mtime_ms)
+                {
+                    for (alias, original) in aliases {
+                        if state
+                            .peek_snapshot(alias)
+                            .is_some_and(|current| std::sync::Arc::ptr_eq(&current, original))
+                        {
+                            state.remove(alias);
+                        }
+                    }
+                }
             }
             // The actual Read call owns cache/state updates. Consume only the
             // Native changed-file result kinds; `new_messages` from this inner
-            // call are intentionally not forwarded.
+            // call are intentionally not forwarded. A successful Read has
+            // already published its state, so retain its notice even if cancel
+            // arrived just afterward. The next iteration stops further work.
             match read_result.data.string_at("/type") {
                 Some("text") => {
                     let Ok(file) = read_result.data.subprojection("/file") else {
@@ -2836,16 +3297,43 @@ message with multiple tool uses so they run concurrently."
                     let Some(fresh) = file.string_at("/content") else {
                         continue;
                     };
-                    if fresh == entry.content {
+                    let Some(fresh_units) = file
+                        .at_pointer("/content")
+                        .and_then(|value| value.code_units())
+                    else {
+                        continue;
+                    };
+                    // Read has already replaced its registry slot. Compare
+                    // the exact old observation captured with `entry`, never
+                    // the refreshed slot or lossy U+FFFD display strings.
+                    if entry_units.as_deref().map_or_else(
+                        || entry.content.encode_utf16().eq(fresh_units.iter().copied()),
+                        |before| before == fresh_units,
+                    ) {
                         continue;
                     }
                     // (5) diff.
-                    let snippet =
-                        crate::prompt::changed_files::render_snippet(&entry.content, fresh, false);
-                    if snippet.is_empty() {
+                    let snippet = if entry_units.is_none()
+                        && fresh.encode_utf16().eq(fresh_units.iter().copied())
+                    {
+                        // Preserve the ordinary file path and rendered prefix
+                        // byte-for-byte without copying its body into UTF-16.
+                        crate::prompt::changed_files::render_snippet(&entry.content, fresh, false)
+                            .into()
+                    } else {
+                        let before = entry_units.unwrap_or_else(|| {
+                            entry.content.encode_utf16().collect::<Vec<_>>().into()
+                        });
+                        crate::prompt::changed_files::render_snippet_units(
+                            &before,
+                            fresh_units,
+                            false,
+                        )
+                    };
+                    if snippet.string_at("") == Some("") {
                         continue;
                     }
-                    changed.push(crate::prompt::changed_files::ChangedFile::text(
+                    changed.push(crate::prompt::changed_files::ChangedFile::text_source(
                         reminder_path.to_string_lossy().into_owned(),
                         snippet,
                     ));
@@ -2870,7 +3358,7 @@ message with multiple tool uses so they run concurrently."
         // message per changed file. Preserve Native's typed payload and exact
         // original rendered cache alongside the stable message identity; the
         // caller persists this row before screening its request-local copy.
-        crate::prompt::changed_files::apply_snippet_budget(&mut changed);
+        crate::prompt::changed_files::apply_snippet_budget_after(&mut changed, retained_budget);
         changed
             .iter()
             .filter_map(|file| {
@@ -2878,7 +3366,7 @@ message with multiple tool uses so they run concurrently."
                     file,
                     &read_tool_name,
                 )?;
-                let payload =
+                let mut payload =
                     lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
                         &serde_json::json!({
                             "type": "edited_text_file",
@@ -2887,6 +3375,7 @@ message with multiple tool uses so they run concurrently."
                         }),
                     )
                     .ok()?;
+                payload.set_field("snippet", file.snippet_source()).ok()?;
                 let rendered = crate::request_context::rendered_system_message(&message)?;
                 Some(crate::request_context::PromptIngressAttachment {
                     message,
@@ -2919,6 +3408,12 @@ message with multiple tool uses so they run concurrently."
     /// (@236015184) contains no envelope of its own, so the two tags nest.
     /// Appended ONLY to the outgoing snapshot (never `session.history` / JSONL).
     pub(crate) async fn new_diagnostics_reminder_message(&self) -> Option<ConversationMessage> {
+        let staged = crate::request_context::has_prompt_context();
+        if staged {
+            if let Some(pending) = self.pending_diagnostics_reminder() {
+                return Some(pending);
+            }
+        }
         let block = self
             .prompt_runtime
             .new_diagnostics_source
@@ -2926,10 +3421,19 @@ message with multiple tool uses so they run concurrently."
             .take_new_diagnostics_block()
             .await?;
         let block = lingxi_core::types::utf16_json::Utf16JsonProjection::from(block);
-        Some(source_user_meta(
-            MessageId::new(),
-            wrap_system_reminder_source(&block),
-        ))
+        let message = source_user_meta(MessageId::new(), wrap_system_reminder_source(&block));
+        // Retain synchronously after consuming the source. Cancellation can
+        // discard a request snapshot, but must not lose the source's advanced
+        // dedup cursor or drain newer diagnostics before this row is delivered.
+        Some(if staged {
+            self.retain_pending_step_reminder(
+                "diagnostics",
+                message,
+                super::pending_reminders::Acknowledgement::Diagnostics,
+            )
+        } else {
+            message
+        })
     }
 
     /// Consume actual per-context Read/readFor triggers, independent of LRU
@@ -3163,23 +3667,42 @@ message with multiple tool uses so they run concurrently."
             .is_some_and(|prefetch| !prefetch.is_enabled())
         {
             *self.prompt_runtime.pending_memory_prefetch.lock().await = None;
+            self.discard_pending_step_reminder("relevant_memories");
             return Vec::new();
         }
+        let staged = crate::request_context::has_prompt_context();
+        // Snapshot before consuming the ready receiver. Once it is consumed,
+        // publish its recovery copy without another cancellable await.
+        let already_surfaced = self
+            .prompt_runtime
+            .surfaced_memory_paths
+            .lock()
+            .await
+            .clone();
         // Never await an unresolved side query on the model-call critical path.
         // Leave it in the slot so it can run concurrently with this iteration
         // and be collected by a later one.
-        let pending = {
-            let mut slot = self.prompt_runtime.pending_memory_prefetch.lock().await;
-            let Some(pending) = slot.take() else {
-                return Vec::new();
-            };
-            if !pending.is_ready() {
-                *slot = Some(pending);
-                return Vec::new();
-            }
-            pending
+        let retained = if staged {
+            self.pending_surfaced_memories()
+        } else {
+            Vec::new()
         };
-        let surfaced = pending.take().await;
+        let surfaced = if retained.is_empty() {
+            let pending = {
+                let mut slot = self.prompt_runtime.pending_memory_prefetch.lock().await;
+                let Some(pending) = slot.take() else {
+                    return Vec::new();
+                };
+                if !pending.is_ready() {
+                    *slot = Some(pending);
+                    return Vec::new();
+                }
+                pending
+            };
+            pending.take().await
+        } else {
+            retained
+        };
         if surfaced.is_empty() {
             return Vec::new();
         }
@@ -3195,25 +3718,45 @@ message with multiple tool uses so they run concurrently."
             .into_iter()
             .collect();
         let fresh: Vec<memory::surfacing::SurfacedMemory> = {
-            let mut surfaced_set = self.prompt_runtime.surfaced_memory_paths.lock().await;
             let mut out = Vec::new();
+            let mut seen = already_surfaced;
             for m in surfaced {
-                if surfaced_set.contains(&m.path) || already_read.contains(&m.path) {
+                if already_read.contains(&m.path) || !seen.insert(m.path.clone()) {
                     continue; // double-injection guard
                 }
-                surfaced_set.insert(m.path.clone());
                 out.push(m);
             }
             out
         };
+        self.retain_pending_memory_paths(&fresh);
         if fresh.is_empty() {
             return Vec::new();
         }
 
-        memory::surfacing::render_surfacing_messages(&fresh)
+        let messages = memory::surfacing::render_surfacing_messages(&fresh)
             .into_iter()
-            .map(|content| ConversationMessage::user_meta(MessageId::new(), content))
-            .collect()
+            .zip(&fresh)
+            .map(|(content, memory)| {
+                let message = ConversationMessage::user_meta(MessageId::new(), content);
+                if staged {
+                    self.retain_pending_step_reminder(
+                        "relevant_memories",
+                        message,
+                        super::pending_reminders::Acknowledgement::Memory(memory.clone()),
+                    )
+                } else {
+                    message
+                }
+            })
+            .collect();
+        if !staged {
+            self.prompt_runtime
+                .surfaced_memory_paths
+                .lock()
+                .await
+                .extend(fresh.into_iter().map(|memory| memory.path));
+        }
+        messages
     }
 
     /// EXPERIMENTAL_SKILL_SEARCH: arm the skill-discovery prefetch CONCURRENTLY
@@ -3281,54 +3824,79 @@ message with multiple tool uses so they run concurrently."
     /// appended ONLY to the per-turn OUTGOING snapshot (never `session.history` /
     /// JSONL).
     pub(crate) async fn skill_discovery_reminder_message(&self) -> Option<ConversationMessage> {
+        let staged = crate::request_context::has_prompt_context();
+        let already_surfaced = self
+            .prompt_runtime
+            .surfaced_skill_names
+            .lock()
+            .await
+            .clone();
         // Consume the in-flight prefetch handle armed at turn start.
-        let pending = {
-            let mut slot = self.prompt_runtime.pending_skill_prefetch.lock().await;
-            let pending = slot.take()?;
-            // A side query that has not hidden under available work must not
-            // delay the API call. Keep it alive and try again next iteration.
-            if !pending.is_ready() {
-                *slot = Some(pending);
-                telemetry::emit_skill_discovery_collected(false);
-                return None;
-            }
-            pending
-        };
-        telemetry::emit_skill_discovery_collected(true);
-
-        let mut skills = pending.take().await;
+        let mut skills =
+            if let Some(skills) = staged.then(|| self.pending_discovered_skills()).flatten() {
+                skills
+            } else {
+                let pending = {
+                    let mut slot = self.prompt_runtime.pending_skill_prefetch.lock().await;
+                    let pending = slot.take()?;
+                    // A side query that has not hidden under available work must not
+                    // delay the API call. Keep it alive and try again next iteration.
+                    if !pending.is_ready() {
+                        *slot = Some(pending);
+                        telemetry::emit_skill_discovery_collected(false);
+                        return None;
+                    }
+                    pending
+                };
+                telemetry::emit_skill_discovery_collected(true);
+                pending.take().await
+            };
         if let Some(provider) = self.prompt_runtime.skill_listing.as_ref() {
             skills.retain(|skill| provider.is_skill_available(&skill.name.clone().into()));
         }
         if skills.is_empty() {
+            self.discard_pending_step_reminder("skill_discovery");
             return None;
         }
 
         // DEDUP by name — skip any skill already surfaced this session.
         let fresh: Vec<skill::DiscoveredSkill> = {
-            let mut surfaced = self.prompt_runtime.surfaced_skill_names.lock().await;
             let mut out = Vec::new();
+            let mut seen = already_surfaced;
             for s in skills {
-                if surfaced.contains(&s.name) {
+                if !seen.insert(s.name.clone()) {
                     continue; // already surfaced a prior turn
                 }
-                surfaced.insert(s.name.clone());
                 out.push(s);
             }
             out
         };
 
         // render returns None on empty (TS `return []`).
-        let content = skill::render_skill_discovery_block(&fresh)?;
+        let Some(content) = skill::render_skill_discovery_block(&fresh) else {
+            self.discard_pending_step_reminder("skill_discovery");
+            return None;
+        };
         let source_units = content
             .string_units("")
             .expect("skill discovery block is a source string");
         let display = String::from_utf16_lossy(&source_units);
-        Some(ConversationMessage::user_meta_js_utf16(
-            MessageId::new(),
-            display,
-            source_units,
-        ))
+        let message =
+            ConversationMessage::user_meta_js_utf16(MessageId::new(), display, source_units);
+        if staged {
+            Some(self.retain_pending_step_reminder(
+                "skill_discovery",
+                message,
+                super::pending_reminders::Acknowledgement::Skills(fresh),
+            ))
+        } else {
+            self.prompt_runtime
+                .surfaced_skill_names
+                .lock()
+                .await
+                .extend(fresh.into_iter().map(|skill| skill.name));
+            Some(message)
+        }
     }
 
     /// Native's mutating `GCe()` latch for declared-pool and kept-reference

@@ -1736,14 +1736,17 @@ async fn mod_turn_step_batched_passes_opaque_response_and_rewrites_model() {
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
-    let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+    let mut physical = mock_message_response(
         vec![llm_runtime::ContentBlock::Text {
             text: "raw batch".into(),
             cache_control: None,
             citations: None,
         }],
         Some("end_turn"),
-    )]));
+    );
+    physical.usage.counts_mut().cache_write_tokens = 1000;
+    physical.usage.counts_mut().cache_write_1h_tokens = 1000;
+    let api = Arc::new(MockApiClient::new(vec![physical]));
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api.clone(),
@@ -1755,7 +1758,21 @@ async fn mod_turn_step_batched_passes_opaque_response_and_rewrites_model() {
         dir.path().to_path_buf(),
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    let session_id = orch.session.lock().await.session_id;
     orch.run_turn("question").await.unwrap();
+    {
+        let diagnostics = orch.model_runtime.prompt_cache_ledger.lock().await;
+        let ledger = diagnostics
+            .ledger_for_session(session_id)
+            .expect("Mod request belongs to this session");
+        let summary = ledger.summary(0);
+        assert_eq!(summary.requests, 1);
+        assert_eq!(summary.cache_write_tokens, 1000);
+        assert_eq!(
+            summary.last_request.unwrap().facts.ttl,
+            cost::prompt_cache_ledger::CacheTtl::OneHour
+        );
+    }
     assert_eq!(api.captured_models().await, vec!["batch-hook-model"]);
     let history = &orch.session.lock().await.history;
     assert!(history.iter().any(|message| matches!(message,
@@ -1931,6 +1948,7 @@ async fn mod_turn_step_batched_multiple_next_calls_count_every_provider_response
     );
     first.usage.counts_mut().input_tokens = 11;
     first.usage.counts_mut().output_tokens = 7;
+    first.usage.counts_mut().cache_write_tokens = 11;
     let mut second = mock_message_response(
         vec![llm_runtime::ContentBlock::Text {
             text: "second response is shown".into(),
@@ -1941,6 +1959,7 @@ async fn mod_turn_step_batched_multiple_next_calls_count_every_provider_response
     );
     second.usage.counts_mut().input_tokens = 13;
     second.usage.counts_mut().output_tokens = 5;
+    second.usage.counts_mut().cache_write_tokens = 13;
     let api = Arc::new(MockApiClient::new(vec![first, second]));
     let output = Arc::new(MockOutputStream::new());
     let base = ConversationOrchestrator::new(
@@ -1967,6 +1986,15 @@ async fn mod_turn_step_batched_multiple_next_calls_count_every_provider_response
         api.captured_models().await,
         vec!["batch-first", "batch-second"]
     );
+    {
+        let diagnostics = orch.model_runtime.prompt_cache_ledger.lock().await;
+        let summary = diagnostics
+            .ledger_for_session(session_id)
+            .unwrap()
+            .summary(0);
+        assert_eq!(summary.requests, 2);
+        assert_eq!(summary.cache_write_tokens, 24);
+    }
     let history = &orch.session.lock().await.history;
     assert!(format!("{history:?}").contains("second response is shown"));
     assert!(!format!("{history:?}").contains("first response is hidden"));

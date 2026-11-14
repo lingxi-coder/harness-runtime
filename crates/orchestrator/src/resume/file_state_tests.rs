@@ -362,3 +362,116 @@ async fn file_state_resume_rejects_external_changes_even_with_preserved_or_older
         }
     }
 }
+
+#[tokio::test]
+async fn replay_of_a_real_changed_file_notice_does_not_revive_its_old_write_baseline() {
+    let mut fixture = Fixture::new();
+    let path = fixture.cwd.join("changed.txt");
+    fixture
+        .record("Write", json!({"file_path":path,"content":"before\n"}))
+        .await;
+    let map = fixture.tools.read_file_state.clone();
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(FileReadTool::new(fixture.tools.clone())));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![
+            crate::test_support::mock_message_response(
+                vec![llm_runtime::ContentBlock::Text {
+                    text: "file change observed".into(),
+                    cache_control: None,
+                    citations: None,
+                }],
+                Some("end_turn"),
+            ),
+        ])),
+        Arc::new(tools),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        fixture.cwd.clone(),
+    )
+    .with_read_state_map(map.clone())
+    .with_jsonl_writer(Arc::new(session::JsonlWriter::new(
+        session::jsonl::session_path(
+            &fixture.home,
+            &fixture.cwd.to_string_lossy(),
+            &fixture.session_id.to_string(),
+        ),
+        fixture.fs(),
+    )));
+    // Resume owns the import of existing Native transcript identities. Attach
+    // the writer before admission so subsequent appends exercise real storage.
+    fixture.hot_resume(&orch).await;
+    std::fs::write(&path, "after\n").unwrap();
+    orch.run_turn("observe the current file").await.unwrap();
+    assert_eq!(
+        orch.transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|source| source.string_at("/type") == Some("edited_text_file"))
+            .count(),
+        1
+    );
+    let replay = replay_session_state(
+        &fixture.home,
+        &fixture.cwd.to_string_lossy(),
+        fixture.session_id,
+        fixture.fs(),
+    )
+    .await
+    .unwrap();
+    let runtime = replay.handle_runtime_snapshot();
+    let proof = replay
+        .state
+        .history
+        .iter()
+        .map(|message| {
+            let source = runtime
+                .model_reminder_attachments
+                .iter()
+                .find(|(id, _)| *id == message.id())
+                .map(|(_, source)| source);
+            (
+                message.id(),
+                source
+                    .and_then(|source| source.string_at("/type"))
+                    .map(str::to_owned),
+                source
+                    .and_then(|source| source.string_at("/filename"))
+                    .map(str::to_owned),
+                replay
+                    .state
+                    .model_context_excluded_messages
+                    .contains(&message.id()),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        proof
+            .iter()
+            .any(|(_, kind, _, _)| kind.as_deref() == Some("edited_text_file")),
+        "the real published reminder must survive in the active JSONL chain: {proof:?}"
+    );
+    orch.resume_session(
+        replay.state.session_id,
+        replay.state.history,
+        replay.last_message_uuid.map(|id| id.to_string()),
+        None,
+        runtime,
+    )
+    .await
+    .unwrap();
+    assert!(
+        get(&map, &path).is_none(),
+        "a diff cannot restore the superseded complete A snapshot: {:?}",
+        get(&map, &path)
+    );
+    assert!(
+        orch.changed_files_reminder_messages(None).await.is_empty(),
+        "the published A-to-B change must not be replayed as a new notice"
+    );
+}

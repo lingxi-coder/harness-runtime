@@ -6,6 +6,7 @@ use super::{GrantProvenance, McpRegistry, OAuthDeps};
 use crate::connection::{McpConnectionState, McpServerConfig};
 use crate::oauth;
 use lingxi_core::host::{McpError, McpTransportSpec};
+use std::sync::Arc;
 
 /// Borrow the `oauth` config block of an SSE/HTTP spec, if present. Other
 /// transports (stdio, websocket, …) never carry OAuth → `None`.
@@ -462,6 +463,106 @@ impl McpRegistry {
         }
     }
 
+    /// Run one automatic recovery against a private token/session snapshot.
+    /// A newer authority wins over every staged network result, including
+    /// invalidation and DCR/session side effects from a failed refresh.
+    pub(super) async fn recover_oauth_spec(
+        &self,
+        config: &McpServerConfig,
+        rejected: &oauth::retry_storage::OAuthCredentialIdentity,
+    ) -> Result<(McpTransportSpec, Option<GrantProvenance>), McpError> {
+        let deps = self
+            .oauth
+            .as_ref()
+            .ok_or_else(|| McpError::OAuth("oauth seam not wired".into()))?;
+        let storage = self.oauth_storage_for_config(config, &deps.storage);
+        let key = oauth::server_key(config.storage_name(), &config.spec);
+        let transaction = oauth::retry_storage::OAuthRetryStorage::capture(storage, key)
+            .await
+            .map_err(|error| McpError::Connection(error.to_string().into()))?;
+        let original = transaction.tokens()?;
+        let mut isolated = self.clone_for_background();
+        let overlay: Arc<dyn lingxi_core::host::SecureStorage> = transaction.clone();
+        isolated.oauth.as_mut().expect("OAuth dependencies").storage = overlay.clone();
+        // The snapshot already selected the scalar/raw-name namespace once.
+        isolated.raw_name_oauth_storage = Some(overlay);
+        let auth = if original
+            .as_ref()
+            .is_some_and(|tokens| rejected.matches(tokens))
+        {
+            isolated
+                .reauth_oauth_spec_with_retry(config, None, Some(transaction.clone()))
+                .await
+        } else {
+            isolated
+                .resolve_oauth_spec(config)
+                .await
+                .map(|(spec, _, grant)| (spec, grant))
+        };
+        let (current, committed) = transaction
+            .finish(auth.is_ok())
+            .await
+            .map_err(|error| McpError::Connection(error.to_string().into()))?;
+        if !committed && current == original {
+            return match auth {
+                Err(error) => Err(error),
+                Ok(_) => Err(McpError::Connection(
+                    "MCP OAuth authority changed during authentication recovery".into(),
+                )),
+            };
+        }
+        let Some(stored) = current.filter(|tokens| {
+            !tokens.access_token.is_empty()
+                && !tokens
+                    .remaining_seconds(deps.clock.now())
+                    .is_some_and(|seconds| seconds <= 0.0)
+        }) else {
+            return Err(McpError::Connection(
+                "MCP OAuth recovery was superseded by a missing or expired credential".into(),
+            ));
+        };
+        let token = stored.into_tokens();
+        Ok((
+            inject_bearer(&config.spec, token.access_token.expose_secret()),
+            GrantProvenance::from_tokens(&token),
+        ))
+    }
+
+    async fn retry_oauth_winner(
+        &self,
+        config: &McpServerConfig,
+        retry: Option<&Arc<oauth::retry_storage::OAuthRetryStorage>>,
+    ) -> Result<Option<(McpTransportSpec, Option<GrantProvenance>)>, McpError> {
+        let Some(retry) = retry else { return Ok(None) };
+        let Some(winner) = retry
+            .winner()
+            .await
+            .map_err(|error| McpError::Connection(error.to_string().into()))?
+        else {
+            return Ok(None);
+        };
+        let clock = &self
+            .oauth
+            .as_ref()
+            .expect("OAuth recovery dependencies")
+            .clock;
+        let Some(winner) = winner.filter(|stored| {
+            !stored.access_token.is_empty()
+                && !stored
+                    .remaining_seconds(clock.now())
+                    .is_some_and(|seconds| seconds <= 0.0)
+        }) else {
+            return Err(McpError::Connection(
+                "MCP OAuth recovery was superseded".into(),
+            ));
+        };
+        let token = winner.into_tokens();
+        Ok(Some((
+            inject_bearer(&config.spec, token.access_token.expose_secret()),
+            GrantProvenance::from_tokens(&token),
+        )))
+    }
+
     /// Re-authenticate after a 401: refresh if a refresh token is stored, else
     /// run a fresh interactive flow, then return the spec with the new Bearer.
     /// `resource_metadata_url` (§24c) is the `resource_metadata` param parsed
@@ -473,6 +574,19 @@ impl McpRegistry {
         config: &McpServerConfig,
         resource_metadata_url: Option<&str>,
     ) -> Result<(McpTransportSpec, Option<GrantProvenance>), McpError> {
+        self.reauth_oauth_spec_with_retry(config, resource_metadata_url, None)
+            .await
+    }
+
+    async fn reauth_oauth_spec_with_retry(
+        &self,
+        config: &McpServerConfig,
+        resource_metadata_url: Option<&str>,
+        retry: Option<Arc<oauth::retry_storage::OAuthRetryStorage>>,
+    ) -> Result<(McpTransportSpec, Option<GrantProvenance>), McpError> {
+        if let Some(winner) = self.retry_oauth_winner(config, retry.as_ref()).await? {
+            return Ok(winner);
+        }
         let deps = self
             .oauth
             .as_ref()
@@ -489,8 +603,14 @@ impl McpRegistry {
         );
         let deps = &oauth_deps;
 
-        let oauth_cfg = spec_oauth(&config.spec)
-            .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
+        let implicit_oauth = lingxi_core::host::McpOAuthConfigDto {
+            client_id: None,
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        };
+        let oauth_cfg = spec_oauth(&config.spec).unwrap_or(&implicit_oauth);
         let key = oauth::server_key(config.storage_name(), &config.spec);
         let telemetry_ctx =
             oauth::McpOAuthTelemetryContext::for_server(config.telemetry_name(), &config.spec);
@@ -528,6 +648,9 @@ impl McpRegistry {
                         GrantProvenance::from_tokens(&token),
                     ));
                 };
+                if let Some(winner) = self.retry_oauth_winner(config, retry.as_ref()).await? {
+                    return Ok(winner);
+                }
                 // Prefer the persisted (DCR-issued or configured) client_id so
                 // refresh re-sends it (auth.ts clientInformation(), 1482-1506).
                 let client_id = stored
@@ -548,6 +671,9 @@ impl McpRegistry {
                 )
                 .await;
                 drop(refresh_lock);
+                if let Some(winner) = self.retry_oauth_winner(config, retry.as_ref()).await? {
+                    return Ok(winner);
+                }
                 match refresh_result {
                     Ok(t) => {
                         oauth::save_tokens_with_telemetry(
@@ -583,6 +709,11 @@ impl McpRegistry {
                             // falling back to a fresh interactive grant.
                             oauth::OAuthError::RefreshRejected(_) => {
                                 oauth::emit_oauth_refresh_failure(&telemetry_ctx, "invalid_grant");
+                                if let Some(winner) =
+                                    self.retry_oauth_winner(config, retry.as_ref()).await?
+                                {
+                                    return Ok(winner);
+                                }
                                 self.run_interactive_oauth(
                                     config,
                                     oauth_cfg,
@@ -605,6 +736,9 @@ impl McpRegistry {
                 }
             }
             None => {
+                if let Some(winner) = self.retry_oauth_winner(config, retry.as_ref()).await? {
+                    return Ok(winner);
+                }
                 self.run_interactive_oauth(
                     config,
                     oauth_cfg,

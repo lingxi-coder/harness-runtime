@@ -194,8 +194,8 @@ fn resume_reads_keep_exact_surrogates_and_compare_partial_views_without_display_
 }
 
 #[test]
-fn resume_write_sidecars_and_writerless_inputs_preserve_exact_source_and_bom() {
-    let units = [0xfeff, 0xd800, 97, 0xdc00, 10];
+fn resume_write_sidecars_and_writerless_inputs_match_live_normalization_and_exact_units() {
+    let units = [0xfeff, 0xd800, 97, 0xdc00, 13, 10];
     for raw_sidecar in [false, true] {
         let mut session = session();
         append_read(&mut session, FILE, &[0xd801, 10]);
@@ -212,7 +212,7 @@ fn resume_write_sidecars_and_writerless_inputs_preserve_exact_source_and_bom() {
         let map = restore(&session);
         assert_eq!(
             get_content_units(&map, Path::new(FILE)),
-            Some(units[1..].to_vec())
+            Some(vec![0xd800, 97, 0xdc00, 10])
         );
         assert!(!get(&map, Path::new(FILE)).unwrap().from_read);
     }
@@ -247,6 +247,54 @@ fn resume_edits_apply_exact_hunks_and_preserve_proven_line_endings() {
         assert_eq!(
             get_content_units(&map, Path::new(FILE)),
             matching.then(|| expected.to_vec())
+        );
+    }
+}
+
+#[test]
+fn resume_edits_preserve_partial_context_until_a_complete_read() {
+    for flag in [
+        None,
+        Some(json!(false)),
+        Some(json!(true)),
+        Some(json!("true")),
+    ] {
+        let mut session = session();
+        let before = [97, 0xd800, 10];
+        let after = [98, 0xd800, 10];
+        append_read(&mut session, FILE, &before);
+        let id = call(&mut session, "Edit", source(json!({"file_path": FILE})));
+        let mut data = Utf16JsonProjection::parse(
+            r#"{"filePath":"/workspace/file.txt","originalFile":"a\ud800\n",
+            "structuredPatch":[{"oldStart":1,"newStart":1,"oldLines":1,"newLines":1,
+            "lines":["-a\ud800","+b\ud800"]}]}"#,
+        )
+        .unwrap();
+        if let Some(flag) = &flag {
+            data.set_field("contentNotInModelContext", source(flag.clone()))
+                .unwrap();
+        }
+        result(&mut session, id, Some(data), false);
+        let map = restore(&session);
+        if flag.as_ref().is_some_and(|flag| flag.is_string()) {
+            assert!(get(&map, Path::new(FILE)).is_none());
+            continue;
+        }
+        assert_eq!(
+            get_content_units(&map, Path::new(FILE)),
+            Some(after.to_vec())
+        );
+        assert_eq!(
+            get(&map, Path::new(FILE)).unwrap().is_partial_view,
+            flag == Some(json!(true))
+        );
+
+        append_read(&mut session, FILE, &after);
+        let map = restore(&session);
+        assert!(!get(&map, Path::new(FILE)).unwrap().is_partial_view);
+        assert_eq!(
+            get_content_units(&map, Path::new(FILE)),
+            Some(after.to_vec())
         );
     }
 }

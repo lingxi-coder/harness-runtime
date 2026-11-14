@@ -183,6 +183,31 @@ pub struct DesktopSessionResumeSnapshot {
     pub content: Arc<str>,
 }
 
+/// A parse bound to one immutable cold-resume source capture.
+/// Replacing a config's source snapshot invalidates this prepared parse.
+#[derive(Clone)]
+pub struct DesktopSessionResumeLoaded {
+    source_session_id: String,
+    content: Arc<str>,
+    loaded: Arc<session::jsonl::LoadedTranscript>,
+}
+
+impl DesktopSessionResumeLoaded {
+    /// Bind a parse to the exact source allocation that supplied it. The host
+    /// prepares both after validating the captured bytes under writer authority.
+    #[must_use]
+    pub fn new(
+        snapshot: &DesktopSessionResumeSnapshot,
+        loaded: Arc<session::jsonl::LoadedTranscript>,
+    ) -> Self {
+        Self {
+            source_session_id: snapshot.source_session_id.clone(),
+            content: snapshot.content.clone(),
+            loaded,
+        }
+    }
+}
+
 /// The transport and raw-connection view of the same desktop MCP owner.
 #[derive(Clone)]
 pub struct DesktopMcpServices {
@@ -600,6 +625,11 @@ pub struct DesktopConfig {
     /// A non-deferred build adopts its matching session history before hooks;
     /// deferred headless builds mount their prepared truncated/fork history.
     pub session_resume_snapshot: Option<DesktopSessionResumeSnapshot>,
+    /// Immutable parse of the captured source, prepared under the same writer
+    /// authority and byte validation as [`Self::session_resume_snapshot`].
+    /// Standalone hosts may omit this and let startup hydration parse the source.
+    /// Like the source bytes, this is retained only during construction.
+    pub session_resume_loaded: Option<DesktopSessionResumeLoaded>,
     /// Captured metadata of an independent fork target, whose source snapshot
     /// remains separate for inherited agent and workspace settings.
     pub session_resume_target_snapshot: Option<Arc<str>>,
@@ -1141,6 +1171,10 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.session_resume_snapshot.as_ref().map(|_| "<captured>"),
             )
             .field(
+                "session_resume_loaded",
+                &self.session_resume_loaded.as_ref().map(|_| "<prepared>"),
+            )
+            .field(
                 "session_resume_target_snapshot",
                 &self
                     .session_resume_target_snapshot
@@ -1313,6 +1347,7 @@ impl Default for DesktopConfig {
             durable_draft_title: None,
             initial_prompt_directories: Vec::new(),
             session_resume_snapshot: None,
+            session_resume_loaded: None,
             session_resume_target_snapshot: None,
             session_resume_cost: None,
             parent_session_id: None,
@@ -1369,6 +1404,38 @@ impl Default for DesktopConfig {
 pub const MAX_PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 impl DesktopConfig {
+    /// Borrow the prepared parse only while it still names the current source
+    /// capture. A config clone may replace its snapshot before another build;
+    /// the source allocation and session token prevent stale history reuse.
+    #[must_use]
+    pub fn prepared_session_resume(&self) -> Option<&session::jsonl::LoadedTranscript> {
+        let snapshot = self.session_resume_snapshot.as_ref()?;
+        let prepared = self.session_resume_loaded.as_ref()?;
+        (Arc::ptr_eq(&snapshot.content, &prepared.content)
+            && snapshot.source_session_id == prepared.source_session_id)
+            .then_some(prepared.loaded.as_ref())
+    }
+
+    /// Clone configuration for settings, cwd and other long-lived controls.
+    /// Startup captures and construction-only writer authority belong to the
+    /// build that consumes them; controls must not retain them across a mount.
+    /// The live coordinator/writer keeps its own authoritative lease.
+    #[must_use]
+    pub fn clone_for_runtime_controls(&self) -> Self {
+        let mut controls = self.clone();
+        controls.release_startup_capture();
+        controls.session_writer_lease = None;
+        controls.session_transcript_authority = None;
+        controls
+    }
+
+    pub(super) fn release_startup_capture(&mut self) {
+        self.session_resume_snapshot = None;
+        self.session_resume_loaded = None;
+        self.session_resume_target_snapshot = None;
+        self.session_resume_cost = None;
+    }
+
     /// The per-request permission timeout the desktop gates run with: the
     /// configured [`Self::permission_timeout`], else
     /// [`client::adapter::DEFAULT_PERMISSION_TIMEOUT`]. A zero timeout would

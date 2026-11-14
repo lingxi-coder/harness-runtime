@@ -9,6 +9,10 @@ mod session_owner_tests;
 include!("../reasoning_preference_tests.rs");
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
+#[path = "cache14_ownership_tests.rs"]
+mod cache14_ownership_tests;
+#[path = "cache_regression_tests.rs"]
+mod cache_regression_tests;
 #[path = "cancel_admission_tests.rs"]
 mod cancel_admission_tests;
 #[path = "device_tools_tests.rs"]
@@ -96,6 +100,7 @@ async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store.clone(),
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
 
     let inputs = source
@@ -217,6 +222,7 @@ async fn mobile_midturn_batches_stop_at_bash_and_never_join_commands() {
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store.clone(),
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
 
     let normal_batch = source
@@ -343,6 +349,7 @@ async fn cancel_before_midturn_admission_keeps_uncancelled_mobile_dispatch_membe
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store,
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
     assert!(source.take_mid_turn_batch().await.unwrap().is_none());
     assert_eq!(
@@ -409,7 +416,7 @@ fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
         .expect("catalog must include the first-party Anthropic profile");
     assert_eq!(anthropic.display_name, "Anthropic");
     assert_eq!(anthropic.base_url, "https://api.anthropic.com");
-    assert_eq!(anthropic.protocol, "AnthropicMessages");
+    assert_eq!(anthropic.protocol, "anthropic_messages");
     assert_eq!(
         anthropic.credential_env.as_deref(),
         Some("ANTHROPIC_API_KEY")
@@ -446,8 +453,20 @@ fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
                 .unwrap_or_else(|| provider.profile_name.clone())
         );
         assert_eq!(entry.base_url, provider.base_url);
-        assert_eq!(entry.protocol, format!("{:?}", provider.protocol));
-        assert_eq!(entry.auth, format!("{:?}", provider.auth));
+        assert_eq!(
+            entry.protocol,
+            serde_json::to_value(provider.protocol)
+                .unwrap()
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            entry.auth,
+            serde_json::to_value(provider.auth)
+                .unwrap()
+                .as_str()
+                .unwrap()
+        );
         assert_eq!(
             entry.credential_env,
             match &provider.credential {
@@ -461,10 +480,15 @@ fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
                 .models
                 .iter()
                 .filter(|model| {
-                    lingxi_core::host::is_curated_model(
-                        &provider.profile_name,
-                        &model.request_model,
-                    ) || !lingxi_core::host::provider_has_curated_list(&provider.profile_name)
+                    !matches!(
+                        model.metadata.status.as_deref(),
+                        Some("disabled" | "deprecated")
+                    ) && (model.metadata.catalog_offered
+                        || lingxi_core::host::is_curated_model(
+                            &provider.profile_name,
+                            &model.request_model,
+                        )
+                        || !lingxi_core::host::provider_has_curated_list(&provider.profile_name))
                 })
                 .map(|model| model.request_model.clone())
                 .collect::<Vec<_>>()
@@ -1167,7 +1191,7 @@ async fn session_agent_fallback_row_keeps_envelope_and_tombstone_leaves_index_ga
             if message_uuid == &api_error.uuid.as_uuid().to_string()
     )));
     let cache = observer.transcript_cache.lock().await;
-    let snapshot = &cache[&agent_id.to_string()];
+    let snapshot = &cache[&(observer.allocated_session_id(), agent_id.to_string())];
     assert!(snapshot.rows.is_empty());
     assert_eq!(snapshot.next_message_index, 1);
 }
@@ -4587,6 +4611,28 @@ fn submit_lists_and_loads_nested_workflow_agents() {
     use futures_util::StreamExt as _;
     use lingxi_core::host::subagent_spawn::SubagentSpawner as _;
 
+    struct ObservedMobile {
+        mobile: Arc<MobileSessionAgentObserver>,
+        completed: Notify,
+        allocated_outside_workflow_scope: AtomicBool,
+    }
+    #[async_trait]
+    impl SubagentSpawnObserver for ObservedMobile {
+        async fn on_event(&self, event: SubagentObservation) {
+            if matches!(&event, SubagentObservation::Allocated { .. }) {
+                self.allocated_outside_workflow_scope.store(
+                    agent::workflow_transcript_subdir_override().is_none(),
+                    Ordering::SeqCst,
+                );
+            }
+            let completed = matches!(&event, SubagentObservation::Completed { .. });
+            self.mobile.on_event(event).await;
+            if completed {
+                self.completed.notify_one();
+            }
+        }
+    }
+
     struct TranscriptModel;
     #[async_trait::async_trait]
     impl agent::SubagentApiClient for TranscriptModel {
@@ -4653,11 +4699,12 @@ fn submit_lists_and_loads_nested_workflow_agents() {
 
     handle.runtime().block_on(async {
         let session_id = handle.inner.orchestrator.current_session_id().await;
-        let subagents_dir = orchestrator::transcript_paths::subagents_dir(
-            &handle.lingxi_home,
-            &handle.session_cwd(),
-            &session_id.as_uuid().to_string(),
-        );
+        let source = handle
+            .inner
+            .session_writer
+            .session_target_path(session_id)
+            .unwrap();
+        let subagents_dir = source.with_extension("").join("subagents");
         let dir = subagents_dir.join("workflows").join("wf_nested");
         tokio::fs::create_dir_all(&dir)
             .await
@@ -4678,6 +4725,33 @@ fn submit_lists_and_loads_nested_workflow_agents() {
         let transcript_fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
         );
+        let observer = Arc::new(ObservedMobile {
+            mobile: Arc::new(MobileSessionAgentObserver {
+                transcript_cache: handle.inner.session_agent_transcript_cache.clone(),
+                ..MobileSessionAgentObserver::new(
+                    ListenerSink::arc(listener.clone()),
+                    handle.inner.active_session_uuid.clone(),
+                )
+                .with_transcript_storage(
+                    handle.inner.session_writer.clone(),
+                    handle.lingxi_home.join("projects"),
+                )
+            }),
+            completed: Notify::new(),
+            allocated_outside_workflow_scope: AtomicBool::new(false),
+        });
+        // The workflow still belongs to A when its observer FIFO runs after
+        // the connection has activated B. The FIFO's tokio task has no task-local override.
+        handle
+            .submit(ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+                mode: SessionModeDto::Code,
+            })
+            .await
+            .unwrap();
+        let other_session = handle.inner.orchestrator.current_session_id().await;
+        assert_ne!(other_session, session_id);
         let spawner = agent::PoolSubagentSpawner::new(Arc::new(agent::StateMachinePool::new(
             Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
             2,
@@ -4687,6 +4761,7 @@ fn submit_lists_and_loads_nested_workflow_agents() {
         .with_model_resolution_context_provider(route_context)
         .with_hook_context(session_id, tmp.path().to_path_buf(), Some(subagents_dir))
         .with_transcript_fs(transcript_fs)
+        .with_spawn_observer(observer.clone())
         .with_session_interactive(false);
         let result = agent::with_transcript_subdir_override(Some(dir.clone()), async {
             spawner
@@ -4715,6 +4790,52 @@ fn submit_lists_and_loads_nested_workflow_agents() {
             lingxi_core::host::SubagentResult::Completed { agent_id, .. } => agent_id.to_string(),
             other => panic!("nested workflow child did not complete: {other:?}"),
         };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            observer.completed.notified(),
+        )
+        .await
+        .expect("production observer FIFO delivered its terminal event");
+        assert!(observer
+            .allocated_outside_workflow_scope
+            .load(Ordering::SeqCst));
+        let events = listener.received.lock().await.clone();
+        let origin = session_id.as_uuid().to_string();
+        let child_events = events
+            .iter()
+            .filter_map(|event| match event {
+                Ev::SessionAgentUpdated { session_id, agent }
+                    if agent.agent_id == expected_agent_id =>
+                {
+                    Some(session_id)
+                }
+                Ev::SessionAgentMessage {
+                    session_id,
+                    agent_id,
+                    ..
+                } if agent_id == &expected_agent_id => Some(session_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!child_events.is_empty());
+        assert!(
+            child_events.iter().all(|session| **session == origin),
+            "pinned origin owns asynchronous notifications"
+        );
+        assert!(
+            observer
+                .mobile
+                .transcript_cache
+                .lock()
+                .await
+                .get(&(origin, expected_agent_id.clone()))
+                .is_none(),
+            "durable terminal bodies retire from memory and remain available on disk"
+        );
+        handle
+            .resume_seeded_test_session(session_id.as_uuid().to_string())
+            .await
+            .unwrap();
         let transcript_path = dir.join(format!("agent-{expected_agent_id}.jsonl"));
         let transcript = tokio::fs::read_to_string(&transcript_path)
             .await
@@ -4958,6 +5079,9 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
     cfg.workspace_trusted = true;
     cfg.api_base = base;
     cfg.default_model = "claude-sonnet-4-5".into();
+    // This fixture exercises one real provider; keep unrelated catalogs out of
+    // the timed child-startup path and its route projections.
+    cfg.routing = Some(serde_json::json!({"mobileEnabledProfiles": ["anthropic"]}));
     let (handle, _) = build_submit_handle_with_account_config(cfg, tmp.path());
     // Observe the resumed child itself; no unrelated main-loop wake request
     // is needed to prove this targeted producer reaches a real model turn.
@@ -11124,8 +11248,12 @@ fn dynamic_loop_scheduler_drives_a_mobile_turn_with_session_cwd() {
     use crate::mobile::test_support::new_engine_with_streaming;
     use orchestrator::test_support_stream::*;
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-    std::fs::write(tmp.path().join(".claude/loop.md"), "mobile loop owned task").unwrap();
+    std::fs::create_dir_all(tmp.path().join(branding::DOT_DIR)).unwrap();
+    std::fs::write(
+        tmp.path().join(branding::DOT_DIR).join("loop.md"),
+        "mobile loop owned task",
+    )
+    .unwrap();
     let listener = Arc::new(FakeListener::default());
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
         message_start("loop-mobile", "test"),
@@ -12789,6 +12917,18 @@ fn new_session_accepts_another_existing_directory_and_rejects_missing_paths() {
     assert_ne!(after.session_id, before.session_id);
     assert_eq!(Path::new(&after.cwd), other.canonicalize().unwrap());
     assert_eq!(after.project_root, after.cwd);
+    handle.runtime().block_on(async {
+        handle
+            .ensure_reserved_session_identity(&after.session_id)
+            .await
+            .unwrap();
+        let path = handle.inner.session_writer.active_path();
+        assert!(handle
+            .ensure_reserved_session_identity(&uuid::Uuid::new_v4().to_string())
+            .await
+            .is_err());
+        assert_eq!(handle.inner.session_writer.active_path(), path);
+    });
 }
 
 #[test]
@@ -12904,6 +13044,13 @@ fn mobile_prompt_rejects_foreign_transcript_symlink_without_mutation() {
     let foreign_path = foreign_root.path().join("foreign-session.jsonl");
     let foreign_bytes = b"foreign transcript must remain byte-for-byte unchanged\n";
     std::fs::write(&foreign_path, foreign_bytes).expect("write foreign transcript fixture");
+    // Startup has already anchored this session. Replace only the fixture's
+    // transcript, and require the rejection to preserve its existing sidecar.
+    let mut sidecar_name = transcript_path.file_name().unwrap().to_os_string();
+    sidecar_name.push(branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX);
+    let sidecar_path = transcript_path.with_file_name(sidecar_name);
+    let sidecar_before = std::fs::read(&sidecar_path).ok();
+    std::fs::remove_file(&transcript_path).expect("replace startup transcript fixture");
     symlink(&foreign_path, &transcript_path).expect("link active transcript to foreign file");
 
     let error = handle
@@ -12926,14 +13073,10 @@ fn mobile_prompt_rejects_foreign_transcript_symlink_without_mutation() {
         foreign_bytes,
         "a rejected foreign transcript is never rewritten"
     );
-    let mut sidecar_name = transcript_path
-        .file_name()
-        .expect("mobile transcript has a filename")
-        .to_os_string();
-    sidecar_name.push(branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX);
-    assert!(
-        !transcript_path.with_file_name(sidecar_name).exists(),
-        "rejection must not create an identity sidecar beside the foreign path"
+    assert_eq!(
+        std::fs::read(&sidecar_path).ok(),
+        sidecar_before,
+        "rejection must not create or change the identity sidecar"
     );
     let reservation_released = handle
         .runtime()
@@ -13206,5 +13349,34 @@ fn mobile_context_settings_failure_delivers_and_settles_durable_slash_without_mo
             handle.active_cancel.lock().await.is_none(),
             "the local slash owner must be released after durable delivery"
         );
+    });
+}
+
+#[test]
+fn agent_transcript_fallback_succeeds_in_its_origin_session_and_stays_out_of_new_sessions() {
+    let root = tempfile::tempdir().unwrap();
+    let (handle, listener) = build_submit_handle(root.path());
+    handle.runtime().block_on(async {
+        let observer = MobileSessionAgentObserver {
+            transcript_cache: handle.inner.session_agent_transcript_cache.clone(),
+            ..MobileSessionAgentObserver::new(ListenerSink::arc(listener.clone()), handle.inner.active_session_uuid.clone())
+        };
+        let id = lingxi_core::types::AgentId::new();
+        observer.on_event(SubagentObservation::Allocated {
+            agent_id: id, agent_type: "fixture".into(), name: None, model: "fixture".into(),
+            model_profile: None, persistent: false, initial_message_index: 0, origin_session_id: None,
+        }).await;
+        observer.on_event(SubagentObservation::Message { agent_id: id,
+            message: lingxi_core::types::ConversationMessage::user(lingxi_core::types::MessageId::new(), "ORIGIN_SESSION_ONLY".into()),
+        }).await;
+        drained(&listener).await;
+        handle.submit(ClientCommand::LoadSessionAgentTranscript { agent_id: id.to_string() }).await.unwrap();
+        let a = drained(&listener).await;
+        assert!(a.iter().any(|event| matches!(event, Ev::SessionAgentTranscript { messages, .. } if !messages.is_empty())));
+        handle.submit(ClientCommand::NewSession { cwd: None, model: None, mode: client::protocol::listings::SessionModeDto::Code }).await.unwrap();
+        drained(&listener).await;
+        handle.submit(ClientCommand::LoadSessionAgentTranscript { agent_id: id.to_string() }).await.unwrap();
+        let b = drained(&listener).await;
+        assert!(b.iter().any(|event| matches!(event, Ev::SessionAgentTranscript { messages, .. } if messages.is_empty())));
     });
 }

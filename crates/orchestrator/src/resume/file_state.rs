@@ -193,6 +193,16 @@ pub(super) fn restore_file_state(
         }
     }
     for message in &history {
+        // A diff is not a full snapshot. Never revive an older Write/Read
+        // baseline after the transcript proves it was superseded.
+        if let Some(source) = attachments
+            .get(&message.id())
+            .filter(|source| source.string_at("/type") == Some("edited_text_file"))
+        {
+            if let Some(path) = exact_path(source, "/filename", cwd) {
+                cache.remove(&path);
+            }
+        }
         if let Some((path, entry)) = attachment_snapshot(message, attachments, cwd) {
             if let Some(entry) = entry {
                 entry.publish(&mut cache, path);
@@ -276,6 +286,32 @@ pub(super) fn restore_file_state(
     }
 }
 
+/// Complete text evidence usable by the post-compact instruction cursor.
+/// Path-only references and diffs cannot grant instruction visibility.
+pub(crate) fn complete_file_attachment_path(source: &Utf16JsonProjection) -> Option<PathBuf> {
+    if source.string_at("/type") != Some("file") {
+        return None;
+    }
+    let filename = String::from_utf16(&source.string_units("/filename")?).ok()?;
+    if !Path::new(&filename).is_absolute()
+        || source.string_units("/filename") != source.string_units("/content/file/filePath")
+        || source
+            .at_pointer("/content/file/truncatedByTokenCap")
+            .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return None;
+    }
+    let units = source.string_units("/content/file/content")?;
+    let lines = units.iter().filter(|unit| **unit == 10).count() as u64 + 1;
+    if unsigned(source.at_pointer("/content/file/startLine")?)? != 1
+        || unsigned(source.at_pointer("/content/file/numLines")?)? != lines
+        || unsigned(source.at_pointer("/content/file/totalLines")?)? != lines
+    {
+        return None;
+    }
+    Some(PathBuf::from(filename))
+}
+
 fn attachment_snapshot(
     message: &ConversationMessage,
     attachments: &HashMap<MessageId, Utf16JsonProjection>,
@@ -336,8 +372,12 @@ fn without_bom(units: &[u16]) -> &[u16] {
 
 fn write_snapshot(units: &[u16]) -> RecoveredFile {
     // Write's output contains exact source text, including its optional BOM.
-    // This is historical seen state, not a guess at the original disk codec.
-    snapshot(without_bom(units).to_vec(), false)
+    // Match the live Write publication and subsequent stale-content comparison,
+    // without repairing unpaired UTF-16 units or guessing the disk codec.
+    snapshot(
+        tool_file::file_meta::normalize_to_lf_units(without_bom(units)),
+        false,
+    )
 }
 
 fn recover_snapshot(
@@ -447,7 +487,18 @@ fn recover_snapshot(
                     );
                 }
             }
-            Some(write_snapshot(&after))
+            // Edit publishes the reconstructed disk line endings, unlike
+            // Write's LF-normalized publication.
+            let mut recovered = snapshot(without_bom(&after).to_vec(), false);
+            // The full originalFile sidecar is UI/replay evidence, not proof
+            // that a truncated Read's unseen suffix entered model context.
+            // Live Edit preserves this fence until a complete Read replaces it.
+            recovered.entry.is_partial_view = match data.at_pointer("/contentNotInModelContext") {
+                Some(value) => value.as_bool()?,
+                None => false,
+            } || prior
+                .is_some_and(|prior| prior.entry.is_partial_view);
+            Some(recovered)
         }
         "NotebookEdit" => {
             // A native successful notebook result carries the entire updated
@@ -472,7 +523,7 @@ fn recover_snapshot(
                 let notebook = Utf16JsonProjection::parse_utf16_json(without_bom(units)).ok()?;
                 notebook.array_len("/cells")?;
             }
-            Some(write_snapshot(&updated))
+            Some(snapshot(without_bom(&updated).to_vec(), false))
         }
         _ => None,
     }
@@ -711,7 +762,15 @@ mod tests {
                     append_write(&mut session, content);
                 }
                 let entry = restored(&session).unwrap();
-                assert_eq!(entry.content, content);
+                let expected = if read {
+                    content.to_owned()
+                } else {
+                    String::from_utf16(&tool_file::file_meta::normalize_to_lf_units(
+                        &content.encode_utf16().collect::<Vec<_>>(),
+                    ))
+                    .unwrap()
+                };
+                assert_eq!(entry.content, expected);
                 assert_eq!(entry.mtime_ms, i64::MIN);
                 assert_eq!(entry.from_read, read);
                 assert_eq!(entry.offset, None);
@@ -780,7 +839,7 @@ mod tests {
     fn write_bom_matches_guard_decoding_without_double_stripping_read_content() {
         let mut written = session();
         append_write(&mut written, "\u{feff}known\r\n");
-        assert_eq!(restored(&written).unwrap().content, "known\r\n");
+        assert_eq!(restored(&written).unwrap().content, "known\n");
         let mut read = session();
         // Read has already removed one disk BOM; a remaining U+FEFF is content.
         append_read(&mut read, "\u{feff}known");

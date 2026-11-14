@@ -880,6 +880,32 @@ impl PartialEq for ResumeLifetimeGuard {
 
 impl Eq for ResumeLifetimeGuard {}
 
+/// Same-process reminder authority, intentionally absent from serialized
+/// transcript metadata. Hosts may carry it when rebuilding a live runtime.
+#[derive(Clone)]
+pub struct ResumeTransientReminderAuthority(std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl ResumeTransientReminderAuthority {
+    pub fn new<T: Send + Sync + 'static>(state: T) -> Self {
+        Self(std::sync::Arc::new(state))
+    }
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Debug for ResumeTransientReminderAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResumeTransientReminderAuthority(..)")
+    }
+}
+impl PartialEq for ResumeTransientReminderAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ResumeTransientReminderAuthority {}
+
 /// Transcript-adjacent runtime state needed by an in-place session resume.
 ///
 /// This leaf-friendly mirror deliberately uses primitive fields instead of
@@ -903,6 +929,8 @@ pub struct PinnedResumeSource {
 pub struct ResumeRuntimeSnapshot {
     /// Host reservation that must outlive detached resume work.
     pub lifetime_guard: Option<ResumeLifetimeGuard>,
+    /// Live consume-once source authority transferred only within one process.
+    pub pending_transient_reminder_authority: Option<ResumeTransientReminderAuthority>,
     /// Exact transcript selected by the loader. A cross-worktree resume keeps
     /// appending here even when the stored working directory no longer exists.
     pub transcript_path: Option<std::path::PathBuf>,
@@ -1174,6 +1202,15 @@ pub enum HandleError {
     /// sparse-array length across the host boundary.
     #[error("settings operation failed")]
     Settings(crate::types::utf16_json::Utf16JsonProjection),
+    /// The target identity/history committed, but a post-activation operation
+    /// failed. Hosts must publish the mounted session before reporting failure.
+    #[error("session {session_id} resumed with an error: {source}")]
+    ResumeCommitted {
+        /// The durable session now mounted by the handle.
+        session_id: SessionId,
+        /// Original failure, including structured source-preserving details.
+        source: Box<HandleError>,
+    },
 }
 
 impl From<crate::settings::SettingsError> for HandleError {
@@ -3928,6 +3965,15 @@ pub trait OrchestratorHandle: Send + Sync {
         Err(HandleError::Unimplemented("resume_session".into()))
     }
 
+    /// Capture an idle owner's same-process reminder authority for transfer.
+    /// The host retires that owner before building its replacement; active
+    /// requests are not transferable through this snapshot API.
+    fn capture_pending_transient_reminder_authority(
+        &self,
+    ) -> Option<ResumeTransientReminderAuthority> {
+        None
+    }
+
     /// Commit a host-authorized directory move after its permission and trust
     /// checks. This is a host control operation, never a model-facing tool.
     /// `trusted_dirs` is the host's effective target cwd/additional-dir set.
@@ -4392,7 +4438,9 @@ pub struct TerminalApiErrorMessage {
 #[async_trait]
 pub trait OutputStream: Send + Sync {
     /// SDK stream transports opt in to the ephemeral result-usage accumulator.
-    fn wants_result_usage(&self) -> bool { false }
+    fn wants_result_usage(&self) -> bool {
+        false
+    }
 
     /// Native-compatible CLI sinks request its diagnostic wording. This is a
     /// presentation fact, not an authorization decision.
@@ -4401,7 +4449,11 @@ pub trait OutputStream: Send + Sync {
     }
 
     /// Bind the session accounting source for SDK usage-since-result stamps.
-    fn set_result_usage_source(&self, _source: std::sync::Arc<dyn super::result_usage::ResultUsageSource>) {}
+    fn set_result_usage_source(
+        &self,
+        _source: std::sync::Arc<dyn super::result_usage::ResultUsageSource>,
+    ) {
+    }
     /// Observe selected accounts and sanitized aggregate routing failures.
     async fn emit_provider_account_routing(
         &self,
@@ -4495,7 +4547,8 @@ pub trait OutputStream: Send + Sync {
         _model: &str,
         _native_event_json: Option<&str>,
         _content: &[crate::types::ContentBlock],
-    ) {}
+    ) {
+    }
 
     /// Emit a native tombstone for a complete row. `display_only` is a native
     /// flag and does not promise presentation-only deletion; native consumers

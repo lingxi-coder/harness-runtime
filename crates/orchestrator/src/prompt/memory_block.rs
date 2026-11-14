@@ -1085,6 +1085,7 @@ impl crate::ConversationOrchestrator {
     pub(crate) async fn agents_context_after_read(
         &self,
         input: &Utf16JsonProjection,
+        owner: lingxi_core::types::MessageId,
     ) -> Vec<String> {
         if !self.memory.filesystem_discovery()
             || !memory::lingxi_md::agents::attachments_enabled()
@@ -1148,6 +1149,11 @@ impl crate::ConversationOrchestrator {
                 }
                 continue;
             }
+            self.prompt_runtime
+                .agent_instruction_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key.clone(), owner);
             context.sent_paths.insert(key);
             contexts.push(format!(
                 "Contents of {}:\n\n{}",
@@ -1435,8 +1441,13 @@ impl crate::ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             session
-                .model_context_history()
+                .history
                 .iter()
+                .filter(|message| {
+                    !session
+                        .model_context_excluded_messages
+                        .contains(&message.id())
+                })
                 .filter_map(|message| attachments.get(&message.id()).cloned())
                 .collect::<Vec<_>>()
         };

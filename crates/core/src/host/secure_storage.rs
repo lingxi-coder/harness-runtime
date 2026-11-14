@@ -35,6 +35,18 @@ pub trait SecureStorage: Send + Sync {
         account: &str,
     ) -> Result<Option<SecureStorageData>, SecureStorageError>;
 
+    /// Read the authoritative entry, bypassing any process-local read cache.
+    /// Cross-process credential coordinators use this while holding their
+    /// shared refresh lock so a rotated refresh token cannot be replayed.
+    /// Backends without a read cache can use this default implementation.
+    async fn retrieve_uncached(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        self.retrieve(service, account).await
+    }
+
     /// Check whether an entry exists without requiring callers to load its
     /// secret payload. Native backends should override this when their OS API
     /// can answer an attribute-only query without decrypting the value.
@@ -59,6 +71,13 @@ pub trait SecureStorage: Send + Sync {
     /// Concrete backend in use. Useful for logging, telemetry, and user-facing
     /// "where are my secrets stored?" diagnostics.
     fn backend(&self) -> SecureStorageBackend;
+
+    /// Stable credential ownership used to scope durable provider accounts.
+    /// Fallback wrappers must retain their configured ownership when the active
+    /// diagnostic backend changes; explicitly isolated stores keep their own domain.
+    fn account_ownership_backend(&self) -> SecureStorageBackend {
+        self.backend()
+    }
 }
 
 /// Identifies the concrete secure-storage backend in use.

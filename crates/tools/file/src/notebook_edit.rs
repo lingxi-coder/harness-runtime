@@ -788,7 +788,7 @@ Usage:\n\
                 .modified
                 .map_or(0, tool_api::read_file_state::mtime_ms_floor);
             let published_units = published.encode_utf16().collect();
-            state.set_after_write_with_requested_aliases_and_units(
+            state.set_after_write_with_identity(
                 commit_requested.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content: published,
@@ -802,6 +802,7 @@ Usage:\n\
                 true,
                 vec![commit_requested, commit_path],
                 Some(published_units),
+                receipt.identity,
             );
             Ok::<_, ToolError>(())
         })

@@ -295,6 +295,13 @@ impl ConversationOrchestrator {
         })
     }
 
+    async fn owns_prompt_ingress_for_model_step(&self) -> bool {
+        let session = self.session.lock().await;
+        crate::request_context::prompt_ingress_owner_is_current(&session.history, |id| {
+            session.injected_message_sources.contains_key(id)
+        })
+    }
+
     async fn prompt_ingress_kind_for_model_step(
         &self,
         captured_regular_user_prompt: bool,
@@ -361,15 +368,18 @@ impl ConversationOrchestrator {
         is_regular_user_prompt: bool,
         user_cancel: Option<&CancellationToken>,
     ) -> Result<PreparedTurnStep, OrchestratorError> {
+        crate::request_context::clear_current_tool_change_rows();
         let prompt_ingress_kind = self
             .prompt_ingress_kind_for_model_step(is_regular_user_prompt)
             .await;
         let is_regular_user_prompt =
             prompt_ingress_kind == crate::request_context::PromptIngressKind::RegularUser;
+        let owns_prompt_ingress = self.owns_prompt_ingress_for_model_step().await;
         let persistent_app_chat = self.is_persistent_app_chat();
         let native_nar_ingress = !persistent_app_chat
             && crate::request_context::is_native_nar_ingress(prompt_ingress_kind);
-        if !is_regular_user_prompt {
+        let cache_nar_ingress = native_nar_ingress && owns_prompt_ingress;
+        if !is_regular_user_prompt || !owns_prompt_ingress {
             crate::request_context::clear_turn_projection();
         }
         // Native runs its next-turn MCP redial scheduler once at committed
@@ -476,7 +486,7 @@ impl ConversationOrchestrator {
         // The current Native NAr batch remains task-local until accepted request
         // assembly. Keep its identities out of this earlier history snapshot;
         // the accepted finalizer below re-reads only committed rows.
-        if native_nar_ingress {
+        if cache_nar_ingress {
             if let Some(rows) = crate::request_context::staged_prompt_ingress_attachments() {
                 let ingress_ids = rows
                     .iter()
@@ -505,7 +515,7 @@ impl ConversationOrchestrator {
         // Sgn runs in Native's first NAr fan-out, before deferred/tool and
         // reminder rows. Produce its settings deltas now so they join the
         // staged turn batch before the collector snapshots that batch.
-        if native_nar_ingress
+        if cache_nar_ingress
             && !crate::request_context::prompt_ingress_batch_finalized()
             && crate::request_context::staged_prompt_ingress_attachments().is_some()
         {
@@ -549,7 +559,7 @@ impl ConversationOrchestrator {
             complete_wire_tools,
             available_tool_names,
         ) = self.build_wire_tools_with_complete().await?;
-        if native_nar_ingress
+        if cache_nar_ingress
             && !crate::request_context::prompt_ingress_batch_finalized()
             && crate::request_context::staged_prompt_ingress_attachments().is_some()
             && crate::request_context::staged_prompt_ingress_attachment("skill_listing").is_none()
@@ -637,7 +647,7 @@ impl ConversationOrchestrator {
         current_wire_tool_names.extend(deferred_wire_tool_names.iter().cloned());
         current_wire_tool_names.sort();
         current_wire_tool_names.dedup();
-        let cached_deferred_attachment = native_nar_ingress
+        let cached_deferred_attachment = cache_nar_ingress
             .then(|| {
                 ingress_batch_finalized
                     .then(|| {
@@ -655,9 +665,9 @@ impl ConversationOrchestrator {
                 Vec::new()
             } else if let Some(row) = cached_deferred_attachment {
                 vec![row]
-            } else if native_nar_ingress && ingress_batch_finalized {
+            } else if cache_nar_ingress && ingress_batch_finalized {
                 Vec::new()
-            } else if native_nar_ingress {
+            } else if cache_nar_ingress {
                 let rows: Vec<crate::request_context::PromptIngressAttachment> = if let Some(rows) =
                     crate::request_context::prompt_ingress_producer_rows("deferred_tools_delta")
                 {
@@ -681,11 +691,19 @@ impl ConversationOrchestrator {
                 };
                 rows
             } else {
-                self.deferred_tools_prompt_ingress_attachment(&current_wire_tool_names, None)
+                self.deferred_tools_prompt_ingress_attachment(
+                    &current_wire_tool_names,
+                    native_nar_ingress.then(|| self.native_tool_pool_refresh_callback_available()).flatten(),
+                )
                     .await
                     .into_iter()
                     .collect()
             };
+        // A fresh step already advanced its deferred catalog cursor. Keep its
+        // own stable rows through hooks and durable admission if cancelled.
+        let deferred_commit = (!cache_nar_ingress && !deferred_rows.is_empty())
+            .then(crate::request_context::preparation_commit_scope)
+            .flatten();
         let native_tool_change_api_system_rows = if native_nar_ingress {
             let scope = self.native_tool_search_scope_snapshot();
             let latches = scope.native_tool_search_state();
@@ -815,36 +833,34 @@ impl ConversationOrchestrator {
                 .filter(|tool| !tool.defer_loading)
                 .map(|tool| tool.name.clone())
                 .collect::<std::collections::HashSet<_>>();
-            let _name_only_rows =
+            let produce_name_only_rows = || async {
+                if !use_tool_search {
+                    return Vec::new();
+                }
+                let addition_names =
+                    super::super::reminders_impl::native_tool_change_addition_names(
+                        &native_tool_change_api_system_rows,
+                    );
+                deferred_rows.iter().filter_map(|row| {
+                    super::super::reminders_impl::deferred_tools_name_only_record_attachment(
+                        row, self.tools.deferral(), use_tool_search,
+                        mctc_blocks_eligible, &inline_tool_names, &addition_names,
+                    )
+                }).collect::<Vec<_>>()
+            };
+            if cache_nar_ingress {
                 crate::request_context::prompt_ingress_producer_rows_or_else(
                     self,
                     "deferred_tools_record",
-                    || async {
-                        if !use_tool_search {
-                            return Vec::new();
-                        }
-                        let addition_names =
-                            super::super::reminders_impl::native_tool_change_addition_names(
-                                &native_tool_change_api_system_rows,
-                            );
-                        deferred_rows
-                            .iter()
-                            .filter_map(|row| {
-                                super::super::reminders_impl::deferred_tools_name_only_record_attachment(
-                                    row,
-                                    self.tools.deferral(),
-                                    use_tool_search,
-                                    mctc_blocks_eligible,
-                                    &inline_tool_names,
-                                    &addition_names,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    },
+                    produce_name_only_rows,
                 )
                 .await;
+            } else {
+                let rows = produce_name_only_rows().await;
+                self.persist_prompt_ingress_reminders(&rows).await;
+            }
         }
-        if native_nar_ingress
+        if cache_nar_ingress
             && !ingress_batch_finalized
             && deferred_rows.is_empty()
             && !crate::request_context::prompt_ingress_producer_is_complete("deferred_tools_delta")
@@ -857,94 +873,40 @@ impl ConversationOrchestrator {
             .await;
         }
         let deferred_attachment = deferred_rows.into_iter().next();
-        let deferred_reminder = if let Some(mut row) = deferred_attachment {
-            let pending_initial_producer = native_nar_ingress
+        let deferred_reminder = if let Some(row) = deferred_attachment {
+            let pending_initial_producer = cache_nar_ingress
                 && !ingress_batch_finalized
                 && !crate::request_context::prompt_ingress_producer_is_complete(
                     "deferred_tools_delta",
                 );
-            let has_rendered_reminder = row.rendered.array_len("").is_some_and(|length| length > 0);
-            let mut keep = true;
-            if pending_initial_producer && has_rendered_reminder {
-                if let Some(message) = self
-                    .mod_prompt_attachment(
-                        "deferred_tools_delta",
-                        row.message.clone(),
-                        serde_json::json!({"kind":"engine"}),
-                    )
-                    .await
-                {
-                    row.message = message;
-                    if let Some(rendered) =
-                        crate::request_context::rendered_system_message(&row.message)
-                    {
-                        row.rendered = rendered;
-                    } else {
-                        keep = false;
-                    }
-                } else {
-                    keep = false;
-                }
-                let completed_rows = keep.then_some(row.clone()).into_iter().collect();
-                let _ = crate::request_context::complete_prompt_ingress_producer_rows(
-                    self,
-                    "deferred_tools_delta",
-                    completed_rows,
-                )
-                .await;
-            } else if pending_initial_producer {
+            // Admit the pristine source even when a request-only Mod hides it.
+            // Persisted attachment screening below applies the Mod exactly once
+            // after projection and is shared with retry and resume.
+            if pending_initial_producer {
                 let _ = crate::request_context::complete_prompt_ingress_producer_rows(
                     self,
                     "deferred_tools_delta",
                     vec![row.clone()],
                 )
                 .await;
-            } else if !native_nar_ingress && has_rendered_reminder {
-                if let Some(message) = self
-                    .mod_prompt_attachment(
-                        "deferred_tools_delta",
-                        row.message.clone(),
-                        serde_json::json!({"kind":"engine"}),
-                    )
-                    .await
-                {
-                    row.message = message;
-                    if let Some(rendered) =
-                        crate::request_context::rendered_system_message(&row.message)
-                    {
-                        row.rendered = rendered;
-                    } else {
-                        keep = false;
-                    }
-                } else {
-                    keep = false;
-                }
-                if keep {
-                    self.persist_staged_prompt_ingress_reminder(&row).await;
-                }
-            } else if !native_nar_ingress {
-                // Native can persist a status-clearing attachment whose API
-                // renderer returns `[]`; it still carries typed replay state.
-                self.persist_staged_prompt_ingress_reminder(&row).await;
+            } else if !cache_nar_ingress {
+                self.persist_prompt_ingress_reminder(&row).await;
             }
-            if keep {
-                let cached_rendered_count = row.rendered.array_len("").unwrap_or_default();
-                crate::request_context::render_deferred_tools_delta_for_request(
-                    row.message.id(),
-                    &row.payload,
-                    (cached_rendered_count > 0).then_some(&row.message),
-                    cached_rendered_count,
-                    deferred_tools_projection_facts.clone(),
-                    crate::request_context::staged_name_only_announcement_uuids()
-                        .contains(&row.message.id().to_string()),
-                )
-            } else {
-                None
-            }
+            let cached_rendered_count = row.rendered.array_len("").unwrap_or_default();
+            crate::request_context::render_deferred_tools_delta_for_request(
+                row.message.id(),
+                &row.payload,
+                (cached_rendered_count > 0).then_some(&row.message),
+                cached_rendered_count,
+                deferred_tools_projection_facts.clone(),
+                crate::request_context::staged_name_only_announcement_uuids()
+                    .contains(&row.message.id().to_string()),
+            )
         } else {
             None
         };
-        if native_nar_ingress {
+        drop(deferred_commit);
+        if cache_nar_ingress {
             crate::request_context::mark_native_request_assembly_accepted();
             crate::request_context::finalize_prompt_ingress_batch(self, user_cancel).await?;
 
@@ -958,7 +920,6 @@ impl ConversationOrchestrator {
                 .iter()
                 .map(|row| row.message.id())
                 .collect::<std::collections::HashSet<_>>();
-            snapshot.retain(|row| !staged_ingress_ids.contains(&row.id()));
             if crate::request_context::prompt_ingress_batch_finalized() {
                 let model_visible_ingress_ids = accepted_ingress
                     .iter()
@@ -990,8 +951,19 @@ impl ConversationOrchestrator {
                     .keys()
                     .copied()
                     .collect::<std::collections::HashSet<_>>();
+                // A steering prompt must leave the initial batch in its
+                // existing history positions. Remove only its transient
+                // replays; fresh notices belong beside the later prompt.
+                let mut retained_ingress_ids = std::collections::HashSet::new();
+                snapshot.retain(|row| {
+                    !staged_ingress_ids.contains(&row.id())
+                        || (!owns_prompt_ingress
+                            && accepted_ids.contains(&row.id())
+                            && retained_ingress_ids.insert(row.id()))
+                });
                 turn_reminders.retain(|row| {
-                    !staged_ingress_ids.contains(&row.id()) || accepted_ids.contains(&row.id())
+                    !staged_ingress_ids.contains(&row.id())
+                        || (owns_prompt_ingress && accepted_ids.contains(&row.id()))
                 });
                 let mut accepted_history = accepted_history;
                 for attachment in accepted_ingress {
@@ -1002,11 +974,14 @@ impl ConversationOrchestrator {
                         || attachment.payload.string_at("/type") == Some("deferred_tools_delta")
                     {
                         if let Some(message) = accepted_history.remove(&attachment.message.id()) {
-                            snapshot.push(message);
+                            if owns_prompt_ingress || retained_ingress_ids.insert(message.id()) {
+                                snapshot.push(message);
+                            }
                         }
                     }
                 }
             } else {
+                snapshot.retain(|row| !staged_ingress_ids.contains(&row.id()));
                 // A cancellation at the commit boundary leaves the cached NAr
                 // batch retryable, but this prepared step must not retain it.
                 turn_reminders.retain(|row| !staged_ingress_ids.contains(&row.id()));
@@ -1066,7 +1041,7 @@ impl ConversationOrchestrator {
         // but Native still places its request-owned row after the initial NAr
         // reminders and before shared context. Later tool steps keep the
         // durable history order instead of moving that row again.
-        if is_regular_user_prompt
+        if (is_regular_user_prompt && owns_prompt_ingress)
             || (native_nar_ingress
                 && prompt_ingress_kind == crate::request_context::PromptIngressKind::Other)
         {
@@ -1097,23 +1072,7 @@ impl ConversationOrchestrator {
         )
         .await;
         if !native_tool_change_api_system_rows.is_empty() {
-            let insertion_index = snapshot
-                .iter()
-                .rposition(|message| {
-                    matches!(
-                        message,
-                        ConversationMessage::User {
-                            is_meta: false,
-                            is_compact_summary: false,
-                            ..
-                        }
-                    )
-                })
-                .unwrap_or(snapshot.len());
-            snapshot.splice(
-                insertion_index..insertion_index,
-                native_tool_change_api_system_rows.iter().cloned(),
-            );
+            crate::request_context::project_current_tool_change_rows(&mut snapshot);
         }
         // Fixed host/scalar context is an API prefix outside Native's typed
         // attachment grouping, so add it after the full-history projection.
@@ -1454,27 +1413,25 @@ impl ConversationOrchestrator {
             let is_regular_user_prompt =
                 prompt_ingress_kind == crate::request_context::PromptIngressKind::RegularUser;
             let native_nar_ingress =
-                crate::request_context::is_native_nar_ingress(prompt_ingress_kind);
+                crate::request_context::is_native_nar_ingress(prompt_ingress_kind)
+                    && self.owns_prompt_ingress_for_model_step().await;
             // Native 2.1.293 SIMPLE returns only the queued task attachments
             // before entering the ordinary reminder producer fan-out.
             if self.config.bare {
-                let notification_rows =
-                    crate::request_context::prompt_ingress_producer_rows_or_else(
-                        self,
-                        "task_notifications",
-                        || async {
-                            self.task_notification_reminder_messages_in_turn(in_human_turn)
-                                .await
-                        },
-                    )
+                let task_publication = crate::request_context::changed_files_publication_scope();
+                crate::request_context::mark_changed_files_publication_started();
+                let notification_rows = self
+                    .task_notification_reminder_messages_for_step(in_human_turn)
                     .await;
                 let staged_batch = native_nar_ingress
+                    && !crate::request_context::prompt_ingress_batch_finalized()
                     && crate::request_context::staged_prompt_ingress_attachments().is_some();
                 if !staged_batch {
                     for notification in &notification_rows {
                         self.persist_prompt_ingress_reminder(notification).await;
                     }
                 }
+                drop(task_publication);
                 let task_notifications = notification_rows
                     .into_iter()
                     .map(|row| row.message)
@@ -1501,12 +1458,11 @@ impl ConversationOrchestrator {
             };
             if crate::request_context::prompt_ingress_batch_finalized() {
                 if let Some(rows) = staged_ingress.as_mut() {
-                    let live_ids = self
-                        .session
-                        .lock()
-                        .await
-                        .model_context_history()
+                    let session = self.session.lock().await;
+                    let live_ids = session
+                        .history
                         .iter()
+                        .filter(|row| !session.model_context_excluded_messages.contains(&row.id()))
                         .map(ConversationMessage::id)
                         .collect::<std::collections::HashSet<_>>();
                     rows.retain(|row| live_ids.contains(&row.message.id()));
@@ -1553,17 +1509,32 @@ impl ConversationOrchestrator {
                     .await;
                 }
             }
-            let changed_file_rows = crate::request_context::prompt_ingress_producer_rows_or_else(
-                self,
-                "changed_files",
-                || async { self.changed_files_reminder_messages(user_cancel).await },
-            )
-            .await;
-            if staged_ingress.is_none() {
-                for row in &changed_file_rows {
-                    self.persist_prompt_ingress_reminder(row).await;
-                }
+            let cache_changed_files_at_ingress = native_nar_ingress
+                && staged_ingress.is_some()
+                && self.owns_prompt_ingress_for_model_step().await;
+            let changed_files_publication =
+                crate::request_context::changed_files_publication_scope();
+            let changed_file_rows = if cache_changed_files_at_ingress {
+                crate::request_context::prompt_ingress_producer_rows_or_else(
+                    self,
+                    "changed_files",
+                    || async { self.changed_files_reminders_for_delivery(user_cancel).await },
+                )
+                .await
+            } else {
+                // The ingress cache belongs to the initial prompt and its
+                // preparation retries. Later steps, including a queued human
+                // prompt classified as RegularUser, need a fresh check. The
+                // accepted initial rows already live in ordinary history.
+                self.changed_files_reminders_for_delivery(user_cancel).await
+            };
+            if !cache_changed_files_at_ingress {
+                self.persist_prompt_ingress_reminders(&changed_file_rows)
+                    .await;
             }
+            // Initial notices survive a cancelled assembly in the pending
+            // queue. Continuations finish normal history/JSONL publication.
+            drop(changed_files_publication);
             for row in changed_file_rows {
                 transient.push(row.message);
             }
@@ -1571,17 +1542,10 @@ impl ConversationOrchestrator {
                 .nested_memory_reminder_messages(context_attachments)
                 .await
             {
-                if let Some(reminder) = self
-                    .prepare_engine_attachment(
-                        &mut engine_reminder_sources,
-                        "nested_memory",
-                        reminder,
-                        None,
-                    )
-                    .await
-                {
-                    model_reminders.push((transient.len(), reminder));
-                }
+                // Keep its raw identity in the reusable suffix even when a
+                // Mod suppresses the outgoing view. The common persisted-row
+                // screen below renders it once for this request and every retry.
+                model_reminders.push((transient.len(), reminder));
             }
             if let Some(reminder) = self.skill_discovery_reminder_message().await {
                 self.push_engine_attachment(
@@ -1711,20 +1675,18 @@ impl ConversationOrchestrator {
                 )
                 .await;
             }
-            let notification_rows = crate::request_context::prompt_ingress_producer_rows_or_else(
-                self,
-                "task_notifications",
-                || async {
-                    self.task_notification_reminder_messages_in_turn(in_human_turn)
-                        .await
-                },
-            )
-            .await;
-            if staged_ingress.is_none() {
+            let task_publication = crate::request_context::changed_files_publication_scope();
+            crate::request_context::mark_changed_files_publication_started();
+            let notification_rows = self
+                .task_notification_reminder_messages_for_step(in_human_turn)
+                .await;
+            if staged_ingress.is_none() || crate::request_context::prompt_ingress_batch_finalized()
+            {
                 for notification in &notification_rows {
                     self.persist_prompt_ingress_reminder(notification).await;
                 }
             }
+            drop(task_publication);
             let task_notifications = notification_rows
                 .into_iter()
                 .map(|row| row.message)
@@ -1748,6 +1710,8 @@ impl ConversationOrchestrator {
             // Task completion can enqueue memory updates, so this must follow the
             // notification drain and persistence above.
             for reminder in self.memory_update_reminder_messages().await {
+                let id = reminder.id();
+                let previous_len = transient.len();
                 self.push_engine_attachment(
                     &mut transient,
                     &mut engine_reminder_sources,
@@ -1755,6 +1719,9 @@ impl ConversationOrchestrator {
                     reminder,
                 )
                 .await;
+                if transient.len() == previous_len {
+                    self.acknowledge_consumed_reminder_ids(&[id]).await;
+                }
             }
             for reminder in self.relevant_memory_reminder_messages().await {
                 self.push_engine_attachment(
@@ -1843,8 +1810,11 @@ impl ConversationOrchestrator {
                     model_reminders.push((mcp_instructions_position, row.message));
                 }
             } else if !native_nar_ingress {
-                if let Some(reminder) = self.mcp_instructions_reminder_message().await {
-                    model_reminders.push((mcp_instructions_position, reminder));
+                if let Some(row) = self.mcp_instructions_prompt_ingress_attachment().await {
+                    let commit = crate::request_context::preparation_commit_scope();
+                    self.persist_prompt_ingress_reminder(&row).await;
+                    model_reminders.push((mcp_instructions_position, row.message));
+                    drop(commit);
                 }
             }
 
@@ -1878,8 +1848,10 @@ impl ConversationOrchestrator {
                     model_reminders.push((mcp_instructions_position, row.message));
                 }
             } else if let Some(row) = self.mcp_dropped_tools_prompt_ingress_attachment().await {
+                let commit = crate::request_context::preparation_commit_scope();
                 model_reminders.push((mcp_instructions_position, row.message.clone()));
                 self.persist_prompt_ingress_reminder(&row).await;
+                drop(commit);
             }
 
             Ok(TurnReminders {

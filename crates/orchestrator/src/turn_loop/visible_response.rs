@@ -235,6 +235,13 @@ pub(super) fn process_visible_response<'a>(
             // consumer selects K and dispatches its original ToolUse blocks.
             assistant_blocks.clone_from(content);
         }
+        let diagnostic_ack = (requested_model
+            && request_history_source
+                == super::mod_batched_step::RequestHistorySource::PhysicalRequest)
+            .then(|| orch.pending_diagnostics_id_in_request(&request_history))
+            .flatten();
+        orch.acknowledge_step_reminders_with_diagnostics_ack(&request_history, diagnostic_ack)
+            .await;
         orch.record_main_loop_assistant_usage_for_request(
             &assistant_msg,
             &response.model,

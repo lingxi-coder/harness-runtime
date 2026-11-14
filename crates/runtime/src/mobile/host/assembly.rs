@@ -1116,7 +1116,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     if !credentials.has_account_credential_refresher() {
         credentials.set_account_credential_refresher(account_authority.clone());
     }
-    client = client.with_credential_provider(Arc::new(composite));
+    client = client.with_credential_provider(crate::credential_provider::with_token_exchange(
+        Arc::new(composite),
+        llm_transport.clone(),
+    ));
     let (client, account_runtime) =
         crate::account_pool_store::attach_mobile_account_runtime(client, account_pool);
     let llm_runtime = Arc::new(client);
@@ -2308,16 +2311,17 @@ pub(super) async fn build_mobile_inner_with_ask(
             })
         }),
     );
-    let subagent_transcript_home = cfg.lingxi_home.clone();
-    let subagent_transcript_cwd = session_cwd.clone();
+    let subagent_transcript_writer = session_writer.clone();
     let subagent_active_session = active_session_uuid.clone();
     let subagents_dir_provider = Arc::new(move || {
         let session_uuid = subagent_active_session.lock().ok()?.clone();
-        Some(orchestrator::transcript_paths::subagents_dir(
-            &subagent_transcript_home,
-            &subagent_transcript_cwd.cwd().to_string_lossy(),
-            &session_uuid,
-        ))
+        let session = lingxi_core::types::SessionId::parse_prefixed(&session_uuid)?;
+        Some(
+            subagent_transcript_writer
+                .session_target_path(session)?
+                .with_extension("")
+                .join("subagents"),
+        )
     });
     let subagent_env_renderer = build_mobile_subagent_env_renderer(
         cwd.clone(),
@@ -2329,10 +2333,10 @@ pub(super) async fn build_mobile_inner_with_ask(
         logical_cwd.to_string_lossy().into_owned(),
         subagents_dir_provider.clone(),
     ));
-    let session_agent_observer = Arc::new(MobileSessionAgentObserver::new(
-        event_sink.clone(),
-        active_session_uuid.clone(),
-    ));
+    let session_agent_observer = Arc::new(
+        MobileSessionAgentObserver::new(event_sink.clone(), active_session_uuid.clone())
+            .with_transcript_storage(session_writer.clone(), cfg.lingxi_home.join("projects")),
+    );
     let session_agent_transcript_cache = session_agent_observer.transcript_cache.clone();
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
         .with_forward_subagent_output(&output)
@@ -4276,6 +4280,7 @@ fn build_mobile_engine_on_worker(
             loop_state: loop_state.clone(),
             durable_turns: durable_turns.clone(),
             active_session_uuid: inner.active_session_uuid.clone(),
+            active_turn: Some(active_cancel.clone()),
         }));
     let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     inner.orchestrator.set_cancel_reason(cancel_reason.clone());
@@ -4367,6 +4372,18 @@ fn build_mobile_engine_on_worker(
                         continue;
                     }
                     let _transition = loop_transition.lock().await;
+                    if active_cancel.lock().await.is_some() {
+                        continue;
+                    }
+                    let recovery_session = session_uuid.lock().map(|id| id.clone()).unwrap_or_default();
+                    match durable_turns.has_inactive_recovery(&recovery_session) {
+                        Ok(false) => {},
+                        Ok(true) => continue,
+                        Err(error) => {
+                            tracing::warn!(%error, "queued turn delayed until durable recovery is readable");
+                            continue;
+                        }
+                    }
                     if let Some(handle) = queued_slash_handle.get().and_then(std::sync::Weak::upgrade) {
                         let handle = super::automation::MobileCronBorrow(Some(handle));
                         if handle.scheduled_reload.load(std::sync::atomic::Ordering::Acquire) {
@@ -4377,6 +4394,17 @@ fn build_mobile_engine_on_worker(
                                 tracing::warn!(?error, "queued turn delayed until scheduled session reload succeeds");
                                 continue;
                             }
+                        }
+                        // A recovered queue can start before the first public
+                        // prompt initialized this connection's anchor cache.
+                        // Validate and initialize while idle, before dequeue or
+                        // reservation: doing it on a later busy Send would wait
+                        // for the queued driver's turn gate for its whole life.
+                        if let Err(error) = handle.ensure_mobile_session_anchor().await {
+                            #[cfg(test)]
+                            handle.queued_anchor_failure_for_test.notify_one();
+                            tracing::warn!(?error, "queued turn delayed until session anchor validation succeeds");
+                            continue;
                         }
                     } else {
                         continue;
@@ -4566,6 +4594,11 @@ fn build_mobile_engine_on_worker(
                     ));
                     *active = Some(turn.clone());
                     drop(active);
+                    let mut startup = super::MobileTurnStartupGuard {
+                        turn: turn.clone(), active: active_cancel.clone(), durable: durable_turns.clone(),
+                        queue: message_queue.clone(), permissions: permission_gate.clone(), events: sink.clone(),
+                        runtime: tokio::runtime::Handle::current(), tasks: child_turn_tasks.clone(), input: None, armed: true,
+                    };
                     cancel_reason.reset();
                     message_queue
                         .register_active_turn(turn.cancel.clone())
@@ -4574,8 +4607,6 @@ fn build_mobile_engine_on_worker(
                     if mobile_delivery.is_some() {
                         if let Err(error) = super::ensure_mobile_session_identity(
                             &session_writer,
-                            &lingxi_home,
-                            &session_cwd.cwd().to_string_lossy(),
                             &turn.session_id,
                         )
                         .await
@@ -4585,13 +4616,13 @@ fn build_mobile_engine_on_worker(
                                 .as_ref()
                                 .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
                             {
+                                message_queue.clear_active_turn().await;
                                 *active = None;
                             }
                             drop(active);
                             if let Some(owner_id) = turn.permission_owner_id {
                                 permission_gate.end_main_turn(owner_id);
                             }
-                            message_queue.clear_active_turn().await;
                             turn.mark_completed();
                             if let Some(command) = scheduled.clone() {
                                 message_queue.enqueue(command).await;
@@ -4615,13 +4646,23 @@ fn build_mobile_engine_on_worker(
                                 if let Some((loaded, _)) = mobile_delivery.as_mut() {
                                     *loaded = checkpoint.clone();
                                 }
-                                sink.emit(ClientEvent::TurnRecoveryState {
+                                if !super::emit_mobile_initial_event(&sink, &turn, ClientEvent::TurnRecoveryState {
                                     snapshot: checkpoint.snapshot(),
-                                })
-                                .await;
-                                client::adapter::TurnEventEmitter::new(sink.clone())
-                                    .emit_turn_started(Some(checkpoint.turn_id))
-                                    .await;
+                                }).await || !super::emit_mobile_initial_event(&sink, &turn, ClientEvent::TurnStarted {
+                                    turn_id: Some(checkpoint.turn_id),
+                                }).await {
+                                    // Explicit Cancel/Pause owns the durable
+                                    // transition. Withdrawing this initial
+                                    // callback is a normal startup return,
+                                    // not an abandoned foreign future.
+                                    super::clear_mobile_turn_slot(&active_cancel, &message_queue, &turn).await;
+                                    if let Some(owner_id) = turn.permission_owner_id {
+                                        permission_gate.end_main_turn(owner_id);
+                                    }
+                                    turn.mark_completed();
+                                    startup.disarm();
+                                    continue;
+                                }
                             }
                             Err(crate::mobile::turn_durability::DurableTurnStoreError::Terminal { .. })
                             | Err(crate::mobile::turn_durability::DurableTurnStoreError::NotFound { .. }) => {
@@ -4641,13 +4682,13 @@ fn build_mobile_engine_on_worker(
                                     .as_ref()
                                     .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
                                 {
-                                    *active = None;
+                                    message_queue.clear_active_turn().await;
+                                *active = None;
                                 }
                                 drop(active);
                                 if let Some(owner_id) = turn.permission_owner_id {
                                     permission_gate.end_main_turn(owner_id);
                                 }
-                                message_queue.clear_active_turn().await;
                                 turn.mark_completed();
                                 continue;
                             }
@@ -4657,13 +4698,13 @@ fn build_mobile_engine_on_worker(
                                     .as_ref()
                                     .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
                                 {
-                                    *active = None;
+                                    message_queue.clear_active_turn().await;
+                                *active = None;
                                 }
                                 drop(active);
                                 if let Some(owner_id) = turn.permission_owner_id {
                                     permission_gate.end_main_turn(owner_id);
                                 }
-                                message_queue.clear_active_turn().await;
                                 turn.mark_completed();
                                 if let Some(command) = scheduled.clone() {
                                     message_queue.enqueue(command).await;
@@ -4859,16 +4900,17 @@ fn build_mobile_engine_on_worker(
                             .as_ref()
                             .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
                         {
-                            *active = None;
+                            message_queue.clear_active_turn().await;
+                                *active = None;
                         }
                         drop(active);
                         if let Some(owner_id) = task_turn.permission_owner_id {
                             permission_gate.end_main_turn(owner_id);
                         }
-                        message_queue.clear_active_turn().await;
                         task_turn.mark_completed();
                     })));
                     turn.set_task_handle(task);
+                    startup.disarm();
                 }
             }))
     };
@@ -4918,6 +4960,8 @@ fn build_mobile_engine_on_worker(
         initial_event_test_gate: Default::default(),
         #[cfg(test)]
         slash_running_test_gate: Default::default(),
+        #[cfg(test)]
+        queued_anchor_failure_for_test: Default::default(),
         message_queue,
         loop_transition,
         cancel_reason,

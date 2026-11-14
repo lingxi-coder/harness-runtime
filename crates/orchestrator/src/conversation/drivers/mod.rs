@@ -4518,7 +4518,9 @@ impl ConversationOrchestrator {
         self.run_turn_streaming_inputs_locked(
             turn_guard,
             &display,
-            images.clone(),
+            // The explicit queued input below already owns these attachments.
+            // The fallback image channel is appended to it during screening.
+            Vec::new(),
             cancel,
             message_id,
             in_human_turn,

@@ -854,12 +854,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // (api.githubcopilot.com rejects the raw token). Wrap the composite so the
     // `github-copilot` credential is exchanged + cached; every other credential
     // id passes straight through unchanged.
-    let copilot_creds = llm_runtime::CopilotExchangeCredentialProvider::new(
-        Arc::new(composite),
-        llm_transport.clone(),
-        "github-copilot",
-    );
-    client = client.with_credential_provider(Arc::new(copilot_creds));
+    let copilot_creds =
+        crate::credential_provider::with_token_exchange(Arc::new(composite), llm_transport.clone());
+    client = client.with_credential_provider(copilot_creds);
     if let Some(pool) = account_pool {
         client = crate::account_pool_store::attach_account_runtime(client, pool, &catalog_registry);
     }
@@ -1066,7 +1063,7 @@ pub fn api_service_from_stack(
     .with_thinking(cfg.session_thinking)
     .with_effort_table_options(crate::effort_settings::table_options(&cfg.lingxi_home))
     .with_effort_settings_source({
-        let effort_cfg = cfg.clone();
+        let effort_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || {
             let snapshot = crate::desktop::settings_watch::managed_settings_snapshot_sync(
                 &effort_cfg,
@@ -1079,7 +1076,7 @@ pub fn api_service_from_stack(
         })
     })?
     .with_prompt_cache_ttl_settings_source({
-        let cache_cfg = cfg.clone();
+        let cache_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || super::prompt_cache_ttl_settings_for_config(&cache_cfg))
     });
 

@@ -929,6 +929,35 @@ mod tests {
 
     #[test]
     fn read_only_workspace_denies_public_cron_mutation_and_run_claim() {
+        fn source_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut files = std::collections::BTreeMap::new();
+            for entry in std::fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    files.extend(source_bytes(&path));
+                } else {
+                    files.insert(path.clone(), std::fs::read(path).unwrap());
+                }
+            }
+            files
+        }
+
+        struct UnexpectedCronOwner(Arc<std::sync::atomic::AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl super::super::MobileCronOwnerAdmission for UnexpectedCronOwner {
+            async fn begin_owner(&self, _: super::super::CronOwnerCandidateDto) -> bool {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                false
+            }
+
+            async fn confirm_owner(&self, _: super::super::CronOwnerReservationDto) -> bool {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                false
+            }
+        }
+
         let (_temp, directories, cfg, platform) =
             fixture_with_runtime(Some(Arc::new(MountTableRuntime::default())));
         let handle = new_engine_with_streaming(
@@ -955,6 +984,11 @@ mod tests {
                 .join(branding::DOT_DIR)
                 .join("scheduled_tasks.json");
             let before = std::fs::read(&path).unwrap();
+            let files_before = source_bytes(_temp.path());
+            let workspace_before = handle.workspace_state_snapshot();
+            assert!(handle.active_cancel.lock().await.is_none());
+            assert!(handle.message_queue.is_empty().await);
+            assert!(!handle.message_queue.has_active_turn().await);
             let linux = platform.mobile_linux().unwrap();
             let mut mounts = linux.current_mounts();
             for mount in &mut mounts {
@@ -980,11 +1014,46 @@ mod tests {
                 .to_string()
                 .contains("read-only"));
             assert!(!store.delete(task.id.clone()).await);
-            assert!(handle
-                .run_cron_task_now(task.id, super::super::automation::allow_cron_owner())
+            let admission_error = super::super::automation::cron_admission_snapshot(
+                handle.fs.as_ref(),
+                &Path::new(&directories.projects_guest_path).join("a"),
+                &task.id,
+                None,
+            )
+            .await
+            .err()
+            .expect("the pinned admission lock must respect the read-only mount");
+            assert!(admission_error.contains("read-only"), "{admission_error}");
+            let owner_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let result = handle
+                .run_cron_task_now(
+                    task.id.clone(),
+                    super::super::MobileCronAdmission::new(Box::new(UnexpectedCronOwner(
+                        owner_calls.clone(),
+                    ))),
+                )
                 .await
-                .is_none());
+                .expect("a failed admission read must report an unverifiable occurrence");
+            // The pinned admission lock is a write, so a read-only workspace
+            // rejects it before reserving an owner or claiming an execution.
+            assert_eq!(result.id, task.id);
+            assert!(matches!(
+                result.status,
+                super::super::CronFireStatusDto::OutcomeUnknown { .. }
+            ));
+            assert!(!result.retryable);
+            assert!(result.session_id.is_none());
+            assert!(result.session_transcript_path.is_none());
+            assert!(result.session_mode.is_none());
+            assert!(result.session_scope_key.is_none());
+            assert!(result.result_text.is_none());
+            assert_eq!(owner_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(handle.active_cancel.lock().await.is_none());
+            assert!(handle.message_queue.is_empty().await);
+            assert!(!handle.message_queue.has_active_turn().await);
+            assert_eq!(handle.workspace_state_snapshot(), workspace_before);
             assert_eq!(std::fs::read(path).unwrap(), before);
+            assert_eq!(source_bytes(_temp.path()), files_before);
         });
     }
 

@@ -89,7 +89,7 @@ impl McpTransport for Transport {
             input_schema: value
                 .subprojection("/tools/0/inputSchema")
                 .unwrap_or_else(|_| source(&json!({}))),
-            output_schema: None,
+            output_schema: value.subprojection("/tools/0/outputSchema").ok(),
             annotations: None,
             icons: Vec::new(),
             meta: None,
@@ -141,6 +141,48 @@ impl McpTransport for Transport {
         vec![McpTransportKind::InProcess]
     }
 }
+
+struct RequireOkOutput;
+impl lingxi_core::host::json_schema_validator::JsonSchemaValidator for RequireOkOutput {
+    fn new_session(
+        &self,
+        _: lingxi_core::host::json_schema_validator::SchemaProfile,
+    ) -> Arc<dyn lingxi_core::host::json_schema_validator::JsonSchemaValidatorSession> {
+        Arc::new(RequireOkOutput)
+    }
+}
+#[async_trait]
+impl lingxi_core::host::json_schema_validator::JsonSchemaValidatorSession for RequireOkOutput {
+    async fn compile(
+        &self,
+        _: &Utf16JsonProjection,
+    ) -> Result<
+        Arc<dyn lingxi_core::host::json_schema_validator::CompiledJsonSchema>,
+        lingxi_core::host::json_schema_validator::SchemaCompileError,
+    > {
+        Ok(Arc::new(RequireOkOutput))
+    }
+}
+#[async_trait]
+impl lingxi_core::host::json_schema_validator::CompiledJsonSchema for RequireOkOutput {
+    async fn validate(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<
+        lingxi_core::host::json_schema_validator::JsonSchemaValidation,
+        lingxi_core::host::json_schema_validator::SchemaWorkerError,
+    > {
+        if output.at_pointer("/ok").and_then(|value| value.as_bool()) == Some(true) {
+            return Ok(lingxi_core::host::json_schema_validator::JsonSchemaValidation::Valid);
+        }
+        Ok(
+            lingxi_core::host::json_schema_validator::JsonSchemaValidation::Invalid {
+                detail: "output rejected".into(),
+                keywords: vec!["required".into()],
+            },
+        )
+    }
+}
 struct Hooks(Arc<AtomicUsize>);
 #[async_trait]
 impl HookDispatcher for Hooks {
@@ -169,6 +211,7 @@ async fn first_registry_catalog_fulfils_roots_and_hooks_before_client_publicatio
     let peer = tokio::spawn(async move {
         let mut lines = BufReader::new(server_read).lines();
         let mut catalog_round = 0;
+        let mut tool_round = 0;
         while let Some(line) = lines.next_line().await.unwrap() {
             let request: Value = serde_json::from_str(&line).unwrap();
             captured.lock().unwrap().push(request.clone());
@@ -189,11 +232,17 @@ async fn first_registry_catalog_fulfils_roots_and_hooks_before_client_publicatio
                                 > 0
                         );
                         assert_eq!(request["params"]["inputResponses"]["e"]["action"], "accept");
-                        json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"worker","inputSchema":{"type":"object"}}]})
+                        json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"worker","inputSchema":{"type":"object"},"outputSchema":{"type":"object","required":["ok"]}}]})
                     }
                 }
                 "tools/call" => {
-                    json!({"resultType":"complete","content":[{"type":"text","text":"tool reached"}]})
+                    tool_round += 1;
+                    let structured = if tool_round == 1 {
+                        json!({})
+                    } else {
+                        json!({"ok":true})
+                    };
+                    json!({"resultType":"complete","content":[{"type":"text","text":"tool reached"}],"structuredContent":structured})
                 }
                 _ => json!({"resultType":"complete"}),
             };
@@ -215,7 +264,8 @@ async fn first_registry_catalog_fulfils_roots_and_hooks_before_client_publicatio
     });
     let hooks = Arc::new(AtomicUsize::new(0));
     let registry = McpRegistry::with_raw_conn(transport.clone(), transport)
-        .with_hook_dispatcher(Some(Arc::new(Hooks(hooks.clone()))));
+        .with_hook_dispatcher(Some(Arc::new(Hooks(hooks.clone()))))
+        .with_json_schema_validator(Arc::new(RequireOkOutput));
     registry
         .connect(McpServerConfig {
             name: "ordinary".into(),
@@ -238,6 +288,26 @@ async fn first_registry_catalog_fulfils_roots_and_hooks_before_client_publicatio
     assert_eq!(registry.servers_with_tools().await, vec!["ordinary"]);
     let client = registry.get_client("ordinary").await.unwrap();
     assert!(!client.has_pending_elicitation());
+    assert!(
+        client
+            .parse_tool_output("mcp__ordinary__worker", &source(&json!({})))
+            .await
+            .is_err(),
+        "initial transport catalog must install its schema before publication"
+    );
+    assert!(
+        matches!(
+            client
+                .call_tool_with_timeout(
+                    "mcp__ordinary__worker",
+                    source(&json!({})),
+                    Duration::from_secs(1),
+                )
+                .await,
+            Err(::mcp::McpClientError::OutputSchemaInvalid { .. })
+        ),
+        "the first actual tool result is validated before any client catalog refresh"
+    );
     let result = client
         .call_tool_with_timeout(
             "mcp__ordinary__worker",

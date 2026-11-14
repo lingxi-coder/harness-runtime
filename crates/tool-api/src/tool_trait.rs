@@ -74,11 +74,27 @@ pub trait Tool: Send + Sync {
     /// Canonical tool name (e.g. `"Read"`, `"Bash"`).
     fn name(&self) -> &str;
 
+    /// The logical key this reader publishes for a supplied model path.
+    /// This is pure lexical normalization, without filesystem I/O, translation
+    /// into guest backing storage, or permission authority.
+    fn read_state_request_path(&self, path: &std::path::Path) -> PathBuf {
+        path.to_path_buf()
+    }
+
+    /// Translate a read-state key into the current filesystem I/O namespace.
+    /// This grants no content-read permission; reminder callers still check the
+    /// captured route before reading. Readers backed by a guest filesystem must
+    /// override the identity translation so a missing host spelling cannot be
+    /// mistaken for deletion of a model path.
+    fn read_state_io_path(&self, path: &std::path::Path) -> Result<PathBuf, ToolError> {
+        Ok(path.to_path_buf())
+    }
+
     /// Open an already-read file for bounded post-compaction restoration.
     /// Implementations must apply their current model-path translation and
-    /// read-root policy and return a regular-file handle without reopening an
-    /// approved pathname. Unsupported tools fail closed: callers must not
-    /// replace `None` with direct filesystem access.
+    /// noninteractive Read-deny/read-root policy and return a regular-file
+    /// handle without reopening an approved pathname. Unsupported tools fail
+    /// closed: callers must not replace `None` with direct filesystem access.
     async fn open_file_for_compaction(
         &self,
         _path: &std::path::Path,
@@ -616,6 +632,11 @@ pub trait Tool: Send + Sync {
     /// Long-form source-backed tool prompt used when assembling the system prompt.
     async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection;
 
+    /// Whether the description observes live host state outside PromptOptions.
+    fn prompt_is_dynamic(&self) -> bool {
+        false
+    }
+
     /// Execute the tool.
     ///
     /// # Errors
@@ -627,6 +648,29 @@ pub trait Tool: Send + Sync {
         ctx: ToolUseContext,
         progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError>;
+
+    /// Capture a dynamic contract locally, without executing or connecting a
+    /// tool. A static native tool keeps using its own immutable instance.
+    async fn output_parser_snapshot(
+        &self,
+    ) -> Result<
+        Option<std::sync::Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>,
+        ToolError,
+    > {
+        Ok(None)
+    }
+
+    /// Execute after authorization while exposing the exact physical call's
+    /// output contract to middleware. The capture belongs only to this call.
+    async fn call_with_output_parser(
+        &self,
+        input: Utf16JsonProjection,
+        ctx: ToolUseContext,
+        progress_tx: ToolProgressSender,
+        _capture: lingxi_core::host::tool_invoker::ToolOutputParserCapture,
+    ) -> Result<ToolCallResult, ToolError> {
+        self.call(input, ctx, progress_tx).await
+    }
 
     /// Short verb phrase for activity displays
     /// (e.g. `"Reading file"`, `"Running command"`).

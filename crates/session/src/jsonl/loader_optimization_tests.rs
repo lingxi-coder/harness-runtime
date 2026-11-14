@@ -189,8 +189,22 @@ pub(super) fn record_catalog_read(path: &Path) {
         .or_default() += 1;
 }
 
+fn parse_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn record_catalog_parse(path: &Path) {
+    *parse_counts()
+        .lock()
+        .unwrap()
+        .entry(path.to_path_buf())
+        .or_default() += 1;
+}
+
 #[derive(Clone, Copy)]
 enum CatalogReadFault {
+    FullReadOnly,
     PermissionDenied,
     UnsupportedPrefix,
 }
@@ -205,6 +219,9 @@ pub(super) fn catalog_read_fault(path: &Path, prefix: bool) -> Option<lingxi_cor
         Some(CatalogReadFault::PermissionDenied) => Some(
             lingxi_core::host::FsError::PermissionDenied(path.display().to_string()),
         ),
+        Some(CatalogReadFault::FullReadOnly) if !prefix => Some(lingxi_core::host::FsError::Io(
+            "transient complete read failure".into(),
+        )),
         Some(CatalogReadFault::UnsupportedPrefix) if prefix => Some(
             lingxi_core::host::FsError::Io("prefix reads unsupported by test backend".into()),
         ),
@@ -469,4 +486,360 @@ async fn alias_index_retries_until_admission_and_keeps_all_destination_variants(
         1,
         "ordinary discovery keeps its existing precedence"
     );
+}
+
+#[tokio::test]
+async fn successful_prefix_and_transient_full_read_failure_does_not_poison_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let cwd = cwd.to_str().unwrap();
+    let home = temp.path().join("home");
+    let dir = home.join("projects").join(project_dir_name(cwd));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (_, path) = write_session(&dir, cwd);
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_owned()));
+    let revision = std::fs::metadata(&path).unwrap();
+    {
+        let _fault = ReadFaultGuard::new(&path, CatalogReadFault::FullReadOnly);
+        let rows = list_recent_sessions_in_scope_with_diagnostics(
+            &home,
+            cwd,
+            SessionDiscoveryScope::Current,
+            usize::MAX,
+            fs.clone(),
+        )
+        .await;
+        assert!(matches!(rows, Err(LoaderError::Io { .. })), "{rows:?}");
+    }
+    let restored = list_recent_sessions_in_scope_with_diagnostics(
+        &home,
+        cwd,
+        SessionDiscoveryScope::Current,
+        usize::MAX,
+        fs,
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.sessions.len(), 1);
+    assert_eq!(
+        revision.modified().unwrap(),
+        std::fs::metadata(&path).unwrap().modified().unwrap()
+    );
+    assert_eq!(revision.len(), std::fs::metadata(&path).unwrap().len());
+}
+
+fn alias_source_fixture() -> (
+    tempfile::TempDir,
+    Uuid,
+    PathBuf,
+    PathBuf,
+    Arc<dyn FileSystem>,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("source");
+    let destination = temp.path().join("destination");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::create_dir_all(&destination).unwrap();
+    let (id, path) = write_session(&source_dir, temp.path().to_str().unwrap());
+    let source = std::fs::read_to_string(&path).unwrap();
+    let relocated = json!({"type":"relocated", "sessionId":id, "relocatedCwd":destination});
+    std::fs::write(&path, format!("{source}{relocated}\n")).unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_owned()));
+    (temp, id, path, destination, fs)
+}
+
+#[tokio::test]
+async fn unchanged_alias_admission_and_enrichment_share_one_full_read_and_parse() {
+    let (_temp, id, path, destination, fs) = alias_source_fixture();
+    let aliases = vec![(path.clone(), destination.clone())];
+    let mut candidates = Vec::new();
+    collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].alias_capture.is_some());
+    assert_eq!(read_counts().lock().unwrap()[&path], 1);
+    assert_eq!(parse_counts().lock().unwrap()[&path], 1);
+    let mut skipped = 0;
+    let mut rows = enrich_candidates(
+        candidates,
+        &fs,
+        false,
+        &[],
+        &[],
+        &[path.clone()],
+        &mut skipped,
+    )
+    .await
+    .unwrap();
+    retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].uuid, id);
+    assert_eq!(rows[0].workspace_path.as_deref(), destination.to_str());
+    assert_eq!(rows[0].title, "hello");
+    assert_eq!(rows[0].message_count, 1);
+    assert_eq!(skipped, 0);
+    assert_eq!(
+        read_counts().lock().unwrap()[&path],
+        1,
+        "a stable alias needs one full read plus its late bounded access probe"
+    );
+    assert_eq!(
+        parse_counts().lock().unwrap()[&path],
+        1,
+        "admission and row metadata must use the same routed snapshot"
+    );
+}
+
+#[tokio::test]
+async fn alias_capture_refreshes_late_relocation_before_final_membership_check() {
+    let (temp, id, path, destination, fs) = alias_source_fixture();
+    let aliases = vec![(path.clone(), destination)];
+    let mut candidates = Vec::new();
+    collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
+    let next_destination = temp.path().join("next");
+    std::fs::create_dir_all(&next_destination).unwrap();
+    let source = std::fs::read_to_string(&path).unwrap();
+    let relocated = json!({"type":"relocated", "sessionId":id, "relocatedCwd":next_destination});
+    std::fs::write(&path, format!("{source}{relocated}\n")).unwrap();
+    let mut skipped = 0;
+    let mut rows = enrich_candidates(
+        candidates,
+        &fs,
+        false,
+        &[],
+        &[],
+        &[path.clone()],
+        &mut skipped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows[0].workspace_path.as_deref(), next_destination.to_str());
+    retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
+    assert!(
+        rows.is_empty(),
+        "late /cd must not inherit the old alias destination"
+    );
+    assert_eq!(read_counts().lock().unwrap()[&path], 2);
+    assert_eq!(parse_counts().lock().unwrap()[&path], 2);
+}
+
+#[tokio::test]
+async fn alias_capture_refreshes_replacements_rewrites_and_truncation() {
+    for mutation in ["replace", "rewrite", "truncate"] {
+        let (temp, _id, path, destination, fs) = alias_source_fixture();
+        let aliases = vec![(path.clone(), destination)];
+        let mut candidates = Vec::new();
+        collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
+        let before = std::fs::metadata(&path).unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        match mutation {
+            "replace" => {
+                let replacement = temp.path().join("replacement");
+                std::fs::write(&replacement, &source).unwrap();
+                filetime::set_file_mtime(
+                    &replacement,
+                    filetime::FileTime::from_system_time(before.modified().unwrap()),
+                )
+                .unwrap();
+                std::fs::rename(&replacement, &path).unwrap();
+            }
+            "rewrite" => {
+                // Length and mtime agree with the captured row; ctime and the
+                // pinned inode revision must still force a fresh read.
+                std::fs::write(&path, source.replace("hello", "world")).unwrap();
+                filetime::set_file_mtime(
+                    &path,
+                    filetime::FileTime::from_system_time(before.modified().unwrap()),
+                )
+                .unwrap();
+            }
+            "truncate" => std::fs::write(&path, "").unwrap(),
+            _ => unreachable!(),
+        }
+        let mut skipped = 0;
+        let mut rows = enrich_candidates(
+            candidates,
+            &fs,
+            false,
+            &[],
+            &[],
+            &[path.clone()],
+            &mut skipped,
+        )
+        .await
+        .unwrap();
+        retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
+        if mutation == "truncate" {
+            assert!(rows.is_empty());
+        } else {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].title,
+                if mutation == "rewrite" {
+                    "world"
+                } else {
+                    "hello"
+                }
+            );
+        }
+        assert_eq!(
+            read_counts().lock().unwrap()[&path],
+            2,
+            "{mutation} must not reuse the old derived row"
+        );
+        assert_eq!(
+            parse_counts().lock().unwrap()[&path],
+            if mutation == "truncate" { 1 } else { 2 },
+            "{mutation} must route a valid refreshed source or reject its missing fixed mode"
+        );
+    }
+}
+
+#[tokio::test]
+async fn alias_capture_rechecks_access_and_keeps_unsupported_prefix_fallback() {
+    for fault in [
+        CatalogReadFault::PermissionDenied,
+        CatalogReadFault::UnsupportedPrefix,
+    ] {
+        let (_temp, _id, path, destination, fs) = alias_source_fixture();
+        let aliases = vec![(path.clone(), destination)];
+        let mut candidates = Vec::new();
+        collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
+        let _fault = ReadFaultGuard::new(&path, fault);
+        let mut skipped = 0;
+        let rows = enrich_candidates(
+            candidates,
+            &fs,
+            false,
+            &[],
+            &[],
+            &[path.clone()],
+            &mut skipped,
+        )
+        .await
+        .unwrap();
+        match fault {
+            CatalogReadFault::FullReadOnly => {
+                unreachable!("full-read-only failures use the separate revision recovery fixture")
+            }
+            CatalogReadFault::PermissionDenied => {
+                assert!(
+                    rows.is_empty(),
+                    "a prepared row cannot authorize access revoked after admission"
+                );
+                assert_eq!(skipped, 1);
+                assert_eq!(parse_counts().lock().unwrap()[&path], 1);
+            }
+            CatalogReadFault::UnsupportedPrefix => {
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "unsupported prefix access must use the existing full-read fallback"
+                );
+                assert_eq!(skipped, 0);
+                assert_eq!(parse_counts().lock().unwrap()[&path], 2);
+            }
+        }
+        assert_eq!(read_counts().lock().unwrap()[&path], 2);
+    }
+}
+
+#[test]
+fn captured_validation_reuses_a_shareable_routed_snapshot() {
+    fn assert_shareable<T: Send + Sync + std::fmt::Debug>() {}
+    assert_shareable::<LoadedTranscript>();
+    let id = Uuid::new_v4();
+    let path = PathBuf::from(format!("/projects/source/{id}.jsonl"));
+    let mut message = row("message", 1_000_000, false);
+    message.session_id = id.to_string();
+    let header = json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0});
+    let source = format!(
+        "{header}\n{}\n",
+        String::from_utf8(bytes(&message)).unwrap()
+    );
+    let loaded = route_lines(&source);
+    let allocation = loaded.messages_in_order.as_ptr();
+    validate_captured_session_source(&path, id, &source, &loaded).unwrap();
+    assert_eq!(loaded.messages_in_order.as_ptr(), allocation);
+    assert!(matches!(
+        validate_captured_session_source(&path, Uuid::new_v4(), &source, &loaded),
+        Err(LoaderError::SessionNotFound { .. })
+    ));
+    let empty_source = format!("{header}\n");
+    let empty = route_lines(&empty_source);
+    assert!(matches!(
+        validate_captured_session_source(&path, id, &empty_source, &empty),
+        Err(LoaderError::EmptyDirectory)
+    ));
+    assert!(matches!(
+        validate_captured_session_source(&path, id, "", &route_lines("")),
+        Err(LoaderError::Io { .. })
+    ));
+    let draft_source = format!(
+        "{header}\n{}\n",
+        json!({
+            "type":"custom-title", "sessionId":id, "customTitle":"Draft", "mobileEmptySession":1
+        })
+    );
+    validate_captured_session_source(&path, id, &draft_source, &route_lines(&draft_source))
+        .unwrap();
+    let conflict = format!(
+        "{source}{}\n",
+        json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"chat", "instructionEpoch":0})
+    );
+    assert!(
+        validate_captured_session_source(&path, id, &conflict, &route_lines(&conflict)).is_err()
+    );
+    let boundary = json!({
+        "type":"system", "uuid":"boundary", "parentUuid":null, "sessionId":id,
+        "subtype":"compact_boundary", "compactMetadata":{
+            "nativeExactPreserved":true,
+            "preservedSegment":{"headUuid":"missing", "tailUuid":"missing", "anchorUuid":"message"},
+            "preservedMessages":{"anchorUuid":"message", "uuids":["missing"], "allUuids":["missing"]}
+        }
+    });
+    let invalid_preserved = format!("{source}{boundary}\n");
+    assert!(matches!(
+        validate_captured_session_source(
+            &path,
+            id,
+            &invalid_preserved,
+            &route_lines(&invalid_preserved)
+        ),
+        Err(LoaderError::Io { .. })
+    ));
+}
+
+#[tokio::test]
+async fn alias_variants_preserve_first_matching_admission_order_for_uuid_ties() {
+    let (temp, _id, first_path, destination, fs) = alias_source_fixture();
+    let second_dir = temp.path().join("second");
+    std::fs::create_dir_all(&second_dir).unwrap();
+    let second_path = second_dir.join(first_path.file_name().unwrap());
+    let source = std::fs::read_to_string(&first_path).unwrap();
+    std::fs::write(&second_path, source.replace("hello", "world")).unwrap();
+    let modified = std::fs::metadata(&first_path).unwrap().modified().unwrap();
+    filetime::set_file_mtime(&second_path, filetime::FileTime::from_system_time(modified)).unwrap();
+    let aliases = vec![
+        (first_path.clone(), temp.path().join("stale-destination")),
+        (second_path.clone(), destination.clone()),
+        (first_path.clone(), destination),
+    ];
+    let mut candidates = Vec::new();
+    collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| &candidate.path)
+            .collect::<Vec<_>>(),
+        [&second_path, &first_path]
+    );
+    let winner = deduplicate_catalog_candidates(candidates);
+    assert_eq!(winner.len(), 1);
+    assert_eq!(
+        winner[0].path, second_path,
+        "a stale earlier alias must not change the tie-winning source"
+    );
+    assert_eq!(read_counts().lock().unwrap()[&first_path], 1);
+    assert_eq!(read_counts().lock().unwrap()[&second_path], 1);
 }

@@ -455,6 +455,20 @@ impl ConversationOrchestrator {
         message: ConversationMessage,
         attachment: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ConversationMessage {
+        // Nested memory is durable raw context, just like the initial typed
+        // ingress rows. Register its source before publishing history so every
+        // request, including retries and resumed requests, screens the original
+        // copy rather than retaining only the fresh collector's Mod result.
+        let nested_memory = attachment.string_at("/type") == Some("nested_memory");
+        let _publication = nested_memory.then(crate::request_context::preparation_commit_scope);
+        if nested_memory {
+            self.register_mod_persisted_attachment(
+                &message,
+                "nested_memory",
+                serde_json::json!({"kind":"engine"}),
+            )
+            .await;
+        }
         {
             let mut session = self.session.lock().await;
             self.transcript
@@ -477,27 +491,63 @@ impl ConversationOrchestrator {
         &self,
         row: &crate::request_context::PromptIngressAttachment,
     ) {
-        self.append_accepted_prompt_ingress_reminder(row).await;
-        self.persist_staged_prompt_ingress_reminder(row).await;
+        self.persist_prompt_ingress_reminders(std::slice::from_ref(row))
+            .await;
+    }
+
+    pub(crate) async fn persist_prompt_ingress_reminders(
+        &self,
+        rows: &[crate::request_context::PromptIngressAttachment],
+    ) {
+        self.append_accepted_prompt_ingress_reminders(rows).await;
+        for row in rows {
+            self.persist_staged_prompt_ingress_reminder(row).await;
+        }
+        self.complete_changed_file_reminders(rows);
     }
 
     /// Publish a cached NAr row only after request assembly accepts the batch.
     /// Producers retain rows task-locally until this boundary, so a blocked or
     /// failed pre-assembly prompt cannot leak rows into live history.
+    #[cfg(test)]
     pub(crate) async fn append_accepted_prompt_ingress_reminder(
         &self,
         row: &crate::request_context::PromptIngressAttachment,
     ) {
-        let id = row.message.id();
-        let has_rendered_row = row.rendered.array_len("").is_some_and(|length| length > 0);
-        let is_deferred_delta = row.payload.string_at("/type") == Some("deferred_tools_delta");
-        {
-            let mut session = self.session.lock().await;
-            self.transcript
-                .model_reminder_attachments
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(id, row.payload.clone());
+        self.append_accepted_prompt_ingress_reminders(std::slice::from_ref(row))
+            .await;
+    }
+
+    /// Admit an ordered batch with one history membership scan. Single-row
+    /// callers keep the allocation-free check; JSONL writes remain ordered.
+    pub(crate) async fn append_accepted_prompt_ingress_reminders(
+        &self,
+        rows: &[crate::request_context::PromptIngressAttachment],
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut session = self.session.lock().await;
+        // A retained notice can publish without another Read. Once history
+        // changes, its JSONL append needs the same cancellation protection.
+        crate::request_context::mark_changed_files_publication_started();
+        let mut seen = (rows.len() > 1).then(|| {
+            session
+                .history
+                .iter()
+                .map(ConversationMessage::id)
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let mut attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for row in rows {
+            let id = row.message.id();
+            let has_rendered_row = row.rendered.array_len("").is_some_and(|length| length > 0);
+            let is_deferred_delta = row.payload.string_at("/type") == Some("deferred_tools_delta");
+            attachments.insert(id, row.payload.clone());
             // Deferred tools need their durable source sidecar in hot history
             // as well as cold JSONL so every request can project the same row
             // through its current tool pool. A deferred delta with an empty
@@ -505,7 +555,10 @@ impl ConversationOrchestrator {
             // and ordering; request projection removes it if NQe produces no
             // visible row, so it never becomes an empty provider user message.
             if (has_rendered_row || is_deferred_delta)
-                && !session.history.iter().any(|message| message.id() == id)
+                && match seen.as_mut() {
+                    Some(seen) => seen.insert(id),
+                    None => !session.history.iter().any(|message| message.id() == id),
+                }
             {
                 let mut message = row.message.clone();
                 if is_deferred_delta && !has_rendered_row {

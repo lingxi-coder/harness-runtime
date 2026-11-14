@@ -3,8 +3,8 @@
 //! canonical Bot×Chat session survives completed rounds and process restarts.
 
 pub(crate) mod accounts;
-mod chat_session;
 mod ask_tool;
+mod chat_session;
 mod checkpoint;
 mod data;
 mod interaction;
@@ -804,7 +804,9 @@ pub fn worker_main() -> i32 {
                     (protocol::WorkerFailure::CheckpointMismatch, 65)
                 }
                 TeamProcessError::NotContinuable => (protocol::WorkerFailure::NotContinuable, 65),
-                TeamProcessError::RouteUnsupported => (protocol::WorkerFailure::RouteUnsupported, 65),
+                TeamProcessError::RouteUnsupported => {
+                    (protocol::WorkerFailure::RouteUnsupported, 65)
+                }
                 TeamProcessError::Io(_) => (protocol::WorkerFailure::Storage, 74),
                 _ => (protocol::WorkerFailure::Worker, 70),
             };

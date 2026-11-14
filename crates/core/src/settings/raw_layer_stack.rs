@@ -30,6 +30,10 @@ pub struct SettingsRawLayer {
 /// Ordinary source layers plus the Native-selected managed projection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsRawLayerStack {
+    /// File sources whose read/parse failed and were skipped. A successful
+    /// best-effort merge with these failures must not become a stable cache
+    /// entry: recovery need not change the file's content metadata.
+    pub file_load_failures: Vec<PathBuf>,
     /// Source objects in ascending merge-priority order. Ordinary file/CLI
     /// tiers remain original evidence; the managed entry is the normalized
     /// composed policy projection, whose original documents are retained in
@@ -111,6 +115,24 @@ impl Settings {
         supplemental: RawSupplementalLayers<'_>,
         user_settings_path: Option<&Path>,
     ) -> Result<SettingsRawLayerStack, SettingsError> {
+        Self::load_raw_layer_stack_from_user_path_with_reader(
+            inputs,
+            file_scope,
+            supplemental,
+            user_settings_path,
+            loader::read_settings_layer_snapshot,
+        )
+    }
+
+    /// Load through one host-owned snapshot reader while retaining its health.
+    /// This also lets hosts test transient I/O at the real file-read boundary.
+    pub fn load_raw_layer_stack_from_user_path_with_reader(
+        inputs: LoadInputs<'_>,
+        file_scope: FileLayerScope,
+        supplemental: RawSupplementalLayers<'_>,
+        user_settings_path: Option<&Path>,
+        mut reader: impl FnMut(&Path) -> Result<Option<loader::SettingsLayerSnapshot>, SettingsError>,
+    ) -> Result<SettingsRawLayerStack, SettingsError> {
         let LoadInputs {
             env,
             project_dir,
@@ -119,6 +141,7 @@ impl Settings {
         let mut layers = Vec::new();
         let mut admitted_raw_layers = Vec::new();
         let mut admitted_layers = Vec::new();
+        let mut file_load_failures = Vec::new();
 
         record_layer(
             &mut layers,
@@ -134,7 +157,9 @@ impl Settings {
 
         if file_scope.include_user {
             if let Some(path) = user_settings_path {
-                if let Some(snapshot) = read_file_layer_or_skip(path) {
+                if let Some(snapshot) =
+                    read_file_layer_or_skip(path, &mut reader, &mut file_load_failures)
+                {
                     record_layer(
                         &mut layers,
                         &mut admitted_raw_layers,
@@ -152,7 +177,9 @@ impl Settings {
 
         if file_scope.include_project {
             let path = loader::project_settings_path(project_dir);
-            if let Some(snapshot) = read_file_layer_or_skip(&path) {
+            if let Some(snapshot) =
+                read_file_layer_or_skip(&path, &mut reader, &mut file_load_failures)
+            {
                 record_layer(
                     &mut layers,
                     &mut admitted_raw_layers,
@@ -169,7 +196,9 @@ impl Settings {
 
         if file_scope.include_local {
             let path = loader::local_settings_path(project_dir);
-            if let Some(snapshot) = read_file_layer_or_skip(&path) {
+            if let Some(snapshot) =
+                read_file_layer_or_skip(&path, &mut reader, &mut file_load_failures)
+            {
                 record_layer(
                     &mut layers,
                     &mut admitted_raw_layers,
@@ -239,6 +268,7 @@ impl Settings {
         }
 
         Ok(SettingsRawLayerStack {
+            file_load_failures,
             layers,
             merged,
             admitted_raw_layers,
@@ -661,11 +691,16 @@ fn strip_unrepresentable_strings(
     None
 }
 
-fn read_file_layer_or_skip(path: &Path) -> Option<loader::SettingsLayerSnapshot> {
-    match loader::read_settings_layer_snapshot(path) {
+fn read_file_layer_or_skip(
+    path: &Path,
+    reader: &mut impl FnMut(&Path) -> Result<Option<loader::SettingsLayerSnapshot>, SettingsError>,
+    failures: &mut Vec<PathBuf>,
+) -> Option<loader::SettingsLayerSnapshot> {
+    match reader(path) {
         Ok(Some(snapshot)) => Some(snapshot),
         Ok(None) => None,
         Err(error) => {
+            failures.push(path.to_path_buf());
             tracing::warn!(
                 path = %path.display(),
                 error = %error,
@@ -700,6 +735,64 @@ mod tests {
     };
     use crate::settings::tracer::Source;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn skipped_file_read_health_distinguishes_failure_from_absence_and_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let path = loader::project_settings_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"teammateMode":"tmux"}"#).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let env = BTreeMap::new();
+        let load = |fail: bool| {
+            Settings::load_raw_layer_stack_from_user_path_with_reader(
+                LoadInputs {
+                    env: &env,
+                    project_dir: root.path(),
+                    defaults: SettingsJson::default(),
+                },
+                FileLayerScope {
+                    include_user: false,
+                    include_project: true,
+                    include_local: true,
+                },
+                RawSupplementalLayers::default(),
+                None,
+                |source| {
+                    if fail && source == path.as_path() {
+                        Err(SettingsError::Io {
+                            path: source.to_owned(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "transient fixture read failure",
+                            ),
+                        })
+                    } else {
+                        loader::read_settings_layer_snapshot(source)
+                    }
+                },
+            )
+            .unwrap()
+        };
+        let skipped = load(true);
+        assert_eq!(skipped.file_load_failures, vec![path.clone()]);
+        assert!(!skipped
+            .layers
+            .iter()
+            .any(|layer| layer.source == Source::Project));
+        let recovered = load(false);
+        assert!(
+            recovered.file_load_failures.is_empty(),
+            "a missing optional local file is healthy"
+        );
+        assert!(recovered
+            .layers
+            .iter()
+            .any(|layer| layer.source == Source::Project));
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    }
 
     fn managed_policy(raw: &str) -> NativePolicySelection {
         let document = NativePolicyDocument::parse_managed_file(

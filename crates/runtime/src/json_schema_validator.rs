@@ -48,6 +48,15 @@ struct WorkerInner {
     bootstrap: OnceCell<Arc<WorkerBootstrap>>,
     next_request_id: AtomicU64,
     next_schema_id: AtomicU64,
+    #[cfg(test)]
+    compile_generation_pause: StdMutex<Option<Arc<CompileGenerationPause>>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct CompileGenerationPause {
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 struct WorkerBootstrap {
@@ -110,6 +119,7 @@ impl From<SchemaProfile> for SchemaProfileWire {
 struct SchemaRecord {
     schema_id: String,
     schema: Utf16JsonProjection,
+    compiled: bool,
 }
 
 #[derive(Default)]
@@ -157,6 +167,8 @@ impl BunJsonSchemaValidator {
                 bootstrap: OnceCell::new(),
                 next_request_id: AtomicU64::new(1),
                 next_schema_id: AtomicU64::new(1),
+                #[cfg(test)]
+                compile_generation_pause: StdMutex::new(None),
             }),
         })
     }
@@ -207,6 +219,19 @@ impl BunSessionLease {
 
         loop {
             let generation = self.ensure_current_generation(&mut state).await?;
+            #[cfg(test)]
+            {
+                let pause = self
+                    .inner
+                    .compile_generation_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(pause) = pause {
+                    pause.entered.notify_one();
+                    pause.resume.notified().await;
+                }
+            }
             let request_id = self
                 .inner
                 .next_id(&self.inner.next_request_id)
@@ -225,20 +250,24 @@ impl BunSessionLease {
                 .exchange(&request, &request_id)
                 .await
                 .map_err(SchemaCompileError::Worker)?;
+            // Every reply belongs to a worker generation, including schema
+            // errors: a restarted worker may be missing this session's $ids.
+            // Replay that session before deciding an error is deterministic.
+            let current = self
+                .inner
+                .ensure_started()
+                .await
+                .map_err(SchemaCompileError::Worker)?;
+            if current != generation {
+                state.worker_generation = None;
+                continue;
+            }
             match reply.get("kind").and_then(Value::as_str) {
                 Some("compiled") => {
-                    let current = self
-                        .inner
-                        .ensure_started()
-                        .await
-                        .map_err(SchemaCompileError::Worker)?;
-                    if current != generation {
-                        state.worker_generation = None;
-                        continue;
-                    }
                     state.schemas.push(SchemaRecord {
                         schema_id: schema_id.clone(),
                         schema: schema.clone(),
+                        compiled: true,
                     });
                     state.worker_generation = Some(generation);
                     return Ok(Arc::new(BunCompiledJsonSchema {
@@ -247,9 +276,17 @@ impl BunSessionLease {
                     }));
                 }
                 Some("schema_error") => {
-                    return Err(SchemaCompileError::InvalidSchema(
-                        exact_detail(&reply).map_err(SchemaCompileError::Worker)?,
-                    ));
+                    let detail = exact_detail(&reply).map_err(SchemaCompileError::Worker)?;
+                    // Ajv can register an $id before a deterministic compile
+                    // error (for example an unresolved forward reference).
+                    // Later successful schemas may depend on that registration.
+                    state.schemas.push(SchemaRecord {
+                        schema_id: schema_id.clone(),
+                        schema: schema.clone(),
+                        compiled: false,
+                    });
+                    state.worker_generation = Some(generation);
+                    return Err(SchemaCompileError::InvalidSchema(detail));
                 }
                 Some("worker_error") => {
                     return Err(SchemaCompileError::Worker(
@@ -301,12 +338,6 @@ impl BunSessionLease {
                     .exchange(&request, &request_id)
                     .await
                     .map_err(SchemaCompileError::Worker)?;
-                if reply.get("kind").and_then(Value::as_str) != Some("compiled") {
-                    return Err(SchemaCompileError::Worker(
-                        detail_display(&reply)
-                            .unwrap_or_else(|_| "could not restore validator session".into()),
-                    ));
-                }
                 if self
                     .inner
                     .ensure_started()
@@ -316,6 +347,18 @@ impl BunSessionLease {
                 {
                     replay_changed_generation = true;
                     break;
+                }
+                match reply.get("kind").and_then(Value::as_str) {
+                    Some("compiled") => {}
+                    // Recreate registration side effects without promoting the
+                    // retained negative snapshot to a compiled output contract.
+                    Some("schema_error") if !record.compiled => {}
+                    _ => {
+                        return Err(SchemaCompileError::Worker(
+                            detail_display(&reply)
+                                .unwrap_or_else(|_| "could not restore validator session".into()),
+                        ));
+                    }
                 }
             }
 
@@ -832,6 +875,15 @@ while IFS= read -r line; do
   case "$line" in
     *'"kind":"release_session"'*) kind=session_released ;;
     *'"kind":"wait"'*) IFS= read -r ignored || exit 0; kind=ok ;;
+    *'"kind":"compile"'*'"schemaId":"1"'*) base=yes; kind=compiled ;;
+    *'"kind":"compile"'*'"schemaId":"2"'*)
+      if [ "$base" = yes ]; then kind=compiled; else
+        printf '{{"id":"%s","kind":"schema_error","detail":{{"display":"ref","codeUnits":[114,101,102]}}}}\n' "$id"
+        continue
+      fi ;;
+    *'"kind":"compile"'*)
+      printf '{{"id":"%s","kind":"schema_error","detail":{{"display":"bad","codeUnits":[98,97,100]}}}}\n' "$id"
+      continue ;;
     *) kind=ok ;;
   esac
   printf '{{"id":"%s","kind":"%s"}}\n' "$id" "$kind"
@@ -968,6 +1020,180 @@ done
         assert_eq!(files.request_lines().len(), 2);
 
         drop(validator);
+    }
+
+    async fn reference_compile_generation_race(worker_exits: bool) {
+        let files = FakeWorkerFiles::create();
+        let validator = BunJsonSchemaValidator::new(&files.executable);
+        let session = validator.new_session(SchemaProfile::McpOutputSchema2020);
+        let base =
+            Utf16JsonProjection::parse(r#"{"$id":"urn:fixture:base","type":"object"}"#).unwrap();
+        let reference = Utf16JsonProjection::parse(r#"{"$ref":"urn:fixture:base"}"#).unwrap();
+        let _base_plan = session.compile(&base).await.expect("base schema compiles");
+        let pause = Arc::new(CompileGenerationPause::default());
+        *validator.inner.compile_generation_pause.lock().unwrap() = Some(pause.clone());
+        let compiling = {
+            let session = session.clone();
+            tokio::spawn(async move { session.compile(&reference).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+            .await
+            .unwrap();
+        let waiting = {
+            let inner = validator.inner.clone();
+            tokio::spawn(async move {
+                inner
+                    .exchange(
+                        &TestRequest {
+                            id: "other-session",
+                            kind: if worker_exits { "exit" } else { "wait" },
+                        },
+                        "other-session",
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !files
+                .request_lines()
+                .iter()
+                .any(|line| line.contains("other-session"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("other session occupies worker");
+        if worker_exits {
+            waiting.await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let exited = validator
+                        .inner
+                        .worker
+                        .lock()
+                        .await
+                        .as_mut()
+                        .unwrap()
+                        .child
+                        .try_wait()
+                        .unwrap()
+                        .is_some();
+                    if exited {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("worker exits before compile exchange");
+        } else {
+            waiting.abort();
+            let _ = waiting.await;
+            assert!(validator.inner.worker.lock().await.is_none());
+        }
+        pause.resume.notify_one();
+        let _ref_plan = tokio::time::timeout(Duration::from_secs(5), compiling)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("a missing $id after restart must replay, not become InvalidSchema");
+        let lines = files.request_lines();
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains(r#""schemaId":"1""#))
+                .count(),
+            2
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains(r#""schemaId":"2""#))
+                .count(),
+            2
+        );
+        assert!(
+            matches!(session.compile(&Utf16JsonProjection::parse(r#"{"type":42}"#).unwrap()).await,
+            Err(SchemaCompileError::InvalidSchema(detail)) if detail.string_at("") == Some("bad"))
+        );
+        assert_eq!(
+            files
+                .request_lines()
+                .iter()
+                .filter(|line| line.contains(r#""schemaId":"3""#))
+                .count(),
+            1,
+            "a same-generation deterministic error is not replayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn compile_replays_cross_schema_refs_after_cancelled_other_session_exchange() {
+        reference_compile_generation_race(false).await;
+    }
+
+    #[tokio::test]
+    async fn compile_replays_cross_schema_refs_after_other_session_worker_exit() {
+        reference_compile_generation_race(true).await;
+    }
+
+    #[tokio::test]
+    async fn restart_replays_negative_forward_reference_registration_events() {
+        for retire_by_drop in [false, true] {
+            let validator = BunJsonSchemaValidator::new_from_host_environment();
+            let session = validator.new_session(SchemaProfile::McpOutputSchema2020);
+            let forward = Utf16JsonProjection::parse(
+                r#"{"$id":"https://schema.example/outer","type":"object","required":["ok"],"properties":{"x":{"$ref":"https://schema.example/later"}}}"#,
+            ).unwrap();
+            let later = Utf16JsonProjection::parse(
+                r#"{"$id":"https://schema.example/later","type":"string"}"#,
+            )
+            .unwrap();
+            let reference =
+                Utf16JsonProjection::parse(r#"{"$ref":"https://schema.example/outer"}"#).unwrap();
+            assert!(matches!(
+                session.compile(&forward).await,
+                Err(SchemaCompileError::InvalidSchema(_))
+            ));
+            let _later_plan = session.compile(&later).await.unwrap();
+            let plan = session.compile(&reference).await.unwrap();
+            let good = Utf16JsonProjection::parse(r#"{"ok":true,"x":"fine"}"#).unwrap();
+            let bad = Utf16JsonProjection::parse(r#"{"ok":true,"x":42}"#).unwrap();
+            assert_eq!(
+                plan.validate(&good).await.unwrap(),
+                JsonSchemaValidation::Valid
+            );
+            assert!(matches!(
+                plan.validate(&bad).await.unwrap(),
+                JsonSchemaValidation::Invalid { .. }
+            ));
+            let old_generation = {
+                let mut slot = validator.inner.worker.lock().await;
+                let generation = slot.as_ref().unwrap().generation;
+                if retire_by_drop {
+                    // The cancellation guard retires its owned worker this way.
+                    slot.take();
+                } else {
+                    slot.as_mut().unwrap().child.kill().await.unwrap();
+                }
+                generation
+            };
+            for _ in 0..2 {
+                assert_eq!(
+                    plan.validate(&good).await.unwrap(),
+                    JsonSchemaValidation::Valid
+                );
+                assert!(matches!(
+                    plan.validate(&bad).await.unwrap(),
+                    JsonSchemaValidation::Invalid { .. }
+                ));
+            }
+            assert_ne!(
+                validator.inner.ensure_started().await.unwrap(),
+                old_generation
+            );
+        }
     }
 
     #[tokio::test]

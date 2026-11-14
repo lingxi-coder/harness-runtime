@@ -357,6 +357,63 @@ async fn cross_protocol_failover_adapts_cached_history_for_both_drivers() {
     }
 }
 
+#[tokio::test]
+async fn cross_protocol_main_request_keeps_replay_source_until_adaptation_for_both_drivers() {
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+    for streaming in [false, true] {
+        let transport = ScriptedTransport::new(vec![503, 200]);
+        let mut first = connection("intl", INTL, 0);
+        first.protocol = ProtocolFamily::OpenAiResponses;
+        let second = connection("cn", CN, 1);
+        let api = ApiService::new(
+            Arc::new(
+                ModelRuntime::from_config(ClientConfig {
+                    providers: vec![first, second],
+                })
+                .unwrap(),
+            ),
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        let mut request = messages_request("shared-model", Some("grouped:intl"));
+        request.messages = vec![
+            ConversationMessage::user(MessageId::new(), "first".into()),
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ProviderContent {
+                    protocol: "open_ai_responses".into(),
+                    value: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        r#"{"type":"reasoning","id":"r","summary":[],"encrypted_content":"opaque"}"#,
+                    ).unwrap(),
+                }],
+                stop_reason: Some("end_turn".into()), per_turn_effort: None, resumable: None,
+            },
+            ConversationMessage::user(MessageId::new(), "continue".into()),
+        ];
+        if streaming {
+            let error = api
+                .messages_create_buffered_stream(request)
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(&error, LlmError::InvalidRequest {message}
+                if message == "reached-the-good-connection"),
+                "{error:?}"
+            );
+        } else {
+            api.messages_create(request)
+                .await
+                .expect("foreign native replay must be adapted");
+        }
+        assert_eq!(transport.connections(), vec!["intl", "cn"]);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn cross_protocol_model_fallback_rebuilds_history_cache_policy() {
     let transport = ScriptedTransport::new(vec![529, 529, 529, 200]);
@@ -568,37 +625,73 @@ fn shared_model_availability_reuses_account_billing_and_expiring_entitlements() 
 
 #[tokio::test]
 async fn grouped_model_uses_credentialed_sibling_when_head_connection_has_no_account() {
-    let transport = ScriptedTransport::new(vec![200]);
-    let (runtime, pool) = account_runtime(Arc::new(AccountTestClock::default()), None);
-    let mut snapshot = pool.snapshot();
-    snapshot.config_revision += 1;
-    snapshot
-        .accounts
-        .retain(|account| account.account_id == "b");
-    snapshot.accounts[0].execution_binding_id = "grouped:tail".into();
-    snapshot.accounts[0].config_revision += 1;
-    pool.refresh(snapshot).unwrap();
-    let mut config = ClientConfig {
-        providers: vec![connection("head", INTL, 0), connection("tail", CN, 1)],
-    };
-    config.providers.extend(runtime.configuration().providers);
-    let runtime = ModelRuntime::from_config(config)
-        .unwrap()
-        .with_account_pool(pool);
-    let service = ApiService::new(
-        Arc::new(runtime),
-        transport.clone(),
-        SubscriberState::default(),
-        UserAgentEnv::default(),
-        "test",
-        None,
-        None,
-    );
-    service
-        .messages_create(messages_request("shared-model", Some("grouped")))
-        .await
-        .unwrap();
-    assert_eq!(transport.connections(), vec!["cn"]);
+    for streaming in [false, true] {
+        for profile in ["grouped", "grouped:head"] {
+            let transport = ScriptedTransport::new(vec![200]);
+            let (runtime, pool) = account_runtime(Arc::new(AccountTestClock::default()), None);
+            let mut snapshot = pool.snapshot();
+            snapshot.config_revision += 1;
+            snapshot
+                .accounts
+                .retain(|account| account.account_id == "b");
+            snapshot.accounts[0].execution_binding_id = "grouped:tail".into();
+            snapshot.accounts[0].config_revision += 1;
+            pool.refresh(snapshot).unwrap();
+            let mut config = ClientConfig {
+                providers: vec![connection("head", INTL, 0), connection("tail", CN, 1)],
+            };
+            // Match account projection: removed accounts leave no executable
+            // profile, and the remaining account profiles are hidden. Keeping
+            // account.a here would select that removed identity before head.
+            config.providers.extend(
+                runtime
+                    .configuration()
+                    .providers
+                    .into_iter()
+                    .filter(|profile| profile.profile_name == "account.b")
+                    .map(|mut profile| {
+                        profile.connection.hidden = true;
+                        profile
+                    }),
+            );
+            let runtime = ModelRuntime::from_config(config)
+                .unwrap()
+                .with_account_pool(pool);
+            assert_eq!(
+                runtime
+                    .resolve_media_route("shared-model", Some(profile))
+                    .unwrap()
+                    .main
+                    .profile_name,
+                "grouped:head",
+            );
+            let service = ApiService::new(
+                Arc::new(runtime),
+                transport.clone(),
+                SubscriberState::default(),
+                UserAgentEnv::default(),
+                "test",
+                None,
+                None,
+            );
+            let request = messages_request("shared-model", Some(profile));
+            if streaming {
+                let error = service
+                    .messages_create_buffered_stream(request)
+                    .await
+                    .err()
+                    .unwrap();
+                assert!(
+                    matches!(error, LlmError::InvalidRequest { ref message }
+                    if message == "reached-the-good-connection"),
+                    "{error:?}"
+                );
+            } else {
+                service.messages_create(request).await.unwrap();
+            }
+            assert_eq!(transport.connections(), vec!["cn"]);
+        }
+    }
 }
 
 #[test]

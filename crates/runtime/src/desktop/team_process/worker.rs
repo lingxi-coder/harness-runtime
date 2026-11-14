@@ -322,6 +322,14 @@ async fn run(
         let _ = rt.shutdown().await;
         return Err(TeamProcessError::Worker);
     }
+    // The pre-mount transcript a continuation is verified against; the rest of the mounted config is released.
+    let captured = continuation.as_ref().and_then(|_| {
+        mounted_cfg
+            .session_resume_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.content.clone())
+    });
+    drop(mounted_cfg);
     let gate = rt
         .permission_gate
         .as_ref()
@@ -341,10 +349,6 @@ async fn run(
     // hydrated journal, before any repair, admission or provider dispatch.
     let resumed = match &continuation {
         Some(continuation) => {
-            let captured = mounted_cfg
-                .session_resume_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.content.clone());
             match verify_continuation(
                 &rt,
                 &batch,
@@ -386,7 +390,9 @@ async fn run(
         .as_ref()
         .map_or(0, |state| state.checkpoint.dispatches_observed);
     let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
-    let finish_only = resumed.as_ref().is_some_and(|state| state.final_answer.is_some());
+    let finish_only = resumed
+        .as_ref()
+        .is_some_and(|state| state.final_answer.is_some());
     let turn = async {
         match &resumed {
             // The newest durable response already is the final answer: only its
@@ -394,8 +400,16 @@ async fn run(
             Some(_) if finish_only => Ok(TurnOutcome::EndTurn),
             Some(state) => {
                 let answer = continuation.as_ref().and_then(|c| c.answer.as_ref());
-                run_continuation(&rt, state, ask.as_deref(), answer, &input, &task_id, cancel.clone())
-                    .await
+                run_continuation(
+                    &rt,
+                    state,
+                    ask.as_deref(),
+                    answer,
+                    &input,
+                    &task_id,
+                    cancel.clone(),
+                )
+                .await
             }
             None => run_prompt(&rt, &input, &task_id, cancel.clone()).await,
         }
@@ -482,16 +496,17 @@ async fn run(
     } else if output.failed.load(Ordering::Acquire)
         || outcome.is_err()
         || (matches!(&outcome, Ok(TurnOutcome::EndTurn)) && text.trim().is_empty())
-        || (!finish_only && metrics.as_ref().is_none_or(|m| {
-            m.api_error_status.is_some()
-                || m.api_error_terminal_reason.is_some()
-                || m.api_error_stop_reason.is_some()
-                || (matches!(&outcome, Ok(TurnOutcome::EndTurn))
-                    && !matches!(
-                        m.model_stop_reason.as_deref(),
-                        Some("end_turn" | "stop_sequence")
-                    ))
-        }))
+        || (!finish_only
+            && metrics.as_ref().is_none_or(|m| {
+                m.api_error_status.is_some()
+                    || m.api_error_terminal_reason.is_some()
+                    || m.api_error_stop_reason.is_some()
+                    || (matches!(&outcome, Ok(TurnOutcome::EndTurn))
+                        && !matches!(
+                            m.model_stop_reason.as_deref(),
+                            Some("end_turn" | "stop_sequence")
+                        ))
+            }))
     {
         (TeamProcessOutcome::ModelFailed, String::new())
     } else {
@@ -506,7 +521,8 @@ async fn run(
         (outcome, text)
     };
     let usage_after = rt.cost().await;
-    let attempt_dispatched_requests = dispatch_limit - profile.output_quota().remaining_dispatches();
+    let attempt_dispatched_requests =
+        dispatch_limit - profile.output_quota().remaining_dispatches();
     let dispatched_requests = prior_dispatches.saturating_add(attempt_dispatched_requests);
     // Usage is this process's cost-ledger delta. A continued task also spent
     // requests in an earlier process whose usage is not attributable here, so
@@ -668,8 +684,9 @@ async fn run_continuation(
             .pending
             .iter()
             .map(|call| {
-                let row = uuid::Uuid::parse_str(&call.assistant_row_uuid)
-                    .map_err(|_| OrchestratorError::Internal("invalid durable tool-call row".into()))?;
+                let row = uuid::Uuid::parse_str(&call.assistant_row_uuid).map_err(|_| {
+                    OrchestratorError::Internal("invalid durable tool-call row".into())
+                })?;
                 Ok(lingxi_core::host::DeferredToolReplay {
                     tool_use_id: call.tool_use_id.clone(),
                     assistant_message_id: Some(lingxi_core::types::MessageId::from_uuid(row)),

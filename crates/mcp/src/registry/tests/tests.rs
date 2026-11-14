@@ -2195,8 +2195,7 @@ async fn prompts_list_failure_keeps_other_catalogs_live() {
     );
 }
 
-#[tokio::test]
-async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_failed_slices() {
+async fn check_mixed_catalog_failures(age_ms: u64, resources_fail: bool) {
     let _capture = test_telemetry_capture_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2215,7 +2214,7 @@ async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_fai
     seed_entry_with_catalog(
         &store,
         &cache_key,
-        1_000_000,
+        age_ms,
         ServerCapabilitiesDto {
             tools: true,
             resources: true,
@@ -2251,6 +2250,8 @@ async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_fai
     ));
     mock.list_tools_fails.store(true, Ordering::SeqCst);
     mock.list_prompts_fails.store(true, Ordering::SeqCst);
+    mock.list_resources_fails
+        .store(resources_fail, Ordering::SeqCst);
     let registry = McpRegistry::with_raw_conn(
         mock.clone() as Arc<dyn McpTransport>,
         mock.clone() as Arc<dyn RawConnectionProvider>,
@@ -2292,7 +2293,11 @@ async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_fai
             .iter()
             .map(|resource| resource.name.string_at("").unwrap_or(""))
             .collect::<Vec<_>>(),
-        vec!["live_guide"],
+        vec![if resources_fail {
+            "cached_guide"
+        } else {
+            "live_guide"
+        }],
         "successful resources/list must replace the cached catalog"
     );
     assert_eq!(
@@ -2303,6 +2308,36 @@ async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_fai
         vec!["cached_prompt"],
         "failed prompts/list must preserve the cached safe catalog"
     );
+    drop(states);
+    assert_eq!(
+        registry
+            .connected_prompts()
+            .await
+            .iter()
+            .map(|(_, _, prompt)| prompt.name.string_at("").unwrap_or("").to_owned())
+            .collect::<Vec<_>>(),
+        ["cached_prompt"]
+    );
+    // A second owner must read the final published slices back from disk.
+    let reloaded = McpRegistry::with_raw_conn(mock.clone(), mock.clone())
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+    reloaded.connect(cfg).await.unwrap();
+    let states = reloaded.connections.read().await;
+    let Some(McpConnectionState::Cached {
+        resources, prompts, ..
+    }) = states.get("srv")
+    else {
+        panic!("expected persisted Cached catalog")
+    };
+    assert_eq!(
+        resources[0].name.string_at(""),
+        Some(if resources_fail {
+            "cached_guide"
+        } else {
+            "live_guide"
+        })
+    );
+    assert_eq!(prompts[0].name.string_at(""), Some("cached_prompt"));
     drop(states);
     drop(env);
 
@@ -2325,6 +2360,16 @@ async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_fai
             .any(|event| event.name == telemetry::tengu::mcp::SERVER_CONNECTION_FAILED),
         "partial live discovery must not demote the initialized connection to a failure"
     );
+}
+
+#[tokio::test]
+async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_failed_slices() {
+    check_mixed_catalog_failures(1_000_000, false).await;
+}
+#[tokio::test]
+async fn foreground_fresh_cached_upgrade_preserves_failed_prompt_and_resource_catalogs() {
+    check_mixed_catalog_failures(0, false).await;
+    check_mixed_catalog_failures(0, true).await;
 }
 
 #[tokio::test]
@@ -11907,3 +11952,153 @@ async fn later_scalar_private_handle_name_keeps_both_servers_and_public_lookup_i
         crate::oauth::server_key(&old_handle, &second.spec)
     );
 }
+
+#[tokio::test]
+async fn implicit_http_oauth_grants_partition_discovery_without_config_mutation() {
+    let cfg = http_cfg("implicit", "https://mcp.example.invalid/v1");
+    assert!(matches!(
+        &cfg.spec,
+        McpTransportSpec::Http { oauth: None, .. }
+    ));
+    let storage: Arc<dyn lingxi_core::host::SecureStorage> = Arc::new(XaaMemStorage::default());
+    let clock: Arc<dyn lingxi_core::host::Clock> = Arc::new(FixedClock(std::time::UNIX_EPOCH));
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = McpRegistry::with_raw_conn(mock.clone(), mock).with_oauth(OAuthDeps {
+        http: GatedXaaHttp::new(),
+        clock: clock.clone(),
+        storage: storage.clone(),
+        on_authorization_url: Arc::new(|_| {}),
+        xaa_config: None,
+    });
+    let anonymous = registry
+        .current_grant_provenance(&cfg)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        anonymous.fingerprint,
+        GrantProvenance::unbound().fingerprint
+    );
+    let key = oauth::server_key(&cfg.name, &cfg.spec);
+    let mut previous = anonymous.fingerprint;
+    for refresh in ["fixture-refresh-a", "fixture-refresh-b"] {
+        oauth::store_tokens(
+            &storage,
+            &clock,
+            &key,
+            &oauth::StoredTokens {
+                access_token: "fixture-access".into(),
+                refresh_token: Some(refresh.into()),
+                expires_at_millis: oauth::OAuthExpiry::Number(1_000_000.0),
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+        let grant = registry
+            .current_grant_provenance(&cfg)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(grant.verify_current);
+        assert_ne!(grant.fingerprint, previous);
+        previous = grant.fingerprint;
+    }
+    assert!(matches!(
+        &cfg.spec,
+        McpTransportSpec::Http { oauth: None, .. }
+    ));
+}
+
+#[tokio::test]
+async fn static_authorization_uses_same_cache_partition_with_and_without_sdk_grants() {
+    let _lock = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    for explicit_oauth in [false, true] {
+        for stored_grant in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+            let mut config = http_cfg("static", "https://mcp.example.invalid/v1");
+            if let McpTransportSpec::Http { headers, oauth, .. } = &mut config.spec {
+                headers.insert(
+                    "aUtHoRiZaTiOn".into(),
+                    "Bearer static-fixture-access".into(),
+                );
+                *oauth = explicit_oauth.then_some(lingxi_core::host::McpOAuthConfigDto {
+                    client_id: None,
+                    callback_port: None,
+                    auth_server_metadata_url: None,
+                    scopes: None,
+                    xaa: None,
+                });
+            }
+            let storage: Arc<dyn lingxi_core::host::SecureStorage> =
+                Arc::new(XaaMemStorage::default());
+            let clock: Arc<dyn lingxi_core::host::Clock> =
+                Arc::new(FixedClock(std::time::UNIX_EPOCH));
+            if stored_grant {
+                oauth::store_tokens(
+                    &storage,
+                    &clock,
+                    &oauth::server_key(&config.name, &config.spec),
+                    &oauth::StoredTokens {
+                        access_token: "sdk-fixture-access".into(),
+                        refresh_token: Some("sdk-fixture-refresh".into()),
+                        expires_at_millis: oauth::OAuthExpiry::Undefined,
+                        client_id: None,
+                        client_secret: None,
+                        step_up_scope: None,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let mock = Arc::new(BridgeMock::new(&["worker"]));
+            let make_registry = || {
+                McpRegistry::with_raw_conn(mock.clone(), mock.clone())
+                    .with_discovery_cache_store(store.clone())
+                    .with_oauth(OAuthDeps {
+                        http: GatedXaaHttp::new(),
+                        clock: clock.clone(),
+                        storage: storage.clone(),
+                        on_authorization_url: Arc::new(|_| {
+                            panic!("static header must not authorize OAuth")
+                        }),
+                        xaa_config: None,
+                    })
+            };
+            let warm = make_registry();
+            let grant = warm
+                .current_grant_provenance(&config)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(grant, GrantProvenance::unbound());
+            warm.connect(config.clone()).await.unwrap();
+            let reader = make_registry();
+            reader.connect(config.clone()).await.unwrap();
+            assert!(
+                matches!(
+                    reader.connections.read().await.get("static"),
+                    Some(McpConnectionState::Cached { .. })
+                ),
+                "explicit_oauth={explicit_oauth}, stored_grant={stored_grant}"
+            );
+            assert_eq!(
+                mock.connect_calls.load(Ordering::SeqCst),
+                1,
+                "a fresh catalog must not redial because of an unused OAuth grant"
+            );
+        }
+    }
+}
+
+include!("output_schema_publication.rs");
+include!("cache_identity_retry.rs");
+
+include!("auth_recovery_and_waiters.rs");

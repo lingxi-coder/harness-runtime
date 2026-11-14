@@ -1220,7 +1220,8 @@ pub struct StreamJsonStream {
     account_routing:
         StdMutex<Vec<lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent>>,
     sdk_held_results: StdMutex<SdkHeldResults>,
-    result_usage_source: std::sync::OnceLock<Arc<dyn lingxi_core::host::result_usage::ResultUsageSource>>,
+    result_usage_source:
+        std::sync::OnceLock<Arc<dyn lingxi_core::host::result_usage::ResultUsageSource>>,
     result_usage_betas: StdMutex<Vec<String>>,
     text_limits: PrintTextLimits,
     response_timing: StdMutex<QueryResponseTiming>,
@@ -1421,7 +1422,10 @@ impl StreamJsonStream {
         betas: &[String],
         subagent_stats: Option<Value>,
     ) {
-        *self.result_usage_betas.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
+        *self
+            .result_usage_betas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
         let mut totals = json!({
             "total_cost_usd": cost.total_usd,
             "duration_api_ms": u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
@@ -2708,7 +2712,8 @@ impl StreamJsonStream {
 
     async fn current_query_usage(&self) -> Option<Value> {
         let source = self.result_usage_source.get()?;
-        let session = lingxi_core::types::SessionId::parse_prefixed(self.session_id.lock().await.as_str())?;
+        let session =
+            lingxi_core::types::SessionId::parse_prefixed(self.session_id.lock().await.as_str())?;
         let mut usage = None;
         source.query_usage(session, &mut |rows| {
             usage = Some(Self::build_query_usage_block(rows))
@@ -2937,7 +2942,10 @@ impl StreamJsonStream {
             .fill_metadata(&mut metadata);
         let usage = match metadata.usage.clone() {
             Some(usage) => usage,
-            None => self.current_query_usage().await.unwrap_or_else(|| Self::build_usage_block(cost)),
+            None => self
+                .current_query_usage()
+                .await
+                .unwrap_or_else(|| Self::build_usage_block(cost)),
         };
         let model_usage = metadata
             .model_usage
@@ -3039,7 +3047,10 @@ impl StreamJsonStream {
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
-        *self.result_usage_betas.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
+        *self
+            .result_usage_betas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
         if result_text.validate().is_err() {
             self.abort_delivery("result text must be a validated string projection");
             return Value::Null;
@@ -3094,8 +3105,13 @@ impl StreamJsonStream {
         let usage = match metadata.usage.clone() {
             Some(usage) => usage,
             None if subtype == "error_max_budget_usd" => Self::build_query_usage_block(&[]),
-            None if subtype == "error_max_structured_output_retries" => Self::build_last_response_usage_block(cost),
-            None => self.current_query_usage().await.unwrap_or_else(|| Self::build_usage_block(cost)),
+            None if subtype == "error_max_structured_output_retries" => {
+                Self::build_last_response_usage_block(cost)
+            }
+            None => self
+                .current_query_usage()
+                .await
+                .unwrap_or_else(|| Self::build_usage_block(cost)),
         };
         let model_usage = metadata
             .model_usage
@@ -3176,7 +3192,10 @@ impl StreamJsonStream {
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
-        *self.result_usage_betas.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
+        *self
+            .result_usage_betas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = betas.to_vec();
         let frame = self
             .build_result_error_frame(
                 subtype,
@@ -3567,12 +3586,17 @@ impl StreamJsonStream {
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
-    fn wants_result_usage(&self) -> bool { self.output_mode != StreamJsonOutputMode::LastResultText }
+    fn wants_result_usage(&self) -> bool {
+        self.output_mode != StreamJsonOutputMode::LastResultText
+    }
     fn wants_native_cli_tool_diagnostics(&self) -> bool {
         true
     }
 
-    fn set_result_usage_source(&self, source: Arc<dyn lingxi_core::host::result_usage::ResultUsageSource>) {
+    fn set_result_usage_source(
+        &self,
+        source: Arc<dyn lingxi_core::host::result_usage::ResultUsageSource>,
+    ) {
         let _ = self.result_usage_source.set(source);
     }
     async fn emit_provider_account_routing(
@@ -3756,13 +3780,17 @@ impl OutputStream for StreamJsonStream {
         native_event_json: Option<&str>,
         content: &[lingxi_core::types::ContentBlock],
     ) {
-        if self.suppress_frames { return; }
+        if self.suppress_frames {
+            return;
+        }
         let native_message = native_event_json
             .and_then(|source| Utf16JsonProjection::parse(source).ok())
             .and_then(|event| event.subprojection("/message").ok())
-            .filter(|message| message.string_at("/id") == Some(provider_message_id)
-                && message.string_at("/model") == Some(model)
-                && message.array_len("/content").is_some());
+            .filter(|message| {
+                message.string_at("/id") == Some(provider_message_id)
+                    && message.string_at("/model") == Some(model)
+                    && message.array_len("/content").is_some()
+            });
         let mut message = match native_message {
             Some(message) => message,
             None if native_event_json.is_none() => {
@@ -3781,80 +3809,142 @@ impl OutputStream for StreamJsonStream {
         for block in content {
             use lingxi_core::types::ContentBlock;
             if self.omit_thinking.load(Ordering::Relaxed)
-                && matches!(block, ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. })
+                && matches!(
+                    block,
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                )
             {
                 continue;
             }
             let projection = match block {
-                ContentBlock::Text { text, citations } | ContentBlock::TextJsUtf16 { text, citations, .. } => {
+                ContentBlock::Text { text, citations }
+                | ContentBlock::TextJsUtf16 {
+                    text, citations, ..
+                } => {
                     let units = match block {
-                        ContentBlock::TextJsUtf16 { utf16_code_units, .. } => utf16_code_units.clone(),
+                        ContentBlock::TextJsUtf16 {
+                            utf16_code_units, ..
+                        } => utf16_code_units.clone(),
                         _ => text.encode_utf16().collect(),
                     };
                     let text = Utf16JsonProjection::root_string(text.clone(), units)
                         .ok()
                         .and_then(|text| strip_result_memory_tags(&text));
-                    let Some(text) = text else { self.abort_delivery("invalid accepted text"); return; };
+                    let Some(text) = text else {
+                        self.abort_delivery("invalid accepted text");
+                        return;
+                    };
                     let mut value = project_json_value(&json!({"type":"text", "text":null}));
                     if value.replace_pointer_projection("/text", text).is_err() {
-                        self.abort_delivery("invalid accepted text projection"); return;
+                        self.abort_delivery("invalid accepted text projection");
+                        return;
                     }
                     if let Some(citations) = citations {
-                        let value_to_insert = citations.clone().unwrap_or_else(|| Utf16JsonProjection::plain(Value::Null));
+                        let value_to_insert = citations
+                            .clone()
+                            .unwrap_or_else(|| Utf16JsonProjection::plain(Value::Null));
                         if value.set_field("citations", value_to_insert).is_err() {
-                            self.abort_delivery("invalid accepted citations"); return;
+                            self.abort_delivery("invalid accepted citations");
+                            return;
                         }
                     }
                     value
                 }
                 ContentBlock::ProviderContent { value, .. } => value.clone(),
-                ContentBlock::Thinking { thinking, signature } => {
-                    let Some(thinking) = strip_result_memory_tags(&Utf16JsonProjection::from(thinking.as_str())) else {
-                        self.abort_delivery("invalid accepted thinking"); return;
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    let Some(thinking) =
+                        strip_result_memory_tags(&Utf16JsonProjection::from(thinking.as_str()))
+                    else {
+                        self.abort_delivery("invalid accepted thinking");
+                        return;
                     };
-                    let mut value = project_json_value(&json!({"type":"thinking", "thinking":null, "signature":signature}));
-                    if value.replace_pointer_projection("/thinking", thinking).is_err() {
-                        self.abort_delivery("invalid accepted thinking projection"); return;
+                    let mut value = project_json_value(
+                        &json!({"type":"thinking", "thinking":null, "signature":signature}),
+                    );
+                    if value
+                        .replace_pointer_projection("/thinking", thinking)
+                        .is_err()
+                    {
+                        self.abort_delivery("invalid accepted thinking projection");
+                        return;
                     }
                     value
                 }
-                ContentBlock::ToolUse { id, name, input, provider_id } => {
-                    let mut value = project_json_value(&json!({"type":"tool_use", "id":provider_id.as_deref().unwrap_or(id.as_str()), "name":name, "input":null}));
-                    if value.replace_pointer_projection("/input", input.clone()).is_err() {
-                        self.abort_delivery("invalid accepted tool input"); return;
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                } => {
+                    let mut value = project_json_value(
+                        &json!({"type":"tool_use", "id":provider_id.as_deref().unwrap_or(id.as_str()), "name":name, "input":null}),
+                    );
+                    if value
+                        .replace_pointer_projection("/input", input.clone())
+                        .is_err()
+                    {
+                        self.abort_delivery("invalid accepted tool input");
+                        return;
                     }
                     value
                 }
-                _ => match serde_json::to_string(block).ok().and_then(|value| Utf16JsonProjection::parse(&value).ok()) {
+                _ => match serde_json::to_string(block)
+                    .ok()
+                    .and_then(|value| Utf16JsonProjection::parse(&value).ok())
+                {
                     Some(value) => value,
-                    None => { self.abort_delivery("invalid accepted assistant block"); return; }
+                    None => {
+                        self.abort_delivery("invalid accepted assistant block");
+                        return;
+                    }
                 },
             };
             blocks.push(projection);
         }
-        if blocks.is_empty() { return; }
+        if blocks.is_empty() {
+            return;
+        }
         let Ok(content) = Utf16JsonProjection::array(blocks) else {
-            self.abort_delivery("invalid accepted assistant content"); return;
+            self.abort_delivery("invalid accepted assistant content");
+            return;
         };
         if message.set_pointer("/content", content).is_err() {
-            self.abort_delivery("invalid accepted assistant message"); return;
+            self.abort_delivery("invalid accepted assistant message");
+            return;
         }
         if !message.contains_property("context_management")
-            && message.set_field("context_management", Utf16JsonProjection::plain(Value::Null)).is_err()
+            && message
+                .set_field(
+                    "context_management",
+                    Utf16JsonProjection::plain(Value::Null),
+                )
+                .is_err()
         {
-            self.abort_delivery("invalid accepted assistant context"); return;
+            self.abort_delivery("invalid accepted assistant context");
+            return;
         }
         let session_id = self.session_id.lock().await.clone();
         let mut frame = project_json_value(&json!({
             "type":"assistant", "message":null, "parent_tool_use_id":null,
             "session_id":session_id, "uuid":row_id.as_uuid().to_string(), "timestamp":timestamp
         }));
-        if frame.replace_pointer_projection("/message", message).is_err() {
-            self.abort_delivery("invalid accepted assistant frame"); return;
+        if frame
+            .replace_pointer_projection("/message", message)
+            .is_err()
+        {
+            self.abort_delivery("invalid accepted assistant frame");
+            return;
         }
         if let Some(request_id) = request_id {
-            if frame.set_field("request_id", Utf16JsonProjection::from(request_id)).is_err() {
-                self.abort_delivery("invalid accepted assistant request id"); return;
+            if frame
+                .set_field("request_id", Utf16JsonProjection::from(request_id))
+                .is_err()
+            {
+                self.abort_delivery("invalid accepted assistant request id");
+                return;
             }
         }
         {
@@ -4248,7 +4338,8 @@ impl OutputStream for StreamJsonStream {
     }
 
     async fn emit_message_start(&self, message_id: &str, model: &str) {
-        self.emit_message_start_with_native(message_id, model, None).await;
+        self.emit_message_start_with_native(message_id, model, None)
+            .await;
     }
 
     async fn emit_message_start_with_native(
@@ -4322,10 +4413,9 @@ impl OutputStream for StreamJsonStream {
         let mut projection = project_json_value(&frame);
         if let Some(native_message) = &acc.native_message_start {
             let mut message = native_message.clone();
-            if let Err(error) = message.set_pointer(
-                "/content",
-                project_json_value(&acc.to_content_json()),
-            ) {
+            if let Err(error) =
+                message.set_pointer("/content", project_json_value(&acc.to_content_json()))
+            {
                 self.abort_delivery(format!("invalid native assistant content: {error}"));
                 return;
             }
@@ -4845,7 +4935,10 @@ pub fn build_init_params(
         memory_paths,
         original_cwd: host.original_cwd.map(|p| p.to_string_lossy().into_owned()),
         additional_directories: host.additional_directories.map(|paths| {
-            paths.into_iter().map(|p| p.to_string_lossy().into_owned()).collect()
+            paths
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect()
         }),
         ultrathink_available: host.ultrathink_available,
         ultrathink_typed_raises: host.ultrathink_typed_raises,
@@ -4928,11 +5021,13 @@ mod canonical_model_tests {
             reasoning_tokens: 0,
             web_search_requests: 0,
         }];
-        per_model.current_usage_details = Some(lingxi_core::host::orchestrator::ResponseUsageDetailsSnapshot {
-            cache_creation_1h_input_tokens: 3,
-            cache_creation_5m_input_tokens: 5,
-            ..Default::default()
-        });
+        per_model.current_usage_details = Some(
+            lingxi_core::host::orchestrator::ResponseUsageDetailsSnapshot {
+                cache_creation_1h_input_tokens: 3,
+                cache_creation_5m_input_tokens: 5,
+                ..Default::default()
+            },
+        );
         assert_eq!(
             StreamJsonStream::build_usage_block(&per_model)["cache_creation"],
             json!({"ephemeral_1h_input_tokens":3,"ephemeral_5m_input_tokens":5})
@@ -5447,7 +5542,10 @@ mod tests {
             assert_eq!(frame.string_at("/type"), Some("result"));
             assert_eq!(frame.subprojection("/user_message_uuid").unwrap(), client);
             assert_eq!(frame.array_len("/user_message_uuids"), Some(1));
-            assert_eq!(frame.subprojection("/user_message_uuids/0").unwrap(), client);
+            assert_eq!(
+                frame.subprojection("/user_message_uuids/0").unwrap(),
+                client
+            );
         }
     }
 
@@ -9233,13 +9331,34 @@ mod verbose_json_tests {
     #[async_trait::async_trait]
     impl OutputStream for BufferedStopOutput {
         async fn emit_text(&self, _: &Utf16JsonProjection) {}
-        async fn emit_tool_call(&self, _: &lingxi_core::types::ToolUseId, _: &str, _: &Utf16JsonProjection) {}
-        async fn emit_tool_result(&self, _: &lingxi_core::types::ToolUseId, _: &str, _: &Utf16JsonProjection, _: &Utf16JsonProjection, _: Option<&Utf16JsonProjection>) {}
+        async fn emit_tool_call(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &Utf16JsonProjection,
+        ) {
+        }
+        async fn emit_tool_result(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
+            _: Option<&Utf16JsonProjection>,
+        ) {
+        }
         async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {}
-        fn wants_partial_stream_events(&self) -> bool { true }
-        fn wants_accepted_assistant_rows(&self) -> bool { true }
+        fn wants_partial_stream_events(&self) -> bool {
+            true
+        }
+        fn wants_accepted_assistant_rows(&self) -> bool {
+            true
+        }
         async fn emit_stream_event_with_metadata(
-            &self, event: &str, _: bool, _: &PartialStreamEventMetadata,
+            &self,
+            event: &str,
+            _: bool,
+            _: &PartialStreamEventMetadata,
         ) {
             self.0.lock().unwrap().push(event.to_owned());
         }
@@ -9255,11 +9374,18 @@ mod verbose_json_tests {
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
             r#"{"type":"content_block_stop","index":0}"#,
         ];
-        let events = raw.iter().map(|source| Ok(llm_runtime::HistoryEvent::NativeStreamFrame {
-            event: lingxi_llm_client::protocol::JsonPayload::parse(source).unwrap(),
-            thinking_display: None,
-        })).collect::<Vec<_>>();
-        let result = orchestrator::streaming_loop::pump_stream(futures::stream::iter(events).boxed(), &out).await;
+        let events = raw
+            .iter()
+            .map(|source| {
+                Ok(llm_runtime::HistoryEvent::NativeStreamFrame {
+                    event: lingxi_llm_client::protocol::JsonPayload::parse(source).unwrap(),
+                    thinking_display: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        let result =
+            orchestrator::streaming_loop::pump_stream(futures::stream::iter(events).boxed(), &out)
+                .await;
         assert!(result.is_err());
         assert_eq!(*output.0.lock().unwrap(), raw.map(str::to_owned));
     }
@@ -9274,20 +9400,45 @@ mod verbose_json_tests {
         );
         stream.set_flags(true, false);
         let source = r#"{"type":"message_start","message":{"id":"msg","type":"message","role":"assistant","model":"model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}"#;
-        stream.emit_message_start_with_native("msg", "model", Some(source)).await;
+        stream
+            .emit_message_start_with_native("msg", "model", Some(source))
+            .await;
         let first = MessageId::new();
         let second = MessageId::new();
-        for (index, (id, text)) in [(first, "first"), (second, "second")].into_iter().enumerate() {
+        for (index, (id, text)) in [(first, "first"), (second, "second")]
+            .into_iter()
+            .enumerate()
+        {
             stream.emit_assistant_block_start(index as u64).await;
             stream.emit_text(&Utf16JsonProjection::from(text)).await;
-            stream.emit_accepted_assistant_row(&id, "2026-01-01T00:00:00.000Z", None,
-                "msg", "model", Some(source), &[ContentBlock::Text { text: text.into(), citations: None }]).await;
-            stream.emit_stream_event(&format!(r#"{{"type":"content_block_stop","index":{index}}}"#), false).await;
+            stream
+                .emit_accepted_assistant_row(
+                    &id,
+                    "2026-01-01T00:00:00.000Z",
+                    None,
+                    "msg",
+                    "model",
+                    Some(source),
+                    &[ContentBlock::Text {
+                        text: text.into(),
+                        citations: None,
+                    }],
+                )
+                .await;
+            stream
+                .emit_stream_event(
+                    &format!(r#"{{"type":"content_block_stop","index":{index}}}"#),
+                    false,
+                )
+                .await;
         }
         stream.emit_message_boundary(Some("end_turn"), None).await;
         stream.finish().await.unwrap();
         let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        let frames: Vec<Value> = raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let frames: Vec<Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(frames.len(), 4);
         assert_eq!(frames[0]["uuid"], first.as_uuid().to_string());
         assert_eq!(frames[0]["message"]["content"][0]["text"], "first");
@@ -9295,7 +9446,10 @@ mod verbose_json_tests {
         assert_eq!(frames[2]["uuid"], second.as_uuid().to_string());
         assert_eq!(frames[2]["message"]["content"][0]["text"], "second");
         assert_eq!(frames[3]["event"]["index"], 1);
-        assert_eq!(stream.get_last_result_text().await.string_at(""), Some("second"));
+        assert_eq!(
+            stream.get_last_result_text().await.string_at(""),
+            Some("second")
+        );
     }
 
     #[tokio::test]
@@ -9303,21 +9457,34 @@ mod verbose_json_tests {
         use lingxi_core::types::{ContentBlock, MessageId};
         let bytes = Arc::new(StdMutex::new(Vec::new()));
         let stream = StreamJsonStream::new(
-            super::tests::make_params("non-native"), Output::new(CapturedWriter(bytes.clone())),
+            super::tests::make_params("non-native"),
+            Output::new(CapturedWriter(bytes.clone())),
         );
         stream.emit_message_start("other-id", "other-model").await;
         stream.emit_assistant_block_start(0).await;
         stream.emit_text(&Utf16JsonProjection::from("answer")).await;
         let accepted_id = MessageId::new();
-        stream.emit_accepted_assistant_row(
-            &accepted_id, "2026-01-01T00:00:00.000Z", None,
-            "other-id", "other-model", None,
-            &[ContentBlock::Text { text: "answer".into(), citations: None }],
-        ).await;
+        stream
+            .emit_accepted_assistant_row(
+                &accepted_id,
+                "2026-01-01T00:00:00.000Z",
+                None,
+                "other-id",
+                "other-model",
+                None,
+                &[ContentBlock::Text {
+                    text: "answer".into(),
+                    citations: None,
+                }],
+            )
+            .await;
         stream.emit_message_boundary(Some("end_turn"), None).await;
         stream.finish().await.unwrap();
         let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        let frames: Vec<Value> = raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let frames: Vec<Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0]["uuid"], accepted_id.as_uuid().to_string());
         assert_eq!(frames[0]["timestamp"], "2026-01-01T00:00:00.000Z");
@@ -9330,7 +9497,8 @@ mod verbose_json_tests {
         use lingxi_core::types::{ContentBlock, MessageId};
         let bytes = Arc::new(StdMutex::new(Vec::new()));
         let stream = StreamJsonStream::new(
-            super::tests::make_params("provider-blocks"), Output::new(CapturedWriter(bytes.clone())),
+            super::tests::make_params("provider-blocks"),
+            Output::new(CapturedWriter(bytes.clone())),
         );
         let mut expected = Vec::new();
         for model in ["provider-a", "provider-b"] {
@@ -9341,26 +9509,49 @@ mod verbose_json_tests {
                 let id = MessageId::new();
                 stream.emit_assistant_block_start(index as u64).await;
                 stream.emit_text(&text).await;
-                stream.emit_accepted_assistant_row(
-                    &id, "2026-01-01T00:00:00.000Z", Some("request"),
-                    "reused-response", model, None,
-                    &[ContentBlock::TextJsUtf16 {
-                        text: String::from_utf16_lossy(&units), utf16_code_units: units.clone(), citations: None,
-                    }],
-                ).await;
+                stream
+                    .emit_accepted_assistant_row(
+                        &id,
+                        "2026-01-01T00:00:00.000Z",
+                        Some("request"),
+                        "reused-response",
+                        model,
+                        None,
+                        &[ContentBlock::TextJsUtf16 {
+                            text: String::from_utf16_lossy(&units),
+                            utf16_code_units: units.clone(),
+                            citations: None,
+                        }],
+                    )
+                    .await;
                 expected.push((id, model, units));
             }
-            stream.emit_message_boundary(Some("end_turn"), Some("request")).await;
+            stream
+                .emit_message_boundary(Some("end_turn"), Some("request"))
+                .await;
         }
         stream.finish().await.unwrap();
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        let frames = output.lines().map(|line| Utf16JsonProjection::parse(line).unwrap()).collect::<Vec<_>>();
-        assert_eq!(frames.len(), expected.len(), "accepted blocks have no merged duplicate");
+        let frames = output
+            .lines()
+            .map(|line| Utf16JsonProjection::parse(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frames.len(),
+            expected.len(),
+            "accepted blocks have no merged duplicate"
+        );
         for (frame, (id, model, units)) in frames.iter().zip(expected) {
-            assert_eq!(frame.string_at("/uuid"), Some(id.as_uuid().to_string().as_str()));
+            assert_eq!(
+                frame.string_at("/uuid"),
+                Some(id.as_uuid().to_string().as_str())
+            );
             assert_eq!(frame.string_at("/message/model"), Some(model));
             assert_eq!(frame.string_units("/message/content/0/text"), Some(units));
-            assert_eq!(frame.string_at("/timestamp"), Some("2026-01-01T00:00:00.000Z"));
+            assert_eq!(
+                frame.string_at("/timestamp"),
+                Some("2026-01-01T00:00:00.000Z")
+            );
             assert_eq!(frame.string_at("/request_id"), Some("request"));
         }
     }
@@ -9381,8 +9572,14 @@ mod verbose_json_tests {
         let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         let assistant = raw.lines().next().unwrap();
         let frame = Utf16JsonProjection::parse(assistant).unwrap();
-        assert_eq!(frame.subprojection("/message").unwrap().to_json_string().unwrap(),
-            r#"{"id":"msg_native","type":"message","role":"assistant","model":"provider-model","content":[{"type":"text","text":"hello"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0},"context_management":null}"#);
+        assert_eq!(
+            frame
+                .subprojection("/message")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"id":"msg_native","type":"message","role":"assistant","model":"provider-model","content":[{"type":"text","text":"hello"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0},"context_management":null}"#
+        );
     }
 
     #[tokio::test]
@@ -9419,15 +9616,32 @@ mod verbose_json_tests {
         stream.set_flags(true, false);
         stream.emit_message_start("msg", "model").await;
         stream.emit_assistant_block_start(1).await;
-        stream.emit_text(&Utf16JsonProjection::from("A<cc-memory>x</cc-memory>B")).await;
+        stream
+            .emit_text(&Utf16JsonProjection::from("A<cc-memory>x</cc-memory>B"))
+            .await;
         stream.emit_stream_event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A<cc-memory>x</cc-memory>B"}}"#, false).await;
         stream.emit_message_boundary(Some("end_turn"), None).await;
         let text = stream.get_last_result_text().await;
-        stream.emit_result_success(&text, "end_turn", &CostSnapshot::default(), "off", None, &[]).await;
+        stream
+            .emit_result_success(
+                &text,
+                "end_turn",
+                &CostSnapshot::default(),
+                "off",
+                None,
+                &[],
+            )
+            .await;
         stream.finish().await.unwrap();
         let raw = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        let frames: Vec<Value> = raw.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(frames[0]["event"]["delta"]["text"], "A<cc-memory>x</cc-memory>B");
+        let frames: Vec<Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            frames[0]["event"]["delta"]["text"],
+            "A<cc-memory>x</cc-memory>B"
+        );
         assert_eq!(frames[1]["message"]["content"][0]["text"], "AxB");
         assert_eq!(frames[2]["result"], "AxB");
     }

@@ -18,6 +18,7 @@ use lingxi_core::host::{
     SecureStorageError,
 };
 use lingxi_core::types::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -111,20 +112,272 @@ impl SecureStorage for DeferredPlainTextStorage {
     }
 }
 
+#[derive(Clone)]
 struct RuntimeFallbackStorage {
     primary: Arc<dyn SecureStorage>,
     fallback: Arc<dyn SecureStorage>,
-    fallback_active: AtomicBool,
-    warned: AtomicBool,
+    account_ownership_backend: SecureStorageBackend,
+    fallback_active: Arc<AtomicBool>,
+    warned: Arc<AtomicBool>,
+    lock_directory: PathBuf,
 }
 
 impl RuntimeFallbackStorage {
-    fn new(primary: Arc<dyn SecureStorage>, fallback: Arc<dyn SecureStorage>) -> Self {
+    fn new(
+        primary: Arc<dyn SecureStorage>,
+        fallback: Arc<dyn SecureStorage>,
+        lock_directory: PathBuf,
+    ) -> Self {
+        let account_ownership_backend = primary.account_ownership_backend();
         Self {
             primary,
             fallback,
-            fallback_active: AtomicBool::new(false),
-            warned: AtomicBool::new(false),
+            account_ownership_backend,
+            fallback_active: Arc::new(AtomicBool::new(false)),
+            warned: Arc::new(AtomicBool::new(false)),
+            lock_directory,
+        }
+    }
+
+    fn lock_path(service: &str, account: &str) -> PathBuf {
+        let mut hash = Sha256::new();
+        for component in [service, account] {
+            hash.update((component.len() as u64).to_be_bytes());
+            hash.update(component.as_bytes());
+        }
+        PathBuf::from(format!("{:x}.lock", hash.finalize()))
+    }
+
+    async fn transaction_lock(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<lingxi_core::host::RootedFileLock, SecureStorageError> {
+        use lingxi_core::host::rooted_fs::{self, RootedFileLockAttempt};
+        let directory = self.lock_directory.clone();
+        let relative = Self::lock_path(service, account);
+        let mut request = tokio::task::spawn_blocking(move || {
+            let parent = directory
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(parent)
+                .map_err(|error| SecureStorageError::Io(error.to_string()))?;
+            let parent = parent
+                .canonicalize()
+                .map_err(|error| SecureStorageError::Io(error.to_string()))?;
+            let leaf = Path::new(directory.file_name().ok_or_else(|| {
+                SecureStorageError::Io("credential lock directory is invalid".into())
+            })?);
+            let identity = rooted_fs::ensure_private_directory(&parent, leaf, 0o700)
+                .map_err(|error| SecureStorageError::Io(error.to_string()))?;
+            let directory = parent.join(leaf);
+            rooted_fs::prepare_lock_exclusive_pinned(
+                &directory,
+                &relative,
+                0o700,
+                0o600,
+                Some(&identity),
+            )
+            .map_err(|error| SecureStorageError::Io(error.to_string()))
+        })
+        .await
+        .map_err(|error| SecureStorageError::Io(error.to_string()))??;
+        loop {
+            // Keep one opened lock handle across attempts. A cancelled waiter
+            // drops only its own request, never the active transaction's lock.
+            match tokio::task::spawn_blocking(move || request.try_acquire())
+                .await
+                .map_err(|error| SecureStorageError::Io(error.to_string()))?
+                .map_err(|error| SecureStorageError::Io(error.to_string()))?
+            {
+                RootedFileLockAttempt::Acquired(lock) => return Ok(lock),
+                RootedFileLockAttempt::Contended(pending) => request = pending,
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn transaction<T, F, Fut>(
+        &self,
+        service: &str,
+        account: &str,
+        operation: F,
+    ) -> Result<T, SecureStorageError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self, String, String) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, SecureStorageError>> + Send + 'static,
+    {
+        let lock = self.transaction_lock(service, account).await?;
+        let storage = self.clone();
+        let service = service.to_owned();
+        let account = account.to_owned();
+        // Fallback reads can migrate into the native store. Once admitted,
+        // every mutation owns its cross-process lock through real completion,
+        // even if its caller cancels while a backend command is still running.
+        tokio::spawn(async move {
+            let _lock = lock;
+            operation(storage, service, account).await
+        })
+        .await
+        .map_err(|error| SecureStorageError::Io(error.to_string()))?
+    }
+
+    async fn retrieve_primary(
+        &self,
+        service: &str,
+        account: &str,
+        uncached: bool,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        if uncached {
+            self.primary.retrieve_uncached(service, account).await
+        } else {
+            self.primary.retrieve(service, account).await
+        }
+    }
+
+    async fn store_with_fallback(
+        &self,
+        service: &str,
+        account: &str,
+        data: SecureStorageData,
+    ) -> Result<(), SecureStorageError> {
+        match self.primary.store(service, account, data.clone()).await {
+            Ok(()) => match self.fallback.delete(service, account).await {
+                Ok(()) => {
+                    self.fallback_active.store(false, Ordering::Release);
+                    Ok(())
+                }
+                Err(cleanup_error) => {
+                    self.fallback
+                            .store(service, account, data)
+                            .await
+                            .map_err(|refresh_error| {
+                                SecureStorageError::Io(format!(
+                                    "native credential stored, but fallback cleanup failed \
+                                     ({cleanup_error}) and fallback refresh failed ({refresh_error})"
+                                ))
+                            })?;
+                    self.mark_fallback_active(
+                        &cleanup_error,
+                        "Warning: native credential storage recovered, but the owner-only \
+                             fallback could not be removed; retaining the current value in both \
+                             stores.",
+                    );
+                    Ok(())
+                }
+            },
+            Err(error) if runtime_fallback_allowed(&error) => {
+                self.activate_fallback(&error);
+                self.fallback.store(service, account, data).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn retrieve_with_fallback(
+        &self,
+        service: &str,
+        account: &str,
+        uncached: bool,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        let fallback_result = if uncached {
+            self.fallback.retrieve_uncached(service, account).await
+        } else {
+            self.fallback.retrieve(service, account).await
+        };
+        match fallback_result {
+            Ok(Some(data)) => {
+                self.fallback_active.store(true, Ordering::Release);
+                if is_fallback_tombstone(&data) {
+                    return Ok(None);
+                }
+
+                // A fallback file records a past native-store failure, not a
+                // permanent policy choice. Retry Keychain on a later healthy
+                // launch and remove the plaintext shadow only after the native
+                // write succeeds. The valid fallback value remains readable
+                // even if either recovery step fails.
+                match self.primary.store(service, account, data.clone()).await {
+                    Ok(()) => match self.fallback.delete(service, account).await {
+                        Ok(()) => self.fallback_active.store(false, Ordering::Release),
+                        Err(cleanup_error) => self.mark_fallback_active(
+                            &cleanup_error,
+                            "Warning: native credential storage recovered, but the owner-only \
+                             fallback could not be removed; retaining the current value in both \
+                             stores.",
+                        ),
+                    },
+                    Err(error) if runtime_fallback_allowed(&error) => {
+                        self.activate_fallback(&error);
+                    }
+                    Err(error) => self.mark_fallback_active(
+                        &error,
+                        "Warning: native credential migration failed; retaining the owner-only \
+                         fallback value.",
+                    ),
+                }
+                return Ok(Some(data));
+            }
+            Ok(None) => {}
+            Err(fallback_error) => {
+                return match self.retrieve_primary(service, account, uncached).await {
+                    Ok(data) => Ok(data),
+                    Err(primary_error) if runtime_fallback_allowed(&primary_error) => {
+                        self.activate_fallback(&primary_error);
+                        Err(fallback_error)
+                    }
+                    Err(primary_error) => Err(primary_error),
+                };
+            }
+        }
+        match self.retrieve_primary(service, account, uncached).await {
+            Ok(data) => Ok(data),
+            Err(error) if runtime_fallback_allowed(&error) => {
+                self.activate_fallback(&error);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn delete_with_fallback(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(), SecureStorageError> {
+        match self.primary.delete(service, account).await {
+            Ok(()) => match self.fallback.delete(service, account).await {
+                Ok(()) => {
+                    self.fallback_active.store(false, Ordering::Release);
+                    Ok(())
+                }
+                Err(cleanup_error) => {
+                    self.fallback
+                        .store(service, account, fallback_tombstone())
+                        .await
+                        .map_err(|marker_error| {
+                            SecureStorageError::Io(format!(
+                                "native credential deleted, but fallback cleanup failed \
+                                 ({cleanup_error}) and tombstone write failed ({marker_error})"
+                            ))
+                        })?;
+                    self.mark_fallback_active(
+                        &cleanup_error,
+                        "Warning: native credential was deleted, but the owner-only fallback \
+                         could not be removed; recording a deletion tombstone.",
+                    );
+                    Ok(())
+                }
+            },
+            Err(error) if runtime_fallback_allowed(&error) => {
+                self.activate_fallback(&error);
+                self.fallback
+                    .store(service, account, fallback_tombstone())
+                    .await
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -226,37 +479,14 @@ impl SecureStorage for RuntimeFallbackStorage {
         account: &str,
         data: SecureStorageData,
     ) -> Result<(), SecureStorageError> {
-        match self.primary.store(service, account, data.clone()).await {
-            Ok(()) => match self.fallback.delete(service, account).await {
-                Ok(()) => {
-                    self.fallback_active.store(false, Ordering::Release);
-                    Ok(())
-                }
-                Err(cleanup_error) => {
-                    self.fallback
-                            .store(service, account, data)
-                            .await
-                            .map_err(|refresh_error| {
-                                SecureStorageError::Io(format!(
-                                    "native credential stored, but fallback cleanup failed \
-                                     ({cleanup_error}) and fallback refresh failed ({refresh_error})"
-                                ))
-                            })?;
-                    self.mark_fallback_active(
-                        &cleanup_error,
-                        "Warning: native credential storage recovered, but the owner-only \
-                             fallback could not be removed; retaining the current value in both \
-                             stores.",
-                    );
-                    Ok(())
-                }
+        self.transaction(
+            service,
+            account,
+            move |storage, service, account| async move {
+                storage.store_with_fallback(&service, &account, data).await
             },
-            Err(error) if runtime_fallback_allowed(&error) => {
-                self.activate_fallback(&error);
-                self.fallback.store(service, account, data).await
-            }
-            Err(error) => Err(error),
-        }
+        )
+        .await
     }
 
     async fn retrieve(
@@ -264,99 +494,39 @@ impl SecureStorage for RuntimeFallbackStorage {
         service: &str,
         account: &str,
     ) -> Result<Option<SecureStorageData>, SecureStorageError> {
-        let fallback_result = self.fallback.retrieve(service, account).await;
-        match fallback_result {
-            Ok(Some(data)) => {
-                self.fallback_active.store(true, Ordering::Release);
-                if is_fallback_tombstone(&data) {
-                    return Ok(None);
-                }
+        self.transaction(service, account, |storage, service, account| async move {
+            storage
+                .retrieve_with_fallback(&service, &account, false)
+                .await
+        })
+        .await
+    }
 
-                // A fallback file records a past native-store failure, not a
-                // permanent policy choice. Retry Keychain on a later healthy
-                // launch and remove the plaintext shadow only after the native
-                // write succeeds. The valid fallback value remains readable
-                // even if either recovery step fails.
-                match self.primary.store(service, account, data.clone()).await {
-                    Ok(()) => match self.fallback.delete(service, account).await {
-                        Ok(()) => self.fallback_active.store(false, Ordering::Release),
-                        Err(cleanup_error) => self.mark_fallback_active(
-                            &cleanup_error,
-                            "Warning: native credential storage recovered, but the owner-only \
-                             fallback could not be removed; retaining the current value in both \
-                             stores.",
-                        ),
-                    },
-                    Err(error) if runtime_fallback_allowed(&error) => {
-                        self.activate_fallback(&error);
-                    }
-                    Err(error) => self.mark_fallback_active(
-                        &error,
-                        "Warning: native credential migration failed; retaining the owner-only \
-                         fallback value.",
-                    ),
-                }
-                return Ok(Some(data));
-            }
-            Ok(None) => {}
-            Err(fallback_error) => {
-                return match self.primary.retrieve(service, account).await {
-                    Ok(data) => Ok(data),
-                    Err(primary_error) if runtime_fallback_allowed(&primary_error) => {
-                        self.activate_fallback(&primary_error);
-                        Err(fallback_error)
-                    }
-                    Err(primary_error) => Err(primary_error),
-                };
-            }
-        }
-        match self.primary.retrieve(service, account).await {
-            Ok(data) => Ok(data),
-            Err(error) if runtime_fallback_allowed(&error) => {
-                self.activate_fallback(&error);
-                Ok(None)
-            }
-            Err(error) => Err(error),
-        }
+    async fn retrieve_uncached(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        self.transaction(service, account, |storage, service, account| async move {
+            storage
+                .retrieve_with_fallback(&service, &account, true)
+                .await
+        })
+        .await
     }
 
     async fn contains(&self, service: &str, account: &str) -> Result<bool, SecureStorageError> {
-        self.contains_with_fallback(service, account).await
+        self.transaction(service, account, |storage, service, account| async move {
+            storage.contains_with_fallback(&service, &account).await
+        })
+        .await
     }
 
     async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
-        match self.primary.delete(service, account).await {
-            Ok(()) => match self.fallback.delete(service, account).await {
-                Ok(()) => {
-                    self.fallback_active.store(false, Ordering::Release);
-                    Ok(())
-                }
-                Err(cleanup_error) => {
-                    self.fallback
-                        .store(service, account, fallback_tombstone())
-                        .await
-                        .map_err(|marker_error| {
-                            SecureStorageError::Io(format!(
-                                "native credential deleted, but fallback cleanup failed \
-                                 ({cleanup_error}) and tombstone write failed ({marker_error})"
-                            ))
-                        })?;
-                    self.mark_fallback_active(
-                        &cleanup_error,
-                        "Warning: native credential was deleted, but the owner-only fallback \
-                         could not be removed; recording a deletion tombstone.",
-                    );
-                    Ok(())
-                }
-            },
-            Err(error) if runtime_fallback_allowed(&error) => {
-                self.activate_fallback(&error);
-                self.fallback
-                    .store(service, account, fallback_tombstone())
-                    .await
-            }
-            Err(error) => Err(error),
-        }
+        self.transaction(service, account, |storage, service, account| async move {
+            storage.delete_with_fallback(&service, &account).await
+        })
+        .await
     }
 
     async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
@@ -412,6 +582,95 @@ impl SecureStorage for RuntimeFallbackStorage {
             self.primary.backend()
         }
     }
+
+    fn account_ownership_backend(&self) -> SecureStorageBackend {
+        self.account_ownership_backend
+    }
+}
+
+struct UnavailableNativeStorage {
+    backend: SecureStorageBackend,
+    error: SecureStorageError,
+}
+
+#[async_trait]
+impl SecureStorage for UnavailableNativeStorage {
+    async fn store(
+        &self,
+        _service: &str,
+        _account: &str,
+        _data: SecureStorageData,
+    ) -> Result<(), SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    async fn retrieve(
+        &self,
+        _service: &str,
+        _account: &str,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+        Err(self.error.clone())
+    }
+
+    fn is_encrypted(&self) -> bool {
+        true
+    }
+
+    fn backend(&self) -> SecureStorageBackend {
+        self.backend
+    }
+}
+
+fn native_or_fallback_storage(
+    primary: Result<Arc<dyn SecureStorage>, SecureStorageError>,
+    native_backend: SecureStorageBackend,
+    fallback: Arc<dyn SecureStorage>,
+    lock_directory: PathBuf,
+) -> Arc<dyn SecureStorage> {
+    let (primary, unavailable) = match primary {
+        Ok(primary) => (primary, false),
+        Err(error) => (
+            Arc::new(UnavailableNativeStorage {
+                backend: native_backend,
+                error,
+            }) as Arc<dyn SecureStorage>,
+            true,
+        ),
+    };
+    let storage = RuntimeFallbackStorage::new(primary, fallback, lock_directory);
+    if unavailable {
+        storage.fallback_active.store(true, Ordering::Release);
+        storage.warned.store(true, Ordering::Release);
+    }
+    Arc::new(storage)
+}
+
+/// Build the production fallback wrapper over isolated synthetic backends.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn runtime_fallback_storage_for_test(
+    primary: Result<Arc<dyn SecureStorage>, SecureStorageError>,
+    native_backend: SecureStorageBackend,
+    fallback: Arc<dyn SecureStorage>,
+    lock_directory: PathBuf,
+) -> Arc<dyn SecureStorage> {
+    native_or_fallback_storage(primary, native_backend, fallback, lock_directory)
+}
+
+fn fallback_lock_directory(plaintext_path: &Path) -> PathBuf {
+    let mut name = plaintext_path
+        .file_name()
+        .map_or_else(|| OsString::from("credentials"), OsString::from);
+    name.push(".locks");
+    plaintext_path.with_file_name(name)
 }
 
 fn fallback_directory(plaintext_path: &Path) -> PathBuf {
@@ -489,27 +748,27 @@ pub async fn secure_storage_for_policy(
         // plaintext (with the documented warning) when it cannot initialise —
         // the same try-keychain-then-plaintext shape as the macOS arm.
         let default_dir = default_lingxi_dir();
-        match super::linux::LinuxSecretStorage::new(
+        let primary = super::linux::LinuxSecretStorage::new(
             user.clone(),
             config_dir.clone(),
             default_dir,
             String::new(),
-        ) {
-            Ok(secret) => {
-                return Ok(Arc::new(RuntimeFallbackStorage::new(
-                    Arc::new(secret),
-                    fallback,
-                )));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "lingxi::secure_storage",
-                    error = %e,
-                    policy = ?policy,
-                    "Warning: native credential storage unavailable during init."
-                );
-            }
+        )
+        .map(|storage| Arc::new(storage) as Arc<dyn SecureStorage>);
+        if let Err(error) = &primary {
+            tracing::warn!(
+                target: "lingxi::secure_storage",
+                %error,
+                policy = ?policy,
+                "Warning: native credential storage unavailable during init."
+            );
         }
+        return Ok(native_or_fallback_storage(
+            primary,
+            SecureStorageBackend::LinuxLibsecret,
+            fallback,
+            fallback_lock_directory(&plaintext_path),
+        ));
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -524,7 +783,7 @@ pub async fn secure_storage_for_policy(
         let _ = &user;
         let _ = &config_dir;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Ok(fallback)
     }
@@ -613,6 +872,7 @@ mod tests {
         unavailable: AtomicBool,
         fail_delete: AtomicBool,
         encrypted: bool,
+        backend: SecureStorageBackend,
     }
 
     impl MemoryStorage {
@@ -622,7 +882,17 @@ mod tests {
                 unavailable: AtomicBool::new(false),
                 fail_delete: AtomicBool::new(false),
                 encrypted,
+                backend: if encrypted {
+                    SecureStorageBackend::MacOsKeychain
+                } else {
+                    SecureStorageBackend::PlainText
+                },
             }
+        }
+
+        fn with_backend(mut self, backend: SecureStorageBackend) -> Self {
+            self.backend = backend;
+            self
         }
 
         fn set_unavailable(&self, unavailable: bool) {
@@ -706,11 +976,7 @@ mod tests {
         }
 
         fn backend(&self) -> SecureStorageBackend {
-            if self.encrypted {
-                SecureStorageBackend::MacOsKeychain
-            } else {
-                SecureStorageBackend::PlainText
-            }
+            self.backend
         }
     }
 
@@ -723,6 +989,197 @@ mod tests {
                 kind: SecretKindDto("generic_api_key".to_string()),
             },
         )
+    }
+
+    struct GatedMigrationStorage {
+        inner: MemoryStorage,
+        pause_old: AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl GatedMigrationStorage {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStorage::new(true),
+                pause_old: AtomicBool::new(true),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SecureStorage for GatedMigrationStorage {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: SecureStorageData,
+        ) -> Result<(), SecureStorageError> {
+            if data.expose_secret_bytes() == b"old-fallback"
+                && self.pause_old.swap(false, Ordering::AcqRel)
+            {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.store(service, account, data).await
+        }
+
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+            self.inner.retrieve(service, account).await
+        }
+
+        async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+            self.inner.delete(service, account).await
+        }
+
+        async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+            self.inner.list(service).await
+        }
+
+        fn is_encrypted(&self) -> bool {
+            true
+        }
+
+        fn backend(&self) -> SecureStorageBackend {
+            SecureStorageBackend::LinuxLibsecret
+        }
+    }
+
+    async fn assert_migration_serializes_later_mutation(delete: bool, cancel_read: bool) {
+        use lingxi_core::host::rooted_fs;
+        let directory = tempdir().unwrap();
+        let lock_directory = directory.path().join("credential-locks");
+        let primary = Arc::new(GatedMigrationStorage::new());
+        let fallback = Arc::new(MemoryStorage::new(false));
+        fallback
+            .store("fixture", "key", test_payload(b"old-fallback"))
+            .await
+            .unwrap();
+        let reader = Arc::new(RuntimeFallbackStorage::new(
+            primary.clone(),
+            fallback.clone(),
+            lock_directory.clone(),
+        ));
+        // Independent owners share the on-disk lock, not an Arc<Mutex>.
+        let writer = RuntimeFallbackStorage::new(primary.clone(), fallback, lock_directory.clone());
+        let reading = {
+            let reader = reader.clone();
+            tokio::spawn(async move { reader.retrieve("fixture", "key").await })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            primary.entered.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&lock_directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let lock_path = RuntimeFallbackStorage::lock_path("fixture", "key");
+        assert_eq!(
+            std::fs::metadata(lock_directory.join(&lock_path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        if cancel_read {
+            reading.abort();
+        }
+
+        let mut later = Box::pin(async {
+            if delete {
+                writer.delete("fixture", "key").await
+            } else {
+                writer
+                    .store("fixture", "key", test_payload(b"replacement"))
+                    .await
+            }
+        });
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(later.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // Dropping another queued caller cannot release the migration's lock.
+        let mut queued = Box::pin(reader.retrieve("fixture", "key"));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(queued);
+        assert!(matches!(
+            rooted_fs::try_lock_exclusive(&lock_directory, &lock_path, 0o700, 0o600),
+            Err(rooted_fs::FsError::AlreadyExists(_))
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            writer.store("fixture", "unrelated", test_payload(b"other-value")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        primary.release.notify_one();
+        let read_result = reading.await;
+        if cancel_read {
+            assert!(read_result.unwrap_err().is_cancelled());
+        } else {
+            assert_eq!(
+                read_result.unwrap().unwrap().unwrap().expose_secret_bytes(),
+                b"old-fallback"
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), later)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = writer.retrieve("fixture", "key").await.unwrap();
+        if delete {
+            assert!(current.is_none());
+            assert!(primary.retrieve("fixture", "key").await.unwrap().is_none());
+        } else {
+            assert_eq!(current.unwrap().expose_secret_bytes(), b"replacement");
+            assert_eq!(
+                primary
+                    .retrieve("fixture", "key")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .expose_secret_bytes(),
+                b"replacement"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_migration_cannot_overwrite_an_independent_handles_replacement() {
+        assert_migration_serializes_later_mutation(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn fallback_migration_cannot_resurrect_an_independent_handles_deletion() {
+        assert_migration_serializes_later_mutation(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_fallback_migration_retains_its_lock_after_a_waiter_cancels() {
+        for delete in [false, true] {
+            assert_migration_serializes_later_mutation(delete, true).await;
+        }
     }
 
     #[tokio::test]
@@ -753,6 +1210,174 @@ mod tests {
         .await
         .expect("isolated bridge storage");
         assert_eq!(storage.backend(), SecureStorageBackend::MemorySession);
+        assert_eq!(
+            storage.account_ownership_backend(),
+            SecureStorageBackend::MemorySession
+        );
+    }
+
+    #[tokio::test]
+    async fn account_ownership_stays_native_during_fallback_recovery_and_reopen() {
+        for memory_only in [false, true] {
+            let root = tempdir().unwrap();
+            let primary = Arc::new(
+                MemoryStorage::new(true).with_backend(SecureStorageBackend::LinuxLibsecret),
+            );
+            let fallback: Arc<dyn SecureStorage> = if memory_only {
+                Arc::new(InMemorySecureStorage::new())
+            } else {
+                Arc::new(DeferredPlainTextStorage::new(root.path().join("fallback")))
+            };
+            let storage = RuntimeFallbackStorage::new(
+                primary.clone(),
+                fallback.clone(),
+                root.path().join("locks"),
+            );
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            primary.set_unavailable(true);
+            storage
+                .store("fixture", "key", test_payload(b"synthetic-key"))
+                .await
+                .unwrap();
+            assert_eq!(storage.backend(), fallback.backend());
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            let reopened =
+                RuntimeFallbackStorage::new(primary.clone(), fallback, root.path().join("locks"));
+            assert_eq!(
+                reopened.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            primary.set_unavailable(false);
+            assert!(reopened.retrieve("fixture", "key").await.unwrap().is_some());
+            assert_eq!(reopened.backend(), SecureStorageBackend::LinuxLibsecret);
+            assert_eq!(
+                reopened.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+            assert!(!storage.contains("unrelated", "absent").await.unwrap());
+            assert_eq!(storage.backend(), SecureStorageBackend::LinuxLibsecret);
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::LinuxLibsecret
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_fallback_keeps_native_ownership_without_cross_policy_secret_access() {
+        let root = tempdir().unwrap();
+        let plaintext = root.path().join("fallback");
+        let missing = || {
+            Err(SecureStorageError::BackendUnavailable(
+                "synthetic native executable missing".into(),
+            ))
+        };
+        let storage = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(DeferredPlainTextStorage::new(plaintext.clone())),
+            root.path().join("locks"),
+        );
+        assert_eq!(storage.backend(), SecureStorageBackend::PlainText);
+        assert_eq!(
+            storage.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        storage
+            .store("fixture", "key", test_payload(b"synthetic-persistent-key"))
+            .await
+            .unwrap();
+
+        let isolated = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(InMemorySecureStorage::new()),
+            root.path().join("locks"),
+        );
+        assert_eq!(isolated.backend(), SecureStorageBackend::MemorySession);
+        assert_eq!(
+            isolated.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        assert!(
+            isolated.retrieve("fixture", "key").await.unwrap().is_none(),
+            "NativeOrMemory must not read NativePreferred's plaintext sidecar"
+        );
+        isolated
+            .store(
+                "fixture",
+                "memory-only",
+                test_payload(b"synthetic-session-key"),
+            )
+            .await
+            .unwrap();
+        let memory_restarted = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(InMemorySecureStorage::new()),
+            root.path().join("locks"),
+        );
+        assert_eq!(
+            memory_restarted.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        assert!(memory_restarted
+            .retrieve("fixture", "memory-only")
+            .await
+            .unwrap()
+            .is_none());
+
+        let restarted = native_or_fallback_storage(
+            missing(),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(DeferredPlainTextStorage::new(plaintext.clone())),
+            root.path().join("locks"),
+        );
+        assert!(restarted
+            .retrieve("fixture", "key")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            restarted.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        let recovered = native_or_fallback_storage(
+            Ok(Arc::new(
+                MemoryStorage::new(true).with_backend(SecureStorageBackend::LinuxLibsecret),
+            )),
+            SecureStorageBackend::LinuxLibsecret,
+            Arc::new(DeferredPlainTextStorage::new(plaintext)),
+            root.path().join("locks"),
+        );
+        assert!(recovered
+            .retrieve("fixture", "key")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(recovered.backend(), SecureStorageBackend::LinuxLibsecret);
+        assert_eq!(
+            recovered.account_ownership_backend(),
+            SecureStorageBackend::LinuxLibsecret
+        );
+        let fixture = secure_storage_for_policy(
+            "synthetic".into(),
+            root.path().to_owned(),
+            root.path().join("explicit-fixture"),
+            CredentialStoragePolicy::PlainTextFixture,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fixture.account_ownership_backend(),
+            SecureStorageBackend::PlainText
+        );
     }
 
     #[test]
@@ -766,6 +1391,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_failure_uses_the_same_fallback_across_fresh_handles() {
+        let locks = tempdir().expect("credential lock fixture");
         let dir = tempdir().expect("tempdir");
         let fallback_dir = dir.path().join(".credentials.json.d");
         let writer_fallback: Arc<dyn SecureStorage> = Arc::new(
@@ -773,7 +1399,11 @@ mod tests {
                 .await
                 .expect("writer fallback"),
         );
-        let writer = RuntimeFallbackStorage::new(Arc::new(UnavailableStorage), writer_fallback);
+        let writer = RuntimeFallbackStorage::new(
+            Arc::new(UnavailableStorage),
+            writer_fallback,
+            locks.path().join("credential-locks"),
+        );
         let expected = test_payload(b"shared-provider-key");
         writer
             .store("lingxi", "provider-key-deepseek", expected.clone())
@@ -806,7 +1436,11 @@ mod tests {
                 .await
                 .expect("reader fallback"),
         );
-        let reader = RuntimeFallbackStorage::new(Arc::new(UnavailableStorage), reader_fallback);
+        let reader = RuntimeFallbackStorage::new(
+            Arc::new(UnavailableStorage),
+            reader_fallback,
+            locks.path().join("credential-locks"),
+        );
         let actual = reader
             .retrieve("lingxi", "provider-key-deepseek")
             .await
@@ -819,6 +1453,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_write_cannot_leave_a_stale_fallback_shadow() {
+        let locks = tempdir().expect("credential lock fixture");
         let primary = Arc::new(MemoryStorage::new(true));
         let fallback = Arc::new(MemoryStorage::new(false));
         fallback
@@ -831,7 +1466,11 @@ mod tests {
             .expect("seed fallback");
         fallback.set_fail_delete(true);
 
-        let writer = RuntimeFallbackStorage::new(primary.clone(), fallback.clone());
+        let writer = RuntimeFallbackStorage::new(
+            primary.clone(),
+            fallback.clone(),
+            locks.path().join("credential-locks"),
+        );
         let replacement = test_payload(b"new-shared-key");
         writer
             .store("lingxi", "provider-key-deepseek", replacement.clone())
@@ -839,7 +1478,8 @@ mod tests {
             .expect("native write with fallback refresh");
         assert!(!writer.is_encrypted());
 
-        let fresh = RuntimeFallbackStorage::new(primary, fallback);
+        let fresh =
+            RuntimeFallbackStorage::new(primary, fallback, locks.path().join("credential-locks"));
         let actual = fresh
             .retrieve("lingxi", "provider-key-deepseek")
             .await
@@ -853,6 +1493,7 @@ mod tests {
 
     #[tokio::test]
     async fn healthy_native_store_migrates_a_cold_fallback_value() {
+        let locks = tempdir().expect("credential lock fixture");
         let primary = Arc::new(MemoryStorage::new(true));
         let fallback = Arc::new(MemoryStorage::new(false));
         let expected = test_payload(b"old-fallback-key");
@@ -861,7 +1502,11 @@ mod tests {
             .await
             .expect("seed fallback");
 
-        let storage = RuntimeFallbackStorage::new(primary.clone(), fallback.clone());
+        let storage = RuntimeFallbackStorage::new(
+            primary.clone(),
+            fallback.clone(),
+            locks.path().join("credential-locks"),
+        );
         let actual = storage
             .retrieve("lingxi", "provider-key-deepseek")
             .await
@@ -891,6 +1536,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_tombstone_prevents_native_credential_resurrection() {
+        let locks = tempdir().expect("credential lock fixture");
         let primary = Arc::new(MemoryStorage::new(true));
         let fallback = Arc::new(MemoryStorage::new(false));
         primary
@@ -911,14 +1557,22 @@ mod tests {
             .expect("seed fallback");
         primary.set_unavailable(true);
 
-        let deleting = RuntimeFallbackStorage::new(primary.clone(), fallback.clone());
+        let deleting = RuntimeFallbackStorage::new(
+            primary.clone(),
+            fallback.clone(),
+            locks.path().join("credential-locks"),
+        );
         deleting
             .delete("lingxi", "provider-key-deepseek")
             .await
             .expect("logical delete through tombstone");
 
         primary.set_unavailable(false);
-        let recovered = RuntimeFallbackStorage::new(primary.clone(), fallback.clone());
+        let recovered = RuntimeFallbackStorage::new(
+            primary.clone(),
+            fallback.clone(),
+            locks.path().join("credential-locks"),
+        );
         assert!(
             recovered
                 .retrieve("lingxi", "provider-key-deepseek")
@@ -941,7 +1595,8 @@ mod tests {
             .store("lingxi", "provider-key-deepseek", replacement.clone())
             .await
             .expect("replace tombstone");
-        let fresh = RuntimeFallbackStorage::new(primary, fallback);
+        let fresh =
+            RuntimeFallbackStorage::new(primary, fallback, locks.path().join("credential-locks"));
         let actual = fresh
             .retrieve("lingxi", "provider-key-deepseek")
             .await
@@ -956,6 +1611,7 @@ mod tests {
 
     #[tokio::test]
     async fn healthy_native_store_does_not_create_the_fallback_directory() {
+        let locks = tempdir().expect("credential lock fixture");
         let dir = tempdir().expect("tempdir");
         let fallback_dir = dir.path().join(".credentials.json.d");
         let primary = Arc::new(MemoryStorage::new(true));
@@ -966,7 +1622,8 @@ mod tests {
             .expect("seed primary");
         let fallback: Arc<dyn SecureStorage> =
             Arc::new(DeferredPlainTextStorage::new(fallback_dir.clone()));
-        let storage = RuntimeFallbackStorage::new(primary, fallback);
+        let storage =
+            RuntimeFallbackStorage::new(primary, fallback, locks.path().join("credential-locks"));
 
         let actual = storage
             .retrieve("lingxi", "provider-key-deepseek")
@@ -982,8 +1639,13 @@ mod tests {
 
     #[tokio::test]
     async fn native_or_memory_runtime_fallback_stays_in_process_memory() {
+        let locks = tempdir().expect("credential lock fixture");
         let fallback: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-        let storage = RuntimeFallbackStorage::new(Arc::new(UnavailableStorage), fallback.clone());
+        let storage = RuntimeFallbackStorage::new(
+            Arc::new(UnavailableStorage),
+            fallback.clone(),
+            locks.path().join("credential-locks"),
+        );
         let expected = test_payload(b"packaged-bridge-session-only");
 
         storage

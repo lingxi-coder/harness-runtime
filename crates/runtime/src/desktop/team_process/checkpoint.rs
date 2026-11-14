@@ -486,13 +486,11 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
             TeamTaskPhase::ResultRecorded => (true, None),
             TeamTaskPhase::Absent => (false, Some("not_admitted")),
             _ if inconsistent => (false, Some("transcript_inconsistent")),
-            _ if pending_tool_calls
-                .iter()
-                .any(|c| {
-                    !c.read_only
-                        && ![ASK_TOOL, LIST_WRITE_TOOL, LIST_PROPOSE_TOOL]
-                            .contains(&c.tool_name.as_str())
-                }) =>
+            _ if pending_tool_calls.iter().any(|c| {
+                !c.read_only
+                    && ![ASK_TOOL, LIST_WRITE_TOOL, LIST_PROPOSE_TOOL]
+                        .contains(&c.tool_name.as_str())
+            }) =>
             {
                 (false, Some("pending_write_tool"))
             }

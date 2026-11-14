@@ -95,6 +95,16 @@ pub struct RootIdentity {
     file: u64,
 }
 
+/// Identity from same-descriptor Unix metadata without reopening a pathname.
+#[cfg(unix)]
+pub fn metadata_file_identity(metadata: &std::fs::Metadata) -> RootIdentity {
+    use std::os::unix::fs::MetadataExt;
+    RootIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    }
+}
+
 /// Leaf identity admitted before permission evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileIdentity {
@@ -383,6 +393,8 @@ pub struct RootedFileMetadata {
 /// Metadata returned by a direct rooted write, without reopening its pathname.
 #[derive(Debug, Default)]
 pub struct RootedWriteResult {
+    /// Identity of the opened file that received the bytes.
+    pub identity: Option<RootIdentity>,
     /// Modification time reported by the opened write handle, when available.
     pub modified: Option<SystemTime>,
     /// Physical identity of the directory handle that performed the write.
@@ -2322,6 +2334,7 @@ mod imp {
             verify_resolution(requested, approved)?;
         }
         Ok(RootedWriteResult {
+            identity: opened_file_identity(&file).ok(),
             modified: file
                 .metadata()
                 .ok()
@@ -5113,6 +5126,7 @@ mod imp {
             verify_resolution(requested, approved)?;
         }
         Ok(RootedWriteResult {
+            identity: opened_file_identity(&file).ok(),
             modified: file
                 .metadata()
                 .ok()

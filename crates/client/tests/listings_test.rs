@@ -100,6 +100,7 @@ fn session_lifecycle_events_round_trip() {
         mode: SessionModeDto::Chat,
         messages: vec![MessageDto {
             transcript_uuid: None,
+            skill_name: None,
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,

@@ -390,22 +390,34 @@ fn contains_native_model_format_character(units: &[u16]) -> bool {
 /// and unpaired surrogates; it is not keyed by a lossy display string.
 #[derive(Debug, Clone, Default)]
 pub struct NativeModelValidationCache {
-    names: Arc<Mutex<HashSet<Vec<u16>>>>,
+    names: Arc<Mutex<std::collections::HashMap<String, HashSet<Vec<u16>>>>>,
+    scope: String,
 }
 
 impl NativeModelValidationCache {
+    /// A route-local view; detached probes can only publish to their own route.
+    pub(crate) fn for_route(&self, scope: String) -> Self {
+        Self {
+            names: Arc::clone(&self.names),
+            scope,
+        }
+    }
+
     #[must_use]
     pub fn contains(&self, model_key: &[u16]) -> bool {
         self.names
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(model_key)
+            .get(&self.scope)
+            .is_some_and(|names| names.contains(model_key))
     }
 
     pub fn insert(&self, model_key: &[u16]) -> bool {
         self.names
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .entry(self.scope.clone())
+            .or_default()
             .insert(model_key.to_vec())
     }
 
@@ -413,7 +425,8 @@ impl NativeModelValidationCache {
         self.names
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(model_key)
+            .get_mut(&self.scope)
+            .is_some_and(|names| names.remove(model_key))
     }
 
     /// Clear the owner-scoped cache when its provider/account generation is
@@ -1336,6 +1349,25 @@ mod tests {
                 }),
             }),
         }
+    }
+
+    #[test]
+    fn successful_validation_is_partitioned_by_route_and_epoch() {
+        let cache = NativeModelValidationCache::default();
+        let a = cache.for_route("provider-a/profile/epoch1".into());
+        let b = cache.for_route("provider-b/profile/epoch1".into());
+        let next = cache.for_route("provider-a/profile/epoch2".into());
+        let name = vec![120, 0xd800];
+        a.insert(&name);
+        assert!(a.contains(&name));
+        assert!(!b.contains(&name));
+        assert!(!next.contains(&name));
+        cache.clear();
+        a.insert(&name);
+        assert!(
+            !next.contains(&name),
+            "a late detached old-route probe cannot authorize the new epoch"
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@ struct CacheState {
 #[derive(Default)]
 pub struct HostGitRootCache {
     state: Mutex<CacheState>,
+    ancestry: std::sync::OnceLock<Box<HostGitRootCache>>,
 }
 
 impl HostGitRootCache {
@@ -67,18 +68,32 @@ impl HostGitRootCache {
         value
     }
 
+    /// Cache the different fact that a cwd or one of its ancestors has a marker.
+    pub fn get_or_insert_ancestor_with<F>(&self, key: &Path, discover: F) -> bool
+    where
+        F: FnOnce(&Path) -> bool,
+    {
+        self.ancestry
+            .get_or_init(|| Box::new(Self::default()))
+            .get_or_insert_with(key, discover)
+    }
+
     /// Remove a cached negative result, preserving a positive result.
     ///
     /// This mirrors the source's retry path that explicitly refreshes a
     /// negative root-marker lookup.
     pub fn invalidate_negative(&self, key: &Path) -> bool {
+        let ancestor_removed = self
+            .ancestry
+            .get()
+            .is_some_and(|cache| cache.invalidate_negative(key));
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key_units = key.as_os_str();
         if state.values.get(key_units) != Some(&false) {
-            return false;
+            return ancestor_removed;
         }
         state.values.remove(key_units);
         remove_lru(&mut state.lru, key_units);
@@ -87,6 +102,10 @@ impl HostGitRootCache {
 
     /// Remove any cached result for one exact cwd.
     pub fn invalidate(&self, key: &Path) -> bool {
+        let ancestor_removed = self
+            .ancestry
+            .get()
+            .is_some_and(|cache| cache.invalidate(key));
         let mut state = self
             .state
             .lock()
@@ -96,7 +115,7 @@ impl HostGitRootCache {
         if removed {
             remove_lru(&mut state.lru, key_units);
         }
-        removed
+        removed || ancestor_removed
     }
 
     /// Remove entries at `root` and beneath it using component-aware paths.
@@ -105,6 +124,10 @@ impl HostGitRootCache {
     /// changes. It does not treat textual prefixes such as `/repo-old` as
     /// descendants of `/repo`.
     pub fn invalidate_at_or_below(&self, root: &Path) -> usize {
+        let ancestor_removed = self
+            .ancestry
+            .get()
+            .map_or(0, |cache| cache.invalidate_at_or_below(root));
         let mut state = self
             .state
             .lock()
@@ -119,7 +142,7 @@ impl HostGitRootCache {
             state.values.remove(key);
             remove_lru(&mut state.lru, key);
         }
-        removed_keys.len()
+        removed_keys.len() + ancestor_removed
     }
 }
 
@@ -138,6 +161,17 @@ fn remove_lru(lru: &mut VecDeque<OsString>, key: &OsStr) {
 mod tests {
     use super::HostGitRootCache;
     use std::path::Path;
+
+    #[test]
+    fn ancestry_does_not_poison_exact_marker_discovery_and_both_invalidate() {
+        let cache = HostGitRootCache::new();
+        let child = Path::new("/repo/sub");
+        assert!(cache.get_or_insert_ancestor_with(child, |_| true));
+        assert!(!cache.get_or_insert_with(child, |_| false));
+        assert!(cache.invalidate(child));
+        assert!(!cache.get_or_insert_ancestor_with(child, |_| false));
+        assert!(cache.get_or_insert_with(child, |_| true));
+    }
 
     #[test]
     fn caches_positive_and_negative_results_and_refreshes_lru_on_hits() {

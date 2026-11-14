@@ -751,9 +751,9 @@ async fn materialize_external_plugin_source_with_bus(
     let (staging, work) = blocking_plugin_work({
         let destination = destination.clone();
         move || {
-            let parent = destination.parent().ok_or_else(|| {
-                "invalid plugin source cache destination".to_string()
-            })?;
+            let parent = destination
+                .parent()
+                .ok_or_else(|| "invalid plugin source cache destination".to_string())?;
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("failed to create plugin source cache: {error}"))?;
             let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
@@ -780,7 +780,8 @@ async fn materialize_external_plugin_source_with_bus(
                 if let Err(error) = std::fs::rename(&payload, &destination) {
                     // Another installer may have won the deterministic cache race.
                     // Accept only a complete, validated winner.
-                    if !destination.is_dir() || plugin::ensure_plugin_manifest(&destination).is_err()
+                    if !destination.is_dir()
+                        || plugin::ensure_plugin_manifest(&destination).is_err()
                     {
                         return Err(format!("failed to publish plugin source cache: {error}"));
                     }

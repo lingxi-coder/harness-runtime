@@ -192,6 +192,9 @@ impl McpRegistry {
         &self,
         change: &McpCatalogChanged,
     ) -> Result<Option<McpConnectionId>, McpError> {
+        // Serialize catalog/plan publication with reconnect and cached upgrades.
+        let lifecycle = self.lifecycle_lock(&change.server_name);
+        let _lifecycle = lifecycle.lock().await;
         let (current_id, supports_kind, previous_count) = {
             let conns = self.connections.read().await;
             match conns.get(&change.server_name) {
@@ -773,6 +776,8 @@ impl McpRegistry {
         connection_id: McpConnectionId,
         error: &McpError,
     ) {
+        let lifecycle = self.lifecycle_lock(server_name);
+        let _guard = lifecycle.lock().await;
         let Some(config) = ({
             let conns = self.connections.read().await;
             match conns.get(server_name) {
@@ -794,7 +799,9 @@ impl McpRegistry {
             },
         );
         self.clients.write().await.shift_remove(server_name);
+        self.set_output_parser_client(server_name, None).await;
         self.clear_prompt_predecessors_for_key(server_name).await;
+        self.disconnect_or_schedule_cleanup(connection_id).await;
         self.emit_retire_event_if_shared(&config, server_name, connection_id)
             .await;
     }

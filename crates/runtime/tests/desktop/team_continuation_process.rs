@@ -10,9 +10,9 @@ mod team_account_fixture;
 
 use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
-    inspect_task, TeamContinuation, TeamKnowledgeDocument, TeamProcessDeadline, TeamProcessError,
-    TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamProcessOutcome,
-    TeamListApproval, TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamSharedList,
+    inspect_task, TeamContinuation, TeamKnowledgeDocument, TeamListApproval, TeamOperationRequest,
+    TeamOperationResult, TeamOperationTool, TeamProcessDeadline, TeamProcessError,
+    TeamProcessOutcome, TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamSharedList,
     TeamTaskPhase, TeamWaitAnswer, TeamWaitKind,
 };
 use lingxi_llm_client::protocol::ProtocolFamily;
@@ -489,7 +489,16 @@ fn decided(
     approved: bool,
 ) -> Result<TeamProcessStart, TeamProcessError> {
     let text = if approved { "Approved" } else { "Declined" };
-    replied(root, task, endpoint, epoch, digest, wait_id, text, Some(approved))
+    replied(
+        root,
+        task,
+        endpoint,
+        epoch,
+        digest,
+        wait_id,
+        text,
+        Some(approved),
+    )
 }
 #[allow(clippy::too_many_arguments)]
 fn replied(
@@ -1201,7 +1210,8 @@ fn saved(revision: u64) -> Option<TeamOperationResult> {
 }
 
 #[tokio::test]
-async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_its_call_is_durable() {
+async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_its_call_is_durable(
+) {
     let (_temp, root) = root();
     let task = list_task();
     let server = Server::new(vec![add_milk(3), Reply::Text("Milk is on the list".into())]).await;
@@ -1223,7 +1233,10 @@ async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_
         assert_eq!(seen[0].0.tool, TeamOperationTool::ListWrite);
         assert_eq!(seen[0].0.logical_step_id.as_deref(), Some(step.as_str()));
         assert!(!step.contains("call_fixture"));
-        assert!(seen[0].1, "the call row was durable before the host saw the write");
+        assert!(
+            seen[0].1,
+            "the call row was durable before the host saw the write"
+        );
     }
 
     let inspected = checkpoint(&root, &task);
@@ -1236,7 +1249,14 @@ async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_
 
     let second_broker = list_broker(&root, vec![saved(4)]);
     let result = run_to_end(
-        continuation(&root, &task, &server.endpoint, 2, &inspected.checkpoint_digest).unwrap(),
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
         second_broker.clone(),
     )
     .await
@@ -1245,8 +1265,14 @@ async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_
     assert_eq!(result.text, "Milk is on the list");
     let repeated = second_broker.operations.lock().unwrap();
     assert_eq!(repeated.len(), 1);
-    assert_eq!(repeated[0].0.logical_step_id.as_deref(), Some(step.as_str()));
-    assert_eq!(repeated[0].0.arguments, first_broker.operations.lock().unwrap()[0].0.arguments);
+    assert_eq!(
+        repeated[0].0.logical_step_id.as_deref(),
+        Some(step.as_str())
+    );
+    assert_eq!(
+        repeated[0].0.arguments,
+        first_broker.operations.lock().unwrap()[0].0.arguments
+    );
     assert_eq!(server.count(), 2);
     let second = server.requests.lock().unwrap()[1].body.clone();
     assert_legal_sequence(&second);
@@ -1261,7 +1287,10 @@ async fn a_refused_write_is_an_error_to_the_model_and_its_retry_is_a_new_operati
     let (_temp, root) = root();
     let task = list_task();
     let server = Server::new(vec![
-        Reply::Tool("TeamListWrite", json!({"expectedDataRevision":3,"changes":[]})),
+        Reply::Tool(
+            "TeamListWrite",
+            json!({"expectedDataRevision":3,"changes":[]}),
+        ),
         add_milk(3),
         Reply::Tool("TeamListRead", json!({})),
         add_milk(4),
@@ -1278,7 +1307,11 @@ async fn a_refused_write_is_an_error_to_the_model_and_its_retry_is_a_new_operati
     });
     let broker = list_broker(&root, vec![conflict, read, saved(5)]);
     let result = run_to_end(
-        TeamProcessStart::prepare(&root, task.request(&root, task.chat_model(&server.endpoint))).unwrap(),
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
         broker.clone(),
     )
     .await
@@ -1295,22 +1328,35 @@ async fn a_refused_write_is_an_error_to_the_model_and_its_retry_is_a_new_operati
     assert_eq!(
         steps,
         [
-            (TeamOperationTool::ListWrite, Some(format!("{}/t0/c1", task.task_id))),
+            (
+                TeamOperationTool::ListWrite,
+                Some(format!("{}/t0/c1", task.task_id))
+            ),
             (TeamOperationTool::ListRead, None),
-            (TeamOperationTool::ListWrite, Some(format!("{}/t0/c3", task.task_id))),
+            (
+                TeamOperationTool::ListWrite,
+                Some(format!("{}/t0/c3", task.task_id))
+            ),
         ]
     );
     assert_eq!(seen[1].0.arguments, json!({}));
     let requests = server.requests.lock().unwrap();
     assert_eq!(
         tool_names(&requests[0].body),
-        ["TeamChatHistory", "TeamKnowledge", "TeamListRead", "TeamListWrite"]
+        [
+            "TeamChatHistory",
+            "TeamKnowledge",
+            "TeamListRead",
+            "TeamListWrite"
+        ]
     );
     let last = tool_results(&requests[4].body);
     assert_eq!(last.len(), 4);
     // Refused inside the worker (schema or validator); it carries no list state.
     assert!(!last[0]["content"].to_string().contains("dataRevision"));
-    assert!(last[1]["content"].to_string().contains("DATA_REVISION_CONFLICT"));
+    assert!(last[1]["content"]
+        .to_string()
+        .contains("DATA_REVISION_CONFLICT"));
     assert_legal_sequence(&requests[4].body);
 }
 
@@ -1321,11 +1367,18 @@ async fn a_write_of_unknown_outcome_ends_the_process_with_the_call_unfinished() 
     let server = Server::new(vec![add_milk(3), Reply::Text("never requested".into())]).await;
     let broker = list_broker(&root, vec![None]);
     let result = run_to_end(
-        TeamProcessStart::prepare(&root, task.request(&root, task.chat_model(&server.endpoint))).unwrap(),
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
         broker.clone(),
     )
     .await;
-    assert!(matches!(result, Err(TeamProcessError::Worker)), "{result:?}");
+    assert!(
+        matches!(result, Err(TeamProcessError::Worker)),
+        "{result:?}"
+    );
     // The model was not told anything about the write.
     assert_eq!(server.count(), 1);
     assert!(!transcript(&root).contains("\"tool_result\""));
@@ -1380,7 +1433,10 @@ async fn a_proposed_change_is_written_only_with_the_approval_of_exactly_that_pro
     propose_and_wait(&task, &root, &server).await;
     assert_eq!(server.count(), 1);
     let offered = tool_names(&server.requests.lock().unwrap()[0].body);
-    assert!(offered.contains(&"TeamListProposeChange".to_owned()), "{offered:?}");
+    assert!(
+        offered.contains(&"TeamListProposeChange".to_owned()),
+        "{offered:?}"
+    );
     assert!(
         !offered.contains(&"TeamListWrite".to_owned()),
         "an approved list offers no direct write"
@@ -1389,7 +1445,10 @@ async fn a_proposed_change_is_written_only_with_the_approval_of_exactly_that_pro
     let inspected = checkpoint(&root, &task);
     assert!(inspected.continuable, "{:?}", inspected.reason);
     let step = format!("{}/t0/c0", task.task_id);
-    let wait = inspected.wait.clone().expect("the checkpoint reports the wait");
+    let wait = inspected
+        .wait
+        .clone()
+        .expect("the checkpoint reports the wait");
     assert_eq!(wait.kind, TeamWaitKind::ToolApproval);
     assert_eq!(wait.logical_step_id, step);
     assert_eq!(
@@ -1397,7 +1456,10 @@ async fn a_proposed_change_is_written_only_with_the_approval_of_exactly_that_pro
         json!({"expectedDataRevision":3,"changes":[{"op":"add","text":"Milk"}]}),
         "the requester approves exactly the parameters the write will carry"
     );
-    assert_eq!(serde_json::to_value(&wait).unwrap()["kind"], "tool_approval");
+    assert_eq!(
+        serde_json::to_value(&wait).unwrap()["kind"],
+        "tool_approval"
+    );
 
     // No reply, a typed answer, or the approval of another proposal continue nothing.
     let mut epoch = 1;
@@ -1414,7 +1476,16 @@ async fn a_proposed_change_is_written_only_with_the_approval_of_exactly_that_pro
         let broker = list_broker(&root, vec![saved(4)]);
         let start = match wait_id {
             None => continuation(&root, &task, &server.endpoint, epoch, &digest),
-            Some(id) => replied(&root, &task, &server.endpoint, epoch, &digest, id, "Yes", approved),
+            Some(id) => replied(
+                &root,
+                &task,
+                &server.endpoint,
+                epoch,
+                &digest,
+                id,
+                "Yes",
+                approved,
+            ),
         }
         .unwrap();
         let refused = run_to_end(start, broker.clone()).await;
@@ -1541,7 +1612,11 @@ async fn an_approved_write_interrupted_before_its_result_repeats_with_the_same_a
     assert_eq!(server.count(), 1);
 
     let again = checkpoint(&root, &task);
-    assert_eq!(again.wait.as_ref(), Some(&wait), "the same wait, already decided");
+    assert_eq!(
+        again.wait.as_ref(),
+        Some(&wait),
+        "the same wait, already decided"
+    );
     let broker = list_broker(&root, vec![saved(4)]);
     let result = run_to_end(
         decided(

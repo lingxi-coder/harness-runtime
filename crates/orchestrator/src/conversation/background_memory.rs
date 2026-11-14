@@ -1042,6 +1042,14 @@ impl ConversationOrchestrator {
         use crate::prompt::memory_update::{
             render_memory_update, MemoryUpdate, MemoryUpdateSource,
         };
+        // Finish the only asynchronous source operation before draining the
+        // synchronous extractor. Once either drain returns, rendering and the
+        // caller's pending publication run in the same poll.
+        let dream_updates = if let Some(binding) = &self.prompt_runtime.auto_dream {
+            binding.scheduler.drain_updates().await
+        } else {
+            Vec::new()
+        };
         let mut updates = Vec::new();
         if let Some(handle) = &self.prompt_runtime.auto_memory {
             updates.extend(
@@ -1051,16 +1059,11 @@ impl ConversationOrchestrator {
                     .map(|update| (MemoryUpdateSource::Extract, update.summary, update.paths)),
             );
         }
-        if let Some(binding) = &self.prompt_runtime.auto_dream {
-            updates.extend(
-                binding
-                    .scheduler
-                    .drain_updates()
-                    .await
-                    .into_iter()
-                    .map(|update| (MemoryUpdateSource::Dream, update.summary, update.paths)),
-            );
-        }
+        updates.extend(
+            dream_updates
+                .into_iter()
+                .map(|update| (MemoryUpdateSource::Dream, update.summary, update.paths)),
+        );
         let index_path = self
             .prompt_runtime
             .memory_prefetch

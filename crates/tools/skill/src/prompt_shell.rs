@@ -1660,7 +1660,7 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
         let has_cached_git_root =
             self.ctx
                 .host_git_root_cache
-                .get_or_insert_with(&native_cwd, |key| {
+                .get_or_insert_ancestor_with(&native_cwd, |key| {
                     let diskless = self
                         .ctx
                         .permission_gate

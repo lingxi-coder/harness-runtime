@@ -1613,9 +1613,14 @@ async fn finish_mod_result_stage(
     }
 }
 
+tokio::task_local! {
+    static MOD_OUTPUT_PARSER_CAPTURE: lingxi_core::host::tool_invoker::ToolOutputParserCapture;
+}
+
 struct ModCoreRun {
     dispatched: DeferredToolDispatch,
     stage: ModResultStage,
+    output_parser: Option<std::sync::Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>,
 }
 
 impl ConversationOrchestrator {
@@ -4736,6 +4741,14 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     .merge_object_projection(&args)
                     .expect("tool.call event arguments are an object");
             }
+            let output_tool = prepared_tool
+                .as_ref()
+                .map(std::sync::Arc::clone)
+                .or_else(|| orch.tools.find_by_name(name));
+            let fallback_parser = match output_tool.as_ref() {
+                Some(tool) => tool.output_parser_snapshot().await,
+                None => Ok(None),
+            };
             let completed = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<ModCoreRun>::new()));
             let completed_for_core = completed.clone();
             let core_error = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -4815,31 +4828,40 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                 let _ = args.remove_field(field);
                             }
                             let single = vec![(id, name, args, provider_id)];
-                            let (dispatched, stage) = with_mod_result_stage(&single[0].0, async {
-                                let mut dispatched = dispatch_tool_uses_tracked_deferred_core(
-                                    orch,
-                                    &single,
-                                    cancel,
-                                    assistant_message_id,
-                                    dispatch_facts,
-                                    batch_tool_count,
-                                    None,
-                                    None,
-                                    prepared_tool,
-                                    inherited_context,
-                                    read_context_room,
-                                    publication_fence,
+                            let parser_capture =
+                                lingxi_core::host::tool_invoker::ToolOutputParserCapture::default();
+                            let (dispatched, stage) = MOD_OUTPUT_PARSER_CAPTURE
+                                .scope(
+                                    parser_capture.clone(),
+                                    with_mod_result_stage(&single[0].0, async {
+                                        let mut dispatched =
+                                            dispatch_tool_uses_tracked_deferred_core(
+                                                orch,
+                                                &single,
+                                                cancel,
+                                                assistant_message_id,
+                                                dispatch_facts,
+                                                batch_tool_count,
+                                                None,
+                                                None,
+                                                prepared_tool,
+                                                inherited_context,
+                                                read_context_room,
+                                                publication_fence,
+                                            )
+                                            .await?;
+                                        // Keep every deferred sidecar and client frame
+                                        // in this run's task-local stage. Only the
+                                        // final Mod result may select and publish it.
+                                        for publication in
+                                            std::mem::take(&mut dispatched.publications)
+                                        {
+                                            publication.commit(orch).await;
+                                        }
+                                        Ok::<_, OrchestratorError>(dispatched)
+                                    }),
                                 )
-                                .await?;
-                                // Keep every deferred sidecar and client frame
-                                // in this run's task-local stage. Only the
-                                // final Mod result may select and publish it.
-                                for publication in std::mem::take(&mut dispatched.publications) {
-                                    publication.commit(orch).await;
-                                }
-                                Ok::<_, OrchestratorError>(dispatched)
-                            })
-                            .await;
+                                .await;
                             let dispatched = match dispatched {
                                 Ok(dispatched) => dispatched,
                                 Err(error) => {
@@ -4875,7 +4897,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                             }
                             let mut completed = completed.lock().await;
                             let index = completed.len() + 1;
-                            completed.push(ModCoreRun { dispatched, stage });
+                            completed.push(ModCoreRun {
+                                dispatched,
+                                stage,
+                                output_parser: parser_capture.snapshot(),
+                            });
                             result
                                 .push(("ref".into(), source_from_value(&serde_json::json!(index))));
                             Utf16JsonProjection::object(result)
@@ -5015,12 +5041,38 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 if reuses_core {
                     None
                 } else {
-                    let output_tool = prepared_tool
-                        .as_ref()
-                        .map(std::sync::Arc::clone)
-                        .or_else(|| orch.tools.find_by_name(name));
-                    if let Some(output_tool) = output_tool {
-                        match output_tool.parse_output(&result).await {
+                    let parser = {
+                        let completed = completed.lock().await;
+                        answer_value
+                            .at_pointer("/ref")
+                            .and_then(|reference| tool_call_ref_index(reference, completed.len()))
+                            .and_then(|index| completed.get(index))
+                            .and_then(|core| core.output_parser.clone())
+                            .or_else(|| {
+                                completed.last().and_then(|core| core.output_parser.clone())
+                            })
+                    };
+                    if let Some(output_tool) = output_tool.as_ref() {
+                        let parsed = if let Some(parser) = parser {
+                            parser.parse_output(&result).await.map_err(|error| match error {
+                                lingxi_core::host::tool_invoker::ToolInvokerError::Validation(detail)
+                                | lingxi_core::host::tool_invoker::ToolInvokerError::InvalidInput(detail) =>
+                                    tool_api::tool_trait::ToolError::InvalidInput(detail),
+                                other => tool_api::tool_trait::ToolError::Internal(other.to_string()),
+                            })
+                        } else {
+                            match &fallback_parser {
+                                Ok(Some(parser)) => parser.parse_output(&result).await.map_err(|error| match error {
+                                    lingxi_core::host::tool_invoker::ToolInvokerError::Validation(detail)
+                                    | lingxi_core::host::tool_invoker::ToolInvokerError::InvalidInput(detail) =>
+                                        tool_api::tool_trait::ToolError::InvalidInput(detail),
+                                    other => tool_api::tool_trait::ToolError::Internal(other.to_string()),
+                                }),
+                                Ok(None) => output_tool.parse_output(&result).await,
+                                Err(error) => Err(tool_api::tool_trait::ToolError::Internal(error.to_string())),
+                            }
+                        };
+                        match parsed {
                             Ok(parsed) => {
                                 answer_value
                                     .set_field("result", parsed)
@@ -7026,9 +7078,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     } else {
                         rule_decision_otel_source(rule_source.as_deref(), false)
                     };
-                    let mut fact = serde_json::json!({"decision":"reject", "source":decision_otel_source});
+                    let mut fact =
+                        serde_json::json!({"decision":"reject", "source":decision_otel_source});
                     if let Some(reason_type) = &decision_reason_type {
-                        fact.as_object_mut().expect("permission fact").insert("reason_type".into(), serde_json::json!(reason_type));
+                        fact.as_object_mut()
+                            .expect("permission fact")
+                            .insert("reason_type".into(), serde_json::json!(reason_type));
                     }
                     permission_decision = Some(Utf16JsonProjection::plain(fact));
                     // Classify the denial for the stream-json `tool_result_meta`
@@ -7805,9 +7860,22 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                     refusal_suppressed.store(true, Ordering::Release);
                                     return Err(tool_api::ToolError::Aborted);
                                 }
-                                tool_handle
-                                    .call(effective_input.clone(), ctx, progress_tx)
-                                    .await
+                                let parser_capture =
+                                    MOD_OUTPUT_PARSER_CAPTURE.try_with(Clone::clone).ok();
+                                if let Some(capture) = parser_capture {
+                                    tool_handle
+                                        .call_with_output_parser(
+                                            effective_input.clone(),
+                                            ctx,
+                                            progress_tx,
+                                            capture,
+                                        )
+                                        .await
+                                } else {
+                                    tool_handle
+                                        .call(effective_input.clone(), ctx, progress_tx)
+                                        .await
+                                }
                             };
                             let tool_call = hooks::cwd_changed_firer::scope_cwd_change_authority(
                                 publication_fence.clone(),
@@ -7982,7 +8050,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // attachment, rendered beside the result and retained in live
                 // history by the existing injected-message pipeline.
                 if name == "Read" && !result.is_error {
-                    let contexts = orch.agents_context_after_read(&effective_input).await;
+                    let instruction_owner = MessageId::new();
+                    let contexts = orch
+                        .agents_context_after_read(&effective_input, instruction_owner)
+                        .await;
                     if !contexts.is_empty() {
                         let exact_contexts = contexts
                             .iter()
@@ -8009,7 +8080,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         );
                         injected_messages.push((
                             ConversationMessage::user_meta_js_utf16(
-                                MessageId::new(),
+                                instruction_owner,
                                 wrapped.display,
                                 wrapped.utf16_code_units,
                             ),
@@ -8841,6 +8912,12 @@ pub(crate) async fn finish_direct_tool_dispatch(
     ),
     OrchestratorError,
 > {
+    // Direct callers own the accepted batch rather than an actor generation.
+    // Publish its sidecars before result persistence and PostToolBatch consume
+    // them, just as the guarded conversation path does at its accept boundary.
+    for publication in std::mem::take(&mut dispatched.publications) {
+        publication.commit(orch).await;
+    }
     if !dispatched.prevent_continuation {
         let batch_outcome = run_post_tool_batch_hooks(
             orch,
@@ -9247,6 +9324,14 @@ mod final_input_validation_tests {
 #[cfg(test)]
 mod native_tool_check_metadata_tests {
     use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use serde_json::json;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    };
 
     #[test]
     fn mod_tool_check_event_emits_trusted_agent_and_ask_ceiling_only() {
@@ -9424,5 +9509,222 @@ mod native_tool_check_metadata_tests {
             matches!(checked, PermissionResolution::Allow { .. }),
             "Mod must receive the captured rule from the preflight snapshot, not the replacement overlay"
         );
+    }
+    struct RequiredSnapshot(&'static str);
+    #[async_trait::async_trait]
+    impl lingxi_core::host::tool_invoker::ToolOutputParser for RequiredSnapshot {
+        async fn parse_output(
+            &self,
+            output: &Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError>
+        {
+            if output.get_property(self.0).is_some() {
+                Ok(output.clone())
+            } else {
+                Err(
+                    lingxi_core::host::tool_invoker::ToolInvokerError::Validation(
+                        format!("required {}", self.0).into(),
+                    ),
+                )
+            }
+        }
+    }
+
+    struct RefreshingOutputTool {
+        generation: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+    }
+    impl RefreshingOutputTool {
+        fn parser(&self) -> Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser> {
+            Arc::new(RequiredSnapshot(
+                if self.generation.load(Ordering::SeqCst) == 0 {
+                    "old"
+                } else {
+                    "new"
+                },
+            ))
+        }
+    }
+    #[async_trait::async_trait]
+    impl Tool for RefreshingOutputTool {
+        fn name(&self) -> &str {
+            "refreshing_output"
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: std::sync::LazyLock<Utf16JsonProjection> =
+                std::sync::LazyLock::new(|| source_from_value(&json!({"type":"object"})));
+            &SCHEMA
+        }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
+            true
+        }
+        async fn check_permissions(
+            &self,
+            _: &Utf16JsonProjection,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "fixture".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: Default::default(),
+            }
+        }
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+            "fixture".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+            "fixture".into()
+        }
+        async fn output_parser_snapshot(
+            &self,
+        ) -> Result<Option<Arc<dyn lingxi_core::host::tool_invoker::ToolOutputParser>>, ToolError>
+        {
+            Ok(Some(self.parser()))
+        }
+        async fn parse_output(
+            &self,
+            output: &Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, ToolError> {
+            self.parser()
+                .parse_output(output)
+                .await
+                .map_err(|error| ToolError::InvalidInput(error.model_facing_message()))
+        }
+        async fn call(
+            &self,
+            input: Utf16JsonProjection,
+            _: ToolUseContext,
+            _: tool_api::progress::ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult::from_data(input))
+        }
+        async fn call_with_output_parser(
+            &self,
+            input: Utf16JsonProjection,
+            ctx: ToolUseContext,
+            progress: tool_api::progress::ToolProgressSender,
+            capture: lingxi_core::host::tool_invoker::ToolOutputParserCapture,
+        ) -> Result<ToolCallResult, ToolError> {
+            capture.set(self.parser());
+            if input.at_pointer("/hold").and_then(|value| value.as_bool()) == Some(true) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            self.call(input, ctx, progress).await
+        }
+    }
+
+    #[tokio::test]
+    async fn main_mod_replacements_keep_each_concurrent_dispatch_schema_after_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("schema-refresh.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+          on('tool.call', { tool: 'refreshing_output' }, async ($, e, next) => {
+            const core = await next(e);
+            return { ...core, result: { [e.field]: true, replaced: true } };
+          });
+        }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load(
+            "schema-refresh",
+            dir.path(),
+            &module,
+            source_from_value(&json!({})),
+        )
+        .await
+        .unwrap();
+        let mut hook_registry = hooks::HookRegistry::new();
+        hook_registry.set_mod_host(host);
+        let tool = Arc::new(RefreshingOutputTool {
+            generation: std::sync::atomic::AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        let mut tools = tool_api::registry::ToolRegistry::new();
+        tools.register_builtin(tool.clone());
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)));
+        let first_call = [(
+            ToolUseId::new(),
+            "refreshing_output".into(),
+            source_from_value(&json!({"field":"old", "hold":true})),
+            None,
+        )];
+        let second_call = [(
+            ToolUseId::new(),
+            "refreshing_output".into(),
+            source_from_value(&json!({"field":"new"})),
+            None,
+        )];
+        let first = dispatch_tool_uses(&orch, &first_call);
+        let refresh_and_second = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), tool.entered.notified())
+                .await
+                .unwrap();
+            tool.generation.store(1, Ordering::SeqCst);
+            let result = dispatch_tool_uses(&orch, &second_call).await.unwrap();
+            assert!(matches!(
+                &result[0],
+                ContentBlock::ToolResult {
+                    is_error: Some(false) | None,
+                    ..
+                }
+            ));
+            tool.resume.notify_one();
+        };
+        let (first, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(first, refresh_and_second)
+        })
+        .await
+        .unwrap();
+        let first = first.unwrap();
+        assert!(
+            matches!(
+                &first[0],
+                ContentBlock::ToolResult {
+                    is_error: Some(false) | None,
+                    ..
+                }
+            ),
+            "old Mod replacement must use its dispatch parser after a new call settles"
+        );
+        assert!(tool
+            .parse_output(&source_from_value(&json!({"old":true})))
+            .await
+            .is_err());
     }
 }

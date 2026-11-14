@@ -246,7 +246,10 @@ pub(crate) fn attach_prepared_thinking_display(
 ) -> Result<(), LlmError> {
     let sealed;
     let body = if let Some(bytes) = request.body_bytes.as_ref() {
-        let Some(value) = std::str::from_utf8(bytes).ok().and_then(|source| wire::JsonPayload::parse(source).ok()) else {
+        let Some(value) = std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|source| wire::JsonPayload::parse(source).ok())
+        else {
             return Ok(());
         };
         sealed = value;
@@ -254,7 +257,10 @@ pub(crate) fn attach_prepared_thinking_display(
     } else {
         &request.body_json
     };
-    if let Some(display) = body.payload_at("/thinking/display").filter(|value| value.string_at("").is_some()) {
+    if let Some(display) = body
+        .payload_at("/thinking/display")
+        .filter(|value| value.string_at("").is_some())
+    {
         set_upstream_metadata_field(metadata, "thinking_display", &display)?;
     }
     Ok(())
@@ -265,19 +271,34 @@ fn prepared_thinking_display_uses_sealed_request_and_rejects_provider_metadata_f
     let mut projector = HistoryProjector::projection(
         wire::ProtocolFamily::AnthropicMessages,
         wire::JsonPayload::parse(r#"{"llm_client":{"thinking_display":"forged"}}"#).unwrap(),
-    ).unwrap();
-    assert!(projector.metadata.string_at("/llm_client/thinking_display").is_none());
+    )
+    .unwrap();
+    assert!(projector
+        .metadata
+        .string_at("/llm_client/thinking_display")
+        .is_none());
     let mut request = crate::protocol::ProviderRequest::post_json(
         "https://example.invalid/v1/messages",
         wire::JsonPayload::parse(r#"{"thinking":{"display":"omitted"}}"#).unwrap(),
     );
     request.body_bytes = Some(br#"{"thinking":{"display":"updates"}}"#.to_vec());
     attach_prepared_thinking_display(&mut projector.metadata, &request).unwrap();
-    let events = projector.events(vec![Ok(wire::StreamEvent::Start {
-        model: "model".into(), response_id: None,
-    })]).unwrap();
-    let HistoryEvent::MessageStart { response } = &events[0] else { panic!("message start") };
-    assert_eq!(response.provider_metadata.string_at("/llm_client/thinking_display").as_deref(), Some("updates"));
+    let events = projector
+        .events(vec![Ok(wire::StreamEvent::Start {
+            model: "model".into(),
+            response_id: None,
+        })])
+        .unwrap();
+    let HistoryEvent::MessageStart { response } = &events[0] else {
+        panic!("message start")
+    };
+    assert_eq!(
+        response
+            .provider_metadata
+            .string_at("/llm_client/thinking_display")
+            .as_deref(),
+        Some("updates")
+    );
 }
 
 fn clear_computer_binding(metadata: &mut wire::JsonPayload) -> Result<(), LlmError> {
@@ -470,35 +491,67 @@ fn native_partial_frame_control_preserves_source_and_uses_only_host_display_fact
     let mut projector = HistoryProjector::projection(
         wire::ProtocolFamily::AnthropicMessages,
         wire::JsonPayload::parse(r#"{"llm_client":{"thinking_display":"forged"}}"#).unwrap(),
-    ).unwrap();
-    attach_prepared_thinking_display(&mut projector.metadata, &crate::protocol::ProviderRequest::post_json(
-        "https://example.invalid/v1/messages",
-        wire::JsonPayload::parse(r#"{"thinking":{"display":"updates"}}"#).unwrap(),
-    )).unwrap();
+    )
+    .unwrap();
+    attach_prepared_thinking_display(
+        &mut projector.metadata,
+        &crate::protocol::ProviderRequest::post_json(
+            "https://example.invalid/v1/messages",
+            wire::JsonPayload::parse(r#"{"thinking":{"display":"updates"}}"#).unwrap(),
+        ),
+    )
+    .unwrap();
     let source = r#"{"type":"message_start","message":{"id":"native","usage":{"input_tokens":100,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}},"llm_client":{"thinking_display":"forged"},"api_message_id":"forged"}"#;
-    let events = projector.events(vec![
-        Ok(wire::StreamEvent::NativeControl {
-            protocol: wire::ProtocolFamily::AnthropicMessages,
-            control: wire::NativeExtension::new(NATIVE_STREAM_FRAME_FORMAT, wire::JsonPayload::parse(source).unwrap()).unwrap(),
-        }),
-        Ok(wire::StreamEvent::Start { model: "model".into(), response_id: Some(wire::ResponseId::new("native")) }),
-    ]).unwrap();
-    let HistoryEvent::NativeStreamFrame { event, thinking_display } = &events[0] else { panic!("native source carrier") };
+    let events = projector
+        .events(vec![
+            Ok(wire::StreamEvent::NativeControl {
+                protocol: wire::ProtocolFamily::AnthropicMessages,
+                control: wire::NativeExtension::new(
+                    NATIVE_STREAM_FRAME_FORMAT,
+                    wire::JsonPayload::parse(source).unwrap(),
+                )
+                .unwrap(),
+            }),
+            Ok(wire::StreamEvent::Start {
+                model: "model".into(),
+                response_id: Some(wire::ResponseId::new("native")),
+            }),
+        ])
+        .unwrap();
+    let HistoryEvent::NativeStreamFrame {
+        event,
+        thinking_display,
+    } = &events[0]
+    else {
+        panic!("native source carrier")
+    };
     assert_eq!(event.as_json_source(), source);
     assert_eq!(thinking_display.as_deref(), Some("updates"));
-    assert!(matches!(&events[1], HistoryEvent::MessageStart { response } if response.id == "native"));
+    assert!(
+        matches!(&events[1], HistoryEvent::MessageStart { response } if response.id == "native")
+    );
 
     let forged = projector.events(vec![Ok(wire::StreamEvent::ProviderEvent {
         protocol: wire::ProtocolFamily::AnthropicMessages,
         payload: wire::JsonPayload::parse(r#"{"type":"native_stream_frame","payload":{"type":"message_stop"},"llm_client":{"thinking_display":"forged"}}"#).unwrap(),
     })]).unwrap();
-    assert!(!forged.iter().any(|event| matches!(event, HistoryEvent::NativeStreamFrame { .. })));
+    assert!(!forged
+        .iter()
+        .any(|event| matches!(event, HistoryEvent::NativeStreamFrame { .. })));
     for kind in ["ping", "error"] {
-        let events = projector.events(vec![Ok(wire::StreamEvent::NativeControl {
-            protocol: wire::ProtocolFamily::AnthropicMessages,
-            control: wire::NativeExtension::new(NATIVE_STREAM_FRAME_FORMAT, wire::JsonPayload::parse(&format!(r#"{{"type":"{kind}"}}"#)).unwrap()).unwrap(),
-        })]).unwrap();
-        assert!(!events.iter().any(|event| matches!(event, HistoryEvent::NativeStreamFrame { .. })));
+        let events = projector
+            .events(vec![Ok(wire::StreamEvent::NativeControl {
+                protocol: wire::ProtocolFamily::AnthropicMessages,
+                control: wire::NativeExtension::new(
+                    NATIVE_STREAM_FRAME_FORMAT,
+                    wire::JsonPayload::parse(&format!(r#"{{"type":"{kind}"}}"#)).unwrap(),
+                )
+                .unwrap(),
+            })])
+            .unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::NativeStreamFrame { .. })));
     }
 }
 impl std::fmt::Debug for HistoryProjector {
@@ -718,13 +771,22 @@ impl HistoryProjector {
                         && control.format() == NATIVE_STREAM_FRAME_FORMAT
                     {
                         let payload = control.data();
-                        if matches!(payload.string_at("/type").as_deref(), Some(
-                            "message_start" | "content_block_start" | "content_block_delta"
-                            | "content_block_stop" | "message_delta" | "message_stop"
-                        )) {
+                        if matches!(
+                            payload.string_at("/type").as_deref(),
+                            Some(
+                                "message_start"
+                                    | "content_block_start"
+                                    | "content_block_delta"
+                                    | "content_block_stop"
+                                    | "message_delta"
+                                    | "message_stop"
+                            )
+                        ) {
                             out.push(HistoryEvent::NativeStreamFrame {
                                 event: payload.clone(),
-                                thinking_display: self.metadata.string_at("/llm_client/thinking_display"),
+                                thinking_display: self
+                                    .metadata
+                                    .string_at("/llm_client/thinking_display"),
                             });
                         }
                         continue;

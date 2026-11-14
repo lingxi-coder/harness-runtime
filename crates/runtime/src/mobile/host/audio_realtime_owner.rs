@@ -43,15 +43,23 @@ impl MobileEngineHandle {
             .reserve_turn(None)
             .await
             .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+        let mut startup = self.startup_guard(&turn, None);
         self.cancel_reason.reset();
         self.inner.orchestrator.turn_span().reset();
         self.message_queue
             .register_active_turn(turn.cancel.clone())
             .await;
         self.inner.message_output.reset_message_buffer().await;
-        TurnEventEmitter::new(self.event_sink.clone())
-            .emit_turn_started(None)
-            .await;
+        if !emit_mobile_initial_event(
+            &self.event_sink,
+            &turn,
+            ClientEvent::TurnStarted { turn_id: None },
+        )
+        .await
+        {
+            self.release_unspawned_turn(&turn).await;
+            return Ok(RealtimeAgentEnd::Cancelled);
+        }
         let orch = self.inner.orchestrator.clone();
         let sink = self.event_sink.clone();
         let active_cancel = self.active_cancel.clone();
@@ -110,26 +118,20 @@ impl MobileEngineHandle {
                     })
                     .await;
                 }
-                let mut active = active_cancel.lock().await;
-                if active
-                    .as_ref()
-                    .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
-                {
-                    *active = None;
-                }
-                drop(active);
+                clear_mobile_turn_slot(&active_cancel, &message_queue, &task_turn).await;
                 if let Some(owner_id) = task_turn.permission_owner_id {
                     permission_gate.end_main_turn(owner_id);
                 }
-                message_queue.clear_active_turn().await;
                 task_turn.mark_completed();
                 let _ = result_tx.send(result);
             }));
         turn.set_task_handle(task);
         drop(scheduled_guard);
         drop(transition);
-        result_rx.await.map_err(|_| {
+        let result = result_rx.await.map_err(|_| {
             OrchestratorError::Internal("native audio owner task ended unexpectedly".into())
-        })?
+        })?;
+        startup.disarm();
+        result
     }
 }

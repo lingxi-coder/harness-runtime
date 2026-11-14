@@ -799,7 +799,7 @@ impl Tool for FileWriteTool {
             let new_mtime_ms = result
                 .modified
                 .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-            state.set_after_write_with_requested_aliases_and_units(
+            state.set_after_write_with_identity(
                 commit_requested.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content: String::from_utf16_lossy(&published_units),
@@ -813,6 +813,7 @@ impl Tool for FileWriteTool {
                 true,
                 vec![commit_requested, commit_path],
                 Some(published_units),
+                result.identity,
             );
             Ok(result)
         })
@@ -917,6 +918,87 @@ impl Tool for FileWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn host_refresh_cannot_remove_the_write_clipping_fence() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("clipped.txt");
+        std::fs::write(&target, "prefix\nunseen suffix\n").unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        let mut partial = tool_api::read_file_state::get(&ctx.read_file_state, &route).unwrap();
+        let full = partial.clone();
+        partial.content = "prefix".into();
+        partial.limit = Some(1);
+        tool_api::read_file_state::set(&ctx.read_file_state, route.clone(), partial);
+        tool_api::read_file_state::mark_start_only(&ctx.read_file_state, route.clone());
+        tool_api::read_file_state::set_with_model_context(&ctx.read_file_state, route, full, false);
+        let tool = FileWriteTool::new(ctx.clone());
+        let input =
+            || crate::generated_result(&json!({"file_path":target,"content":"replacement"}));
+        assert!(tool.call(input(), fresh_ctx(), fresh_tx()).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "prefix\nunseen suffix\n"
+        );
+        crate::FileReadTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"file_path":target})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        tool.call(input(), fresh_ctx(), fresh_tx()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "replacement");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retargeted_full_read_route_cannot_overwrite_a_clipped_alias() {
+        let tmp = TempDir::new().unwrap();
+        let old = tmp.path().join("old");
+        let clipped = tmp.path().join("clipped");
+        let route = tmp.path().join("route");
+        std::fs::write(&old, "seen old").unwrap();
+        std::fs::write(&clipped, "prefix unseen suffix").unwrap();
+        for (path, seconds) in [(&old, 200), (&clipped, 100)] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    ),
+                )
+                .unwrap();
+        }
+        std::fs::hard_link(&old, &route).unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        seed_full_read(&ctx, &route);
+        tool_api::read_file_state::mark_start_only(&ctx.read_file_state, clipped.clone());
+        std::fs::remove_file(&route).unwrap();
+        std::fs::hard_link(&clipped, &route).unwrap();
+        let tool = FileWriteTool::new(ctx.clone());
+        let input = || crate::generated_result(&json!({"file_path":route,"content":"replacement"}));
+        assert!(tool.call(input(), fresh_ctx(), fresh_tx()).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&clipped).unwrap(),
+            "prefix unseen suffix"
+        );
+        crate::FileReadTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({"file_path":route})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        tool.call(input(), fresh_ctx(), fresh_tx()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&route).unwrap(), "replacement");
+    }
 
     #[test]
     fn write_admission_rejects_unread_partial_and_start_only_before_reading_body() {

@@ -126,8 +126,13 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let mut snapshot = SideChatParentSnapshot {
-            auto_compact: self.model_runtime.native_model_settings.read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner).auto_compact.clone(),
+            auto_compact: self
+                .model_runtime
+                .native_model_settings
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .auto_compact
+                .clone(),
             config,
             history: legal_prefix(&session.model_context_history()),
             model_profile: session.model_profile.clone(),
@@ -206,19 +211,41 @@ mod tests {
     async fn side_chat_preserves_auto_compact_policy_across_capture_and_recovery() {
         let parent = new_orchestrator(false);
         let policy = lingxi_core::host::auto_compact::AutoCompactSettings {
-            layers: vec![lingxi_core::host::auto_compact::AutoCompactSettingsLayer::from_projection(
-                lingxi_core::settings::tracer::Source::User,
-                &Utf16JsonProjection::parse(r#"{"autoCompactEnabled":false,"autoCompactWindow":500000}"#).unwrap(),
-            )],
+            layers: vec![
+                lingxi_core::host::auto_compact::AutoCompactSettingsLayer::from_projection(
+                    lingxi_core::settings::tracer::Source::User,
+                    &Utf16JsonProjection::parse(
+                        r#"{"autoCompactEnabled":false,"autoCompactWindow":500000}"#,
+                    )
+                    .unwrap(),
+                ),
+            ],
         };
         parent.refresh_auto_compact_settings(policy.clone());
         let snapshot = parent.side_chat_parent_snapshot().await;
         parent.refresh_auto_compact_settings(Default::default());
-        let recovered: SideChatParentSnapshot = serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let recovered: SideChatParentSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
         let child = new_orchestrator(true);
         child.seed_side_chat(&recovered).await.unwrap();
-        assert_eq!(child.model_runtime.native_model_settings.read().unwrap().auto_compact, policy);
-        assert_eq!(parent.model_runtime.native_model_settings.read().unwrap().auto_compact, Default::default());
+        assert_eq!(
+            child
+                .model_runtime
+                .native_model_settings
+                .read()
+                .unwrap()
+                .auto_compact,
+            policy
+        );
+        assert_eq!(
+            parent
+                .model_runtime
+                .native_model_settings
+                .read()
+                .unwrap()
+                .auto_compact,
+            Default::default()
+        );
     }
 
     #[async_trait]

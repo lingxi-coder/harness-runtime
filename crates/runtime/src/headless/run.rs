@@ -21,11 +21,11 @@ use crate::headless::stream_json_input::{
 };
 use crate::headless::HeadlessRuntime as Runtime;
 #[cfg(test)]
-#[path = "run/live_output_322_test.rs"]
-mod live_output_322_tests;
-#[cfg(test)]
 #[path = "run/catalog_snapshot_tests.rs"]
 mod catalog_snapshot_tests;
+#[cfg(test)]
+#[path = "run/live_output_322_test.rs"]
+mod live_output_322_tests;
 use control::{
     dispatch_control_request, flag_settings_fast_mode_opt_in, model_capabilities,
     recover_orphaned_permission, resolve_fast_mode_disabled_reason, resolve_fast_mode_state,

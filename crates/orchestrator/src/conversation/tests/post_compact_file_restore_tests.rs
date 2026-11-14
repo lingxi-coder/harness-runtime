@@ -310,10 +310,17 @@ async fn reread_restores_fresh_content_not_stale_snapshot() {
     let map = tool_api::read_file_state::new_read_file_state_map();
     set(&map, path.clone(), stale_entry("OLD STALE SNAPSHOT"));
 
+    tool_api::read_file_state::mark_start_only(&map, path.clone());
+    assert!(tool_api::read_file_state::start_only_write_guard(&map, &path, &path).is_some());
     let sink = Arc::new(telemetry::InMemorySink::new());
-    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+    let orch = orch_with_bus(dir.path().to_path_buf(), map.clone(), sink.clone()).await;
 
     let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(
+        tool_api::read_file_state::start_only_write_guard(&map, &path, &path),
+        None,
+        "the admitted complete restore carries the identity of its opened source"
+    );
     assert_eq!(
         restored.len(),
         1,

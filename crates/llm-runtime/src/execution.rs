@@ -168,13 +168,15 @@ impl ClientCache {
         let observed_transport = Arc::new(crate::native_stream_capture::CaptureTransport::new(
             transport.clone(),
         ));
-        let client =
-            sdk::LlmClientBuilder::with_transport(observed_transport, std::slice::from_ref(profile))
-                .with_region(region)
-                .build()
-                .map_err(|error| LlmError::InvalidRequest {
-                    message: error.to_string(),
-                })?;
+        let client = sdk::LlmClientBuilder::with_transport(
+            observed_transport,
+            std::slice::from_ref(profile),
+        )
+        .with_region(region)
+        .build()
+        .map_err(|error| LlmError::InvalidRequest {
+            message: error.to_string(),
+        })?;
         entries.push(CachedClient {
             profile: profile.clone(),
             transport,

@@ -33,12 +33,14 @@ pub use lingxi_llm_client::providers::anthropic::system_prompt::{PromptText, Sys
 pub use test_support::{
     FrameStream, RawStreamFrame, ResponsesWebSocketTransportSession, StreamingResponse,
 };
+mod anthropic_extra_body;
 mod attempt_pricing;
+pub use anthropic_extra_body::CapturedAnthropicExtraBody;
 #[cfg(test)]
 mod codec_tests;
+mod native_request_layout;
 #[cfg(test)]
 mod native_request_layout_319_test;
-mod native_request_layout;
 pub mod native_stream_capture;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
@@ -77,6 +79,7 @@ pub mod model;
 pub mod model_attempt;
 mod prefix_lock_recovery;
 pub mod prompt_cache;
+mod prompt_projection;
 pub mod protocol;
 pub mod provider_settings;
 pub mod reasoning_controls;

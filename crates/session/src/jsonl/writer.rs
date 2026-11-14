@@ -259,8 +259,27 @@ fn append_durable_row_in_transaction(
     identity_uuid: Option<&str>,
 ) -> Result<(), TranscriptWriterError> {
     let (root, identity, relative, mut admitted) = durable_target_parts(durable, path)?;
+    let reminder_checkpoint = payload.string_at("/type") == Some("pending-transient-reminders");
     if let Some(file) = admitted.as_mut() {
         require_complete_transcript_tail(file)?;
+        if reminder_checkpoint {
+            use std::io::{Read, Seek, SeekFrom};
+            file.seek(SeekFrom::Start(0))
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            let mut source = String::new();
+            file.read_to_string(&mut source)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            if let Some(session_id) = payload.string_at("/sessionId") {
+                let incoming = pending_transient_reminder_revision(&payload).unwrap_or(0);
+                if latest_pending_transient_reminders(&source, session_id)
+                    .as_ref()
+                    .and_then(pending_transient_reminder_revision)
+                    .is_some_and(|current| current >= incoming)
+                {
+                    return transaction.sync_existing_metadata_at(&root, &identity, &relative);
+                }
+            }
+        }
         payload = preserve_title_from_admitted_file(payload, file, path)?;
     }
     if let Some(authority) = durable.transcript_authority() {
@@ -273,7 +292,45 @@ fn append_durable_row_in_transaction(
     } else {
         initialize_identity_for_fresh_metadata(identity_store, path, &root, &identity)?;
     }
-    transaction.append_raw_json_at_with_file(&root, &identity, &relative, payload, admitted)
+    transaction.append_raw_json_at_with_file_and_sync(
+        &root,
+        &identity,
+        &relative,
+        payload,
+        admitted,
+        reminder_checkpoint,
+    )
+}
+
+fn pending_transient_reminder_revision(source: &Utf16JsonProjection) -> Option<u64> {
+    serde_json::from_str(
+        &source
+            .subprojection("/revision")
+            .ok()?
+            .to_json_string()
+            .ok()?,
+    )
+    .ok()
+}
+
+pub(super) fn latest_pending_transient_reminders(
+    source: &str,
+    session_id: &str,
+) -> Option<Utf16JsonProjection> {
+    let session_id = canonical_metadata_session_id(session_id);
+    source
+        .lines()
+        .filter_map(|line| Utf16JsonProjection::parse(line).ok())
+        .filter(|row| {
+            row.string_at("/type") == Some("pending-transient-reminders")
+                && row
+                    .string_at("/sessionId")
+                    .is_some_and(|id| canonical_metadata_session_id(id) == session_id)
+                && row.array_len("/reminders").is_some()
+        })
+        .filter_map(|row| Some((pending_transient_reminder_revision(&row)?, row)))
+        .max_by_key(|(revision, _)| *revision)
+        .map(|(_, row)| row)
 }
 
 /// Rewrite an admitted target under its durable lock and explicitly transfer
@@ -516,6 +573,15 @@ struct DurableTranscriptTarget {
     writer: Arc<DurableTranscriptWriter>,
     cwd: PathBuf,
     incarnation: uuid::Uuid,
+}
+
+/// Captured authority for one consume-once metadata checkpoint. The opaque
+/// incarnation prevents a delayed snapshot from following a same-UUID remount.
+#[derive(Clone)]
+pub struct PendingTransientReminderTarget {
+    session_id: SessionId,
+    incarnation: Option<uuid::Uuid>,
+    path: PathBuf,
 }
 
 /// Append-only writer for one session's `<uuid>.jsonl`.
@@ -1311,6 +1377,32 @@ impl JsonlWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|target| target.path.clone())
+    }
+
+    pub fn capture_pending_transient_reminder_target(
+        &self,
+        session_id: SessionId,
+    ) -> Option<PendingTransientReminderTarget> {
+        if let Some(target) = self
+            .session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+        {
+            return Some(PendingTransientReminderTarget {
+                session_id,
+                incarnation: Some(target.incarnation),
+                path: target.path.clone(),
+            });
+        }
+        let path = self.active_path();
+        (Self::metadata_session_id_from_path(&path).and_then(|id| SessionId::parse_prefixed(&id))
+            == Some(session_id))
+        .then_some(PendingTransientReminderTarget {
+            session_id,
+            incarnation: None,
+            path,
+        })
     }
 
     /// Physical identity already admitted by the active durable writer.
@@ -2169,6 +2261,7 @@ impl JsonlWriter {
             "agent-setting",
             "mode",
             "permission-mode",
+            "pending-transient-reminders",
             "fixed-session-mode",
             "isolation-latch",
             "atis-latch",
@@ -2190,6 +2283,18 @@ impl JsonlWriter {
             let Some(kind) = row.string_at("/type").filter(|kind| KINDS.contains(kind)) else {
                 continue;
             };
+            if kind == "pending-transient-reminders" {
+                let Some(revision) = pending_transient_reminder_revision(&row) else {
+                    continue;
+                };
+                if latest
+                    .get(kind)
+                    .and_then(pending_transient_reminder_revision)
+                    .is_some_and(|old| old >= revision)
+                {
+                    continue;
+                }
+            }
             if kind == "relocated"
                 && !row
                     .string_at("/relocatedCwd")
@@ -2238,6 +2343,9 @@ impl JsonlWriter {
                 Some("agent-setting") => state.agent_setting = string("agentSetting"),
                 Some("mode") => state.mode = string("mode"),
                 Some("permission-mode") => state.permission_mode = string("permissionMode"),
+                Some("pending-transient-reminders") => {
+                    state.pending_transient_reminders = Some(row.clone())
+                }
                 Some("isolation-latch") => state.isolation_latch = string("side"),
                 Some("atis-latch") => {
                     state.atis = string("atis")
@@ -4251,6 +4359,92 @@ impl JsonlWriter {
             .await?;
         drop(state);
         self.maybe_re_append_metadata().await;
+        Ok(())
+    }
+
+    /// Persist a complete consume-once reminder checkpoint for its captured
+    /// session. Empty checkpoints are ACKs, so older pending state must never
+    /// replace one during cancellation or a delayed writer handoff.
+    pub async fn append_pending_transient_reminders(
+        &self,
+        authority: PendingTransientReminderTarget,
+        source: Utf16JsonProjection,
+    ) -> Result<(), WriterError> {
+        let session_id = authority.session_id;
+        let sid = session_id.as_uuid().to_string();
+        let version = |source: &Utf16JsonProjection| {
+            source
+                .subprojection("/revision")
+                .ok()
+                .and_then(|value| value.to_json_string().ok())
+                .and_then(|number| number.parse::<u64>().ok())
+        };
+        if source.string_at("/type") != Some("pending-transient-reminders")
+            || source
+                .string_at("/sessionId")
+                .and_then(SessionId::parse_prefixed)
+                != Some(session_id)
+            || source.array_len("/reminders").is_none()
+        {
+            return Err(FsError::Io("invalid pending reminder checkpoint".into()).into());
+        }
+        let revision = version(&source)
+            .ok_or_else(|| FsError::Io("invalid pending reminder revision".into()))?;
+        let slot = self.session_metadata_state(&sid, &authority.path).await;
+        let mut state = slot.lock().await;
+        {
+            let _writer = self.lock.lock().await;
+            let current = self
+                .session_targets
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&session_id)
+                .cloned();
+            match (authority.incarnation, current) {
+                (Some(incarnation), Some(current)) if current.incarnation == incarnation => {
+                    self.append_json_durable_locked(
+                        current.path,
+                        current.writer,
+                        source.clone(),
+                        None,
+                    )
+                    .await?;
+                }
+                (None, None) if self.active_path() == authority.path => {
+                    let _identity = self
+                        .prepare_metadata_identity_non_durable(&authority.path)
+                        .await?;
+                    let current = match self
+                        .fs
+                        .read_file(&authority.path.to_string_lossy(), None, None)
+                        .await
+                    {
+                        Ok(source) => source.content,
+                        Err(FsError::NotFound(_)) => String::new(),
+                        Err(error) => return Err(error.into()),
+                    };
+                    if latest_pending_transient_reminders(&current, &sid)
+                        .as_ref()
+                        .and_then(version)
+                        .is_some_and(|old| old >= revision)
+                    {
+                        return Ok(());
+                    }
+                    let mut line = source
+                        .to_json_string()
+                        .map_err(crate::jsonl::exact_json::projection_error)?;
+                    line.push('\n');
+                    self.append_payload_to_path(&authority.path, &line, true)
+                        .await?;
+                }
+                _ => {
+                    return Err(
+                        FsError::Io("pending reminder transcript authority changed".into()).into(),
+                    )
+                }
+            }
+        }
+        state.pending_transient_reminders = Some(source);
         Ok(())
     }
 
@@ -8937,6 +9131,263 @@ mod tests {
             writer
         };
         (root, path, id, writer)
+    }
+
+    fn pending_checkpoint(id: SessionId, revision: u64, pending: bool) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "type":"pending-transient-reminders", "sessionId":id.as_uuid().to_string(), "revision":revision,
+            "reminders":if pending {vec![serde_json::json!({"kind":"memory_update","marker":"UNSENT"})]} else {Vec::new()},
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pending_reminder_and_empty_ack_are_synced_and_retry_failed_sync() {
+        let (_root, path, id, writer) = metadata_identity_writer(true);
+        writer
+            .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
+        let durable = writer.durable_lock().unwrap();
+        let target = writer
+            .capture_pending_transient_reminder_target(id)
+            .unwrap();
+        let header = std::fs::read_to_string(&path).unwrap();
+        durable.fail_next_append_sync_for_test();
+        assert!(writer
+            .append_pending_transient_reminders(target.clone(), pending_checkpoint(id, 1, true))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), header);
+        let before_pending = durable.sync_count_for_test();
+        writer
+            .append_pending_transient_reminders(target.clone(), pending_checkpoint(id, 1, true))
+            .await
+            .unwrap();
+        assert!(durable.sync_count_for_test() > before_pending);
+        let pending = std::fs::read_to_string(&path).unwrap();
+        durable.fail_next_append_sync_for_test();
+        assert!(writer
+            .append_pending_transient_reminders(target.clone(), pending_checkpoint(id, 2, false))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), pending);
+        let before_ack = durable.sync_count_for_test();
+        writer
+            .append_pending_transient_reminders(target, pending_checkpoint(id, 2, false))
+            .await
+            .unwrap();
+        assert!(durable.sync_count_for_test() > before_ack);
+        let latest = latest_pending_transient_reminders(
+            &std::fs::read_to_string(&path).unwrap(),
+            &id.as_uuid().to_string(),
+        )
+        .unwrap();
+        assert_eq!(pending_transient_reminder_revision(&latest), Some(2));
+        assert_eq!(latest.array_len("/reminders"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn existing_reminder_checkpoint_requires_a_successful_sync_before_acknowledgment() {
+        let (_root, path, id, writer) = metadata_identity_writer(true);
+        writer
+            .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
+        let durable = writer.durable_lock().unwrap();
+        let target = writer
+            .capture_pending_transient_reminder_target(id)
+            .unwrap();
+        writer
+            .append_pending_transient_reminders(target.clone(), pending_checkpoint(id, 2, false))
+            .await
+            .unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        for revision in [1, 2] {
+            durable.fail_next_existing_sync_for_test();
+            assert!(writer
+                .append_pending_transient_reminders(
+                    target.clone(),
+                    pending_checkpoint(id, revision, true),
+                )
+                .await
+                .is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            writer
+                .append_pending_transient_reminders(
+                    target.clone(),
+                    pending_checkpoint(id, revision, true),
+                )
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_reminder_checkpoint_keeps_max_revision_ack_through_capture_backstop_and_compact(
+    ) {
+        let (_root, path, id, writer) = metadata_identity_writer(true);
+        writer
+            .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
+        let target = writer
+            .capture_pending_transient_reminder_target(id)
+            .unwrap();
+        writer
+            .append_pending_transient_reminders(target.clone(), pending_checkpoint(id, 10, true))
+            .await
+            .unwrap();
+        writer
+            .append_pending_transient_reminders(target.clone(), pending_checkpoint(id, 12, false))
+            .await
+            .unwrap();
+        writer
+            .append_pending_transient_reminders(target, pending_checkpoint(id, 11, true))
+            .await
+            .unwrap();
+        // Simulate source bytes produced by a delayed older writer. All
+        // consumers must prefer the authoritative ACK rather than physical tail.
+        let mut source = std::fs::read_to_string(&path).unwrap();
+        source.push_str(&pending_checkpoint(id, 11, true).to_json_string().unwrap());
+        source.push('\n');
+        let captured =
+            JsonlWriter::capture_session_metadata_source(&source, &id.as_uuid().to_string());
+        let pending = captured
+            .iter()
+            .find(|row| row.string_at("/type") == Some("pending-transient-reminders"))
+            .unwrap();
+        assert_eq!(pending_transient_reminder_revision(pending), Some(12));
+        assert_eq!(pending.array_len("/reminders"), Some(0));
+        let mut state = SessionMetadataState {
+            pending_transient_reminders: Some(pending_checkpoint(id, 10, true)),
+            ..Default::default()
+        };
+        let plan =
+            plan_re_append(&source, &mut state, &id.as_uuid().to_string(), false, true).unwrap();
+        let checkpoint = plan
+            .entries
+            .iter()
+            .find(|row| row["type"] == "pending-transient-reminders")
+            .unwrap();
+        assert_eq!(checkpoint["revision"], 12);
+        assert_eq!(checkpoint["reminders"], serde_json::json!([]));
+        let mut compact_source = source.lines().map(str::to_owned).collect::<Vec<_>>();
+        compact_source.push(serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":uuid::Uuid::new_v4().to_string(),"parentUuid":null,"sessionId":id.as_uuid().to_string(),"compactMetadata":{}}).to_string());
+        compact_source.push(pending_checkpoint(id, 9, true).to_json_string().unwrap());
+        let crate::jsonl::transcript_compact::PlanOutcome::Plan(plan) =
+            crate::jsonl::transcript_compact::build_compact_plan(
+                compact_source.iter().map(String::as_str),
+            )
+        else {
+            panic!("compact plan")
+        };
+        let compacted = compact_source
+            .iter()
+            .enumerate()
+            .flat_map(|(index, line)| plan.apply(index, line).into_iter().map(str::to_owned))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let surviving =
+            latest_pending_transient_reminders(&compacted, &id.as_uuid().to_string()).unwrap();
+        assert_eq!(pending_transient_reminder_revision(&surviving), Some(12));
+        assert_eq!(surviving.array_len("/reminders"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn delayed_pending_checkpoint_from_a_second_writer_cannot_overwrite_newer_ack() {
+        let (root, path, id, writer1) = metadata_identity_writer(true);
+        writer1
+            .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
+        // Hydrate writer one's mirror before writer two commits the ACK.
+        let _ = writer1
+            .session_metadata_state(&id.as_uuid().to_string(), &path)
+            .await;
+        let stale = writer1
+            .capture_pending_transient_reminder_target(id)
+            .unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let lock = Arc::new(DurableTranscriptWriter::open(root.path().join("authority")).unwrap());
+        let writer2 = JsonlWriter::new(path.clone(), fs).with_durable_lock(lock.clone());
+        writer2.activate_session_target_with_durable_lock(
+            id,
+            path.clone(),
+            root.path().to_path_buf(),
+            lock,
+        );
+        let current = writer2
+            .capture_pending_transient_reminder_target(id)
+            .unwrap();
+        writer2
+            .append_pending_transient_reminders(current, pending_checkpoint(id, 20, false))
+            .await
+            .unwrap();
+        writer1
+            .append_pending_transient_reminders(stale, pending_checkpoint(id, 19, true))
+            .await
+            .unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(!source.contains("UNSENT"),"old mirror must consult the authoritative disk checkpoint inside its durable transaction");
+        assert_eq!(
+            latest_pending_transient_reminders(&source, &id.as_uuid().to_string())
+                .unwrap()
+                .array_len("/reminders"),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_checkpoint_is_bound_to_the_captured_source_and_session() {
+        let (root, path, id, writer) = metadata_identity_writer(true);
+        writer
+            .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
+        let stale = writer
+            .capture_pending_transient_reminder_target(id)
+            .unwrap();
+        let sibling = root.path().join("sibling");
+        std::fs::create_dir(&sibling).unwrap();
+        let sibling_path = sibling.join(format!("{}.jsonl", id.as_uuid()));
+        let lock_dir = root.path().join("sibling-authority");
+        std::fs::create_dir(&lock_dir).unwrap();
+        let lock = Arc::new(DurableTranscriptWriter::open(lock_dir).unwrap());
+        writer.activate_session_target_with_durable_lock(
+            id,
+            sibling_path.clone(),
+            sibling.clone(),
+            lock,
+        );
+        writer
+            .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
+        let before = std::fs::read(&sibling_path).unwrap();
+        assert!(writer
+            .append_pending_transient_reminders(stale, pending_checkpoint(id, 30, true))
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(&sibling_path).unwrap(),
+            before,
+            "same UUID sibling cannot receive the old snapshot"
+        );
+        assert!(!std::fs::read_to_string(path).unwrap().contains("UNSENT"));
+        let current = writer
+            .capture_pending_transient_reminder_target(id)
+            .unwrap();
+        assert!(writer
+            .append_pending_transient_reminders(
+                current,
+                pending_checkpoint(SessionId::new(), 31, true)
+            )
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&sibling_path).unwrap(), before);
     }
 
     #[tokio::test]

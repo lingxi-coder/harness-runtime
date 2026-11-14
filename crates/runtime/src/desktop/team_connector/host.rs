@@ -1,10 +1,10 @@
 //! Strict anonymous-pipe bridge from trusted Desktop main into the isolated worker.
 use crate::desktop::team_invocation::{BotChatScope, TeamInvocationLimits};
 use crate::desktop::team_process::{
-    self, TeamAccountEnvelope, TeamChatReadRequest, TeamChatReadResult, TeamDataRef,
-    TeamKnowledgeDocument, TeamModelRoute, TeamProcessBroker, TeamProcessDeadline,
-    TeamContinuation, TeamProcessError, TeamProcessModel, TeamProcessOutcome, TeamProcessRequest,
-    TeamProcessStart, TeamProviderAccountRefresh,
+    self, TeamAccountEnvelope, TeamChatReadRequest, TeamChatReadResult, TeamContinuation,
+    TeamDataRef, TeamKnowledgeDocument, TeamModelRoute, TeamProcessBroker, TeamProcessDeadline,
+    TeamProcessError, TeamProcessModel, TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
+    TeamProviderAccountRefresh,
 };
 use async_trait::async_trait;
 use serde::Deserialize;

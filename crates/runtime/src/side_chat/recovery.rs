@@ -62,6 +62,7 @@ impl SideChatManager {
                 stop_reason: None,
                 message: Some(client::protocol::message::MessageDto {
                     transcript_uuid: None,
+                    skill_name: None,
                     role: "user".into(),
                     blocks: vec![client::protocol::message::MessageBlockDto::Text {
                         text: text.clone(),

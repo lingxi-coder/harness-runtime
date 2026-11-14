@@ -109,6 +109,211 @@ fn full_read(content: &str) -> tool_api::read_file_state::ReadFileEntry {
 }
 
 #[tokio::test]
+async fn eager_and_nested_memory_seeds_verify_the_frozen_body_before_using_a_timestamp() {
+    use tool_api::tool_trait::Tool;
+
+    for nested in [false, true] {
+        for missing_at_seed in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let cwd = dir.path().canonicalize().unwrap();
+            let path = cwd.join("LINGXI.md");
+            std::fs::write(&path, "acquired A\n").unwrap();
+            let loaded = memory::lingxi_md::loader::load_file(&path, None).unwrap();
+            let file = crate::prompt::MemoryFile {
+                path: path.clone(),
+                parent: None,
+                source_content: Some(loaded.body.clone()),
+                body: loaded.body.clone(),
+                raw_content: loaded.body,
+                tier: memory::lingxi_md::LingxiMdTier::Project,
+                is_local_override: false,
+                globs: None,
+                content_differs_from_disk: false,
+            };
+            let orch = orch_with_gate(cwd.clone(), Arc::new(NoOpPermissionGate));
+            if missing_at_seed {
+                std::fs::remove_file(&path).unwrap();
+            } else {
+                std::fs::write(&path, "unseen B\n").unwrap();
+            }
+            if nested {
+                assert!(orch.seed_nested_memory_read_state(&file).await);
+            } else {
+                orch.seed_memory_read_state(std::slice::from_ref(&file))
+                    .await;
+            }
+            let seeded =
+                tool_api::read_file_state::get(&orch.prompt_runtime.read_state_map, &path).unwrap();
+            assert_eq!(seeded.content, "acquired A\n");
+            assert_eq!(
+                seeded.mtime_ms,
+                i64::MIN,
+                "nested={nested}, missing={missing_at_seed}"
+            );
+            if missing_at_seed {
+                std::fs::write(&path, "unseen B\n").unwrap();
+            }
+            let mut context = tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                Arc::new(telemetry::AnalyticsBus::new()),
+                vec![cwd],
+            );
+            context.read_file_state = orch.prompt_runtime.read_state_map.clone();
+            let writer = tool_file::FileWriteTool::new(context);
+            let input =
+                source(&serde_json::json!({"file_path": path, "content": "replacement C\n"}));
+            let write = writer
+                .call(
+                    input.clone(),
+                    tool_api::test_support::fresh_ctx(),
+                    tool_api::test_support::fresh_tx(),
+                )
+                .await;
+            assert!(
+                matches!(write, Err(tool_api::ToolError::InvalidInput(message))
+                if message.string_at("") == Some(tool_file::FILE_UNEXPECTEDLY_MODIFIED_ERROR)),
+                "unseen B must not inherit A's authorization"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "unseen B\n");
+            orch.tools
+                .find_registered("Read")
+                .unwrap()
+                .call(
+                    source(&serde_json::json!({"file_path": path})),
+                    tool_api::test_support::fresh_ctx(),
+                    tool_api::test_support::fresh_tx(),
+                )
+                .await
+                .unwrap();
+            writer
+                .call(
+                    input,
+                    tool_api::test_support::fresh_ctx(),
+                    tool_api::test_support::fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement C\n");
+        }
+    }
+}
+
+#[tokio::test]
+async fn unchanged_and_partial_scans_do_not_construct_a_read_context() {
+    let dir = TempDir::new().unwrap();
+    let orch = orch_with_gate(dir.path().to_owned(), policy_gate(dir.path()));
+    for partial in [false, true] {
+        let path = dir.path().join(format!("warm-{partial}.txt"));
+        std::fs::write(&path, "current\n").unwrap();
+        seed(
+            &orch,
+            &path,
+            "cached\n",
+            i64::MAX,
+            tool_api::read_file_state::ReadFileEntry {
+                offset: partial.then_some(1),
+                ..full_read("cached\n")
+            },
+        );
+    }
+    // Building a Read context needs this lock. A scan with no actual Read
+    // must finish without waiting for unrelated history access.
+    let _history = orch.session.lock().await;
+    let rows = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        orch.changed_files_reminder_messages(None),
+    )
+    .await
+    .expect("unchanged files must not acquire the session for a Read context");
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn batch_admission_deduplicates_existing_hidden_and_repeated_reminders() {
+    let dir = TempDir::new().unwrap();
+    let orch = orch_with_gate(dir.path().to_owned(), policy_gate(dir.path()));
+    for name in ["a.txt", "b.txt"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, "new\n").unwrap();
+        seed(&orch, &path, "old\n", 0, full_read("old\n"));
+    }
+    let rows = orch.changed_files_reminder_messages(None).await;
+    assert_eq!(rows.len(), 2);
+    orch.append_accepted_prompt_ingress_reminder(&rows[0]).await;
+    orch.session
+        .lock()
+        .await
+        .model_context_excluded_messages
+        .insert(rows[0].message.id());
+    orch.append_accepted_prompt_ingress_reminders(&[
+        rows[0].clone(),
+        rows[1].clone(),
+        rows[0].clone(),
+        rows[1].clone(),
+    ])
+    .await;
+    let session = orch.session.lock().await;
+    assert_eq!(
+        session
+            .history
+            .iter()
+            .map(|row| row.id())
+            .collect::<Vec<_>>(),
+        rows.iter().map(|row| row.message.id()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        session
+            .model_context_history()
+            .iter()
+            .map(|row| row.id())
+            .collect::<Vec<_>>(),
+        vec![rows[1].message.id()],
+        "hidden rows stay hidden and are not resurrected"
+    );
+}
+
+#[tokio::test]
+async fn pending_notices_keep_identity_until_delivery_and_do_not_cross_sessions() {
+    let dir = TempDir::new().unwrap();
+    let orch = orch_with_gate(dir.path().to_owned(), policy_gate(dir.path()));
+    let session_id = orch.session.lock().await.session_id;
+    orch.prompt_runtime.bind_read_state_session(session_id);
+    for name in ["a.txt", "b.txt"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, "new\n").unwrap();
+        seed(&orch, &path, "old\n", 0, full_read("old\n"));
+    }
+    let rows = orch.changed_files_reminders_for_delivery(None).await;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        orch.snapshot_history().await.is_empty(),
+        "retaining notices is not history admission"
+    );
+    orch.prompt_runtime.prepare_read_state_restore(session_id);
+    let retry = orch.changed_files_reminders_for_delivery(None).await;
+    assert_eq!(
+        retry.iter().map(|row| row.message.id()).collect::<Vec<_>>(),
+        rows.iter().map(|row| row.message.id()).collect::<Vec<_>>()
+    );
+    orch.persist_prompt_ingress_reminders(&rows[..1]).await;
+    let remaining = orch.changed_files_reminders_for_delivery(None).await;
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|row| row.message.id())
+            .collect::<Vec<_>>(),
+        vec![rows[1].message.id()],
+        "only published identities leave the pending set"
+    );
+    orch.prompt_runtime
+        .prepare_read_state_restore(lingxi_core::types::SessionId::new());
+    assert!(orch
+        .changed_files_reminders_for_delivery(None)
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
 async fn a_file_changed_on_disk_emits_one_wrapped_reminder_and_does_not_repeat() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("a.rs");
@@ -267,7 +472,7 @@ async fn cancelled_actual_read_aborts_before_state_refresh_and_reminder_output()
 }
 
 #[tokio::test]
-async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_is_empty() {
+async fn actual_image_read_preserves_typed_images_or_the_native_text_fallback() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("pic.png");
     const PNG_1X1: &[u8] = &[
@@ -299,11 +504,10 @@ async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_i
             call_context,
             progress_tx,
         )
-        .await;
-    match result {
-        Ok(result) => {
-            assert_eq!(result.data.string_at("/type"), Some("image"));
-
+        .await
+        .expect("a valid PNG is readable with or without the optional image decoder");
+    match result.data.string_at("/type") {
+        Some("image") => {
             let changed = crate::prompt::changed_files::ChangedFile::from_read_result(
                 path.to_string_lossy().into_owned(),
                 &result.data,
@@ -314,21 +518,34 @@ async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_i
                 crate::prompt::changed_files::render_changed_file_message(&changed, "Read")
                     .is_none()
             );
-
-            // The current 2.1.291 default renderer maps this variant to [].
-            assert!(orch.changed_files_reminder_messages(None).await.is_empty());
         }
-        Err(error) => {
-            // In builds without the image-read feature, current Read keeps its
-            // native binary refusal and NTr has no image result to render.
-            let message = error.model_facing_message();
-            let message = message
+        Some("text") => {
+            // Native 2.1.322's text decoder returns a warned view when the
+            // optional image reader is absent. It must not silently claim to
+            // have decoded an image or permit mutations of the binary bytes.
+            let content = result.data.string_at("/file/content").unwrap();
+            assert!(content.contains("PNG"));
+            assert!(content.contains("IDAT"));
+            let message = result
+                .model_content
+                .as_ref()
+                .expect("the fallback carries its encoding warning")
                 .string_at("")
-                .expect("binary refusal is a displayable source message");
-            assert!(message.contains("binary"), "got: {message}");
-            assert!(orch.changed_files_reminder_messages(None).await.is_empty());
+                .unwrap();
+            assert!(message.contains("NUL bytes"), "got: {message}");
+            assert!(message.contains("Edit and Write will refuse it"));
+            assert!(crate::prompt::changed_files::ChangedFile::from_read_result(
+                path.to_string_lossy().into_owned(),
+                &result.data,
+            )
+            .is_none());
         }
+        other => panic!("unexpected image-read result: {other:?}"),
     }
+    assert!(result.new_messages.is_empty());
+    // Typed images have an empty default reminder renderer; a refreshed text
+    // view is already in the Read cache and must not generate another notice.
+    assert!(orch.changed_files_reminder_messages(None).await.is_empty());
 }
 
 #[cfg(unix)]
@@ -558,9 +775,15 @@ async fn reminder_refresh_does_not_create_a_canonical_route_after_alias_disappea
         "refresh keeps its selected route and does not append the canonical cache key"
     );
 
-    // Ensure the second on-disk rewrite has an mtime newer than the first
-    // reminder's refresh on filesystems with coarse timestamp resolution.
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert_eq!(
+        tool_api::read_file_state::get(&orch.prompt_runtime.read_state_map, &cache_key)
+            .unwrap()
+            .offset,
+        Some(1),
+        "the production Read refresh records a ranged snapshot"
+    );
+    // Removing the original route must prune even that ranged snapshot. No
+    // mtime advance is needed to observe a missing path.
     std::fs::remove_file(&alias).unwrap();
     std::fs::write(&target_path, "second target-only version\n").unwrap();
     assert!(
@@ -1266,6 +1489,190 @@ async fn a_vanished_file_drops_its_read_state_entry() {
 }
 
 #[tokio::test]
+async fn missing_route_cleanup_does_not_remove_a_republished_identical_snapshot() {
+    use tool_api::context::ToolUseContext;
+    use tool_api::tool_trait::{DescriptionOptions, PromptOptions, Tool, ToolStaticContext};
+
+    struct RepublishingRead {
+        inner: Arc<dyn Tool>,
+        map: tool_api::read_file_state::ReadFileStateMap,
+        missing_host_path: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for RepublishingRead {
+        fn name(&self) -> &str {
+            "Read"
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            self.inner.input_schema()
+        }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            self.inner.input_repair_metadata()
+        }
+        fn is_enabled(&self, context: &ToolStaticContext) -> bool {
+            self.inner.is_enabled(context)
+        }
+        fn max_result_size_chars(&self) -> usize {
+            self.inner.max_result_size_chars()
+        }
+        fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
+            self.inner.is_concurrency_safe(input)
+        }
+        fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
+            self.inner.is_read_only(input)
+        }
+        fn read_state_io_path(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<PathBuf, tool_api::ToolError> {
+            // Deterministically interleave a successful publication after the
+            // scanner captured its candidate but before its old route reports
+            // NotFound. Even unchanged bytes represent a new observation.
+            let mut state = self.map.lock().unwrap();
+            let same_entry = state.peek(path).unwrap();
+            state.set_with_requested_path(path.to_owned(), same_entry, true, Some(path.to_owned()));
+            Ok(self.missing_host_path.clone())
+        }
+        async fn check_permissions(
+            &self,
+            input: &Utf16JsonProjection,
+            context: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            self.inner.check_permissions(input, context).await
+        }
+        async fn description(
+            &self,
+            input: &Utf16JsonProjection,
+            options: &DescriptionOptions,
+        ) -> String {
+            self.inner.description(input, options).await
+        }
+        async fn prompt(&self, options: &PromptOptions) -> Utf16JsonProjection {
+            self.inner.prompt(options).await
+        }
+        async fn call(
+            &self,
+            _: Utf16JsonProjection,
+            _: ToolUseContext,
+            _: tool_api::progress::ToolProgressSender,
+        ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+            panic!("missing-route cleanup must not read content")
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("model-route.txt");
+    let mut orch = orch();
+    seed(
+        &orch,
+        &path,
+        "same contents\n",
+        7,
+        full_read("same contents\n"),
+    );
+    let old = orch
+        .prompt_runtime
+        .read_state_map
+        .lock()
+        .unwrap()
+        .peek_snapshot(&path)
+        .unwrap();
+    let inner = orch.tools.find_registered("Read").unwrap();
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(RepublishingRead {
+        inner,
+        map: orch.prompt_runtime.read_state_map.clone(),
+        missing_host_path: dir.path().join("vanished-host-target.txt"),
+    }));
+    orch.tools = Arc::new(tools);
+    assert!(orch.changed_files_reminder_messages(None).await.is_empty());
+    let fresh = orch
+        .prompt_runtime
+        .read_state_map
+        .lock()
+        .unwrap()
+        .peek_snapshot(&path)
+        .unwrap();
+    assert!(
+        !Arc::ptr_eq(&old, &fresh),
+        "the candidate was superseded during the scan"
+    );
+    assert_eq!(
+        *old, *fresh,
+        "equal values must not let an old NotFound delete a new snapshot"
+    );
+}
+
+#[tokio::test]
+async fn vanished_partial_reads_are_pruned_without_refreshing_existing_partial_views() {
+    let dir = TempDir::new().unwrap();
+    let orch = orch_with_gate(dir.path().to_owned(), policy_gate(dir.path()));
+    for (index, (offset, limit)) in [(Some(1), None), (None, Some(10)), (Some(2), Some(10))]
+        .into_iter()
+        .enumerate()
+    {
+        let present = dir.path().join(format!("present-{index}.rs"));
+        let missing = dir.path().join(format!("missing-{index}.rs"));
+        std::fs::write(&present, "changed on disk\n").unwrap();
+        std::fs::write(&missing, "removed on disk\n").unwrap();
+        for path in [&present, &missing] {
+            seed(
+                &orch,
+                path,
+                "old partial view\n",
+                0,
+                tool_api::read_file_state::ReadFileEntry {
+                    offset,
+                    limit,
+                    ..full_read("old partial view\n")
+                },
+            );
+        }
+        std::fs::remove_file(&missing).unwrap();
+        assert!(orch.changed_files_reminder_messages(None).await.is_empty());
+        let state = orch.prompt_runtime.read_state_map.lock().unwrap();
+        let retained = state
+            .peek(&present)
+            .expect("a live partial view is retained");
+        assert_eq!(retained.content, "old partial view\n");
+        assert_eq!(retained.mtime_ms, 0);
+        assert_eq!(retained.offset, offset);
+        assert_eq!(retained.limit, limit);
+        assert!(state.peek(&missing).is_none());
+        assert!(state.requested_path_groups(&missing).is_empty());
+        assert!(!state.changed_file_candidate_keys().contains(&missing));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_missing_partial_read_keeps_its_cached_state() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("missing.rs");
+    let orch = orch_with_gate(dir.path().to_owned(), policy_gate(dir.path()));
+    seed(
+        &orch,
+        &path,
+        "old partial view\n",
+        0,
+        tool_api::read_file_state::ReadFileEntry {
+            offset: Some(1),
+            limit: Some(10),
+            ..full_read("old partial view\n")
+        },
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    assert!(orch
+        .changed_files_reminder_messages(Some(&cancel))
+        .await
+        .is_empty());
+    let state = orch.prompt_runtime.read_state_map.lock().unwrap();
+    assert_eq!(state.peek(&path).unwrap().content, "old partial view\n");
+    assert_eq!(state.requested_path_groups(&path), vec![vec![path.clone()]]);
+}
+
+#[tokio::test]
 async fn host_seed_records_its_current_route_and_can_emit_changed_file_notice() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("host.txt");
@@ -1375,6 +1782,52 @@ async fn the_snippet_budget_blanks_later_files() {
             .text_content()
             .contains("Here are the relevant changes (shown with line numbers):"),
         "the first file keeps its snippet"
+    );
+}
+
+#[tokio::test]
+async fn retained_notices_and_new_edits_share_the_snippet_budget() {
+    let dir = TempDir::new().unwrap();
+    let orch = orch();
+    let bulk: String = (0..4000).map(|i| format!("l{i}\n")).collect();
+    for name in ["first.rs", "second.rs"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, &bulk).unwrap();
+        seed(&orch, &path, "l0\n", 0, full_read("l0\n"));
+    }
+    let retained = orch.changed_files_reminders_for_delivery(None).await;
+    assert_eq!(retained.len(), 2);
+    assert!(
+        retained
+            .iter()
+            .map(|row| row
+                .payload
+                .string_at("/snippet")
+                .unwrap()
+                .encode_utf16()
+                .count())
+            .sum::<usize>()
+            >= crate::prompt::changed_files::CHANGED_FILE_SNIPPET_BUDGET
+    );
+    let path = dir.path().join("new-edit.rs");
+    std::fs::write(&path, "new\n").unwrap();
+    seed(&orch, &path, "old\n", 0, full_read("old\n"));
+    let combined = orch.changed_files_reminders_for_delivery(None).await;
+    assert_eq!(combined.len(), 3);
+    for (before, after) in retained.iter().zip(&combined) {
+        assert_eq!(before.message, after.message);
+        assert_eq!(before.payload, after.payload);
+        assert_eq!(before.rendered, after.rendered);
+    }
+    assert_eq!(combined[2].payload.string_at("/filename"), path.to_str());
+    assert_eq!(combined[2].payload.string_at("/snippet"), Some(""));
+    assert!(combined[2]
+        .message
+        .text_content()
+        .contains("The changes are not shown here; use Read if you need the current content."));
+    assert_eq!(
+        combined[2].rendered.string_at("/0/content"),
+        Some(combined[2].message.text_content().as_str())
     );
 }
 

@@ -462,7 +462,9 @@ mod tests {
         drop(coordinator);
         let reopened = open(root.path(), session);
         let worker = reopened.start().await.unwrap();
+        assert_eq!(reopened.hydration_replay_count(), 1);
         let recovered = reopened.hydrate_blocking().unwrap();
+        assert_eq!(reopened.hydration_replay_count(), 2);
         assert_eq!(recovered.state.total_nano_usd, 0);
         assert_eq!(recovered.state.unverified_nano_usd, 1000);
         assert_eq!(recovered.state.cost_revision, 1);
@@ -482,6 +484,7 @@ mod tests {
         let reopened = open(root.path(), session);
         let worker = reopened.start().await.unwrap();
         let again = reopened.hydrate_blocking().unwrap();
+        assert_eq!(reopened.hydration_replay_count(), 2);
         assert_eq!(again.state.cost_revision, 1);
         assert_eq!(again.attempt_outputs, recovered.attempt_outputs);
         reopened.close_and_drain().await.unwrap();

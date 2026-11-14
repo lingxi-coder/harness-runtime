@@ -121,6 +121,8 @@ pub struct SessionMetadataState {
     pub mode: Option<String>,
     /// `currentSessionPermissionMode` → `{type:"permission-mode",permissionMode,sessionId}`.
     pub permission_mode: Option<String>,
+    /// Host recovery state for consume-once reminders, outside model history.
+    pub pending_transient_reminders: Option<Utf16JsonProjection>,
     /// `currentSessionIsolationLatch` → `{type:"isolation-latch",side,sessionId}`.
     /// Note the wire key is `side`, NOT `isolationLatch`.
     pub isolation_latch: Option<String>,
@@ -517,6 +519,23 @@ pub fn plan_re_append(
 
     // ── 2. rebuild ──────────────────────────────────────────────────────────
     let sid = || Value::String(session_id.to_string());
+    if let Some(latest) = crate::jsonl::writer::latest_pending_transient_reminders(tail, session_id)
+    {
+        let revision = |row: &Utf16JsonProjection| {
+            row.subprojection("/revision")
+                .ok()
+                .and_then(|value| value.to_json_string().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        if state
+            .pending_transient_reminders
+            .as_ref()
+            .is_none_or(|old| revision(old) < revision(&latest))
+        {
+            state.pending_transient_reminders = Some(latest);
+        }
+    }
     let mut entries: Vec<Value> = Vec::new();
     let mut custom_title_source = None;
 
@@ -598,6 +617,15 @@ pub fn plan_re_append(
             ("permissionMode", Value::String(permission_mode.to_string())),
             ("sessionId", sid()),
         ]));
+    }
+    if let Some(pending) = &state.pending_transient_reminders {
+        if let Some(value) = pending
+            .to_json_string()
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        {
+            entries.push(value);
+        }
     }
     if let Some(latch) = truthy(&state.isolation_latch) {
         entries.push(obj(vec![
@@ -877,6 +905,7 @@ mod tests {
             agent_setting: Some("reviewer".into()),
             mode: Some("default".into()),
             permission_mode: Some("acceptEdits".into()),
+            pending_transient_reminders: None,
             isolation_latch: Some("left".into()),
             atis: Some("atis-token".into()),
             worktree: Some(serde_json::json!({"worktreePath": "/wt"})),

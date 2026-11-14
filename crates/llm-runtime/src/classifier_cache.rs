@@ -161,6 +161,59 @@ pub(crate) fn project(
     }
 }
 
+pub(crate) fn requires_cache_adaptation(profile: &ProviderProfile) -> bool {
+    matches!(
+        profile
+            .extra
+            .get("explicit_cache")
+            .and_then(|value| value.as_str()),
+        Some("unsupported" | "top_level_only")
+    )
+}
+
+/// Degrade host-generated Claude cache hints against the selected codec.
+/// Callers keep explicit user controls outside this best-effort projection.
+pub(crate) fn adapt_generated_claude_cache(
+    input: &mut ChatRequest,
+    profile: &ProviderProfile,
+    wire_model: &str,
+    mode: RequestMode,
+) {
+    // Native/cloud policy uses additional execution metadata. Capability
+    // degradation is needed only when the profile explicitly restricts hints.
+    if !requires_cache_adaptation(profile) {
+        return;
+    }
+    let codec: &dyn WireCodec = match profile.protocol {
+        ProtocolFamily::AnthropicMessages => {
+            &lingxi_llm_client::codecs::anthropic::AnthropicMessagesCodec
+        }
+        ProtocolFamily::BedrockClaude => &lingxi_llm_client::hosting::BedrockClaudeCodec,
+        ProtocolFamily::FoundryClaude => &lingxi_llm_client::hosting::FoundryClaudeCodec,
+        ProtocolFamily::VertexClaude => &lingxi_llm_client::hosting::VertexClaudeCodec,
+        _ => return,
+    };
+    let context = CodecContext::new(profile, wire_model, mode);
+    if codec.validate_request(input, &context).is_ok() {
+        return;
+    }
+    for point in &mut input.prompt_cache.breakpoints {
+        point.ttl = CacheTtl::FiveMinutes;
+        point.scope = None;
+    }
+    input.prompt_cache.automatic = None;
+    if codec.validate_request(input, &context).is_ok() {
+        return;
+    }
+    input.prompt_cache = PromptCachePolicy {
+        automatic: Some(CacheTtl::FiveMinutes),
+        ..Default::default()
+    };
+    if codec.validate_request(input, &context).is_err() {
+        input.prompt_cache = PromptCachePolicy::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

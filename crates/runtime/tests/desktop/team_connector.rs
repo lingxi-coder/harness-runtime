@@ -89,7 +89,12 @@ fn chat_model() -> Value {
 }
 #[test]
 fn inspect_task_reports_an_unadmitted_task_without_a_model_or_worker() {
-    let (result, success) = invoke_with(3, false, "inspect_task", json!({"taskId":"task_00000001","model":chat_model()}));
+    let (result, success) = invoke_with(
+        3,
+        false,
+        "inspect_task",
+        json!({"taskId":"task_00000001","model":chat_model()}),
+    );
     assert!(success, "{result}");
     assert_eq!(result["status"], "task_checkpoint");
     assert_eq!(result["version"], 3);
@@ -107,13 +112,28 @@ fn inspect_task_and_continue_reject_malformed_bootstraps_before_any_io() {
     for (kind, extra) in [
         ("inspect_task", json!({"model":chat_model()})),
         ("inspect_task", json!({"taskId":"task_00000001"})),
-        ("inspect_scope", json!({"continuation":{"epoch":2,"expected_checkpoint_digest":"0".repeat(64)}})),
+        (
+            "inspect_scope",
+            json!({"continuation":{"epoch":2,"expected_checkpoint_digest":"0".repeat(64)}}),
+        ),
         ("continue", json!({"taskId":"task_00000001"})),
         ("inspect_scope", json!({"askRequester":true})),
-        ("inspect_scope", json!({"sharedList":{"title":"Groceries","description":"What to buy"}})),
-        ("inspect_task", json!({"taskId":"task_00000001","model":chat_model(),"sharedList":{"title":"Groceries","description":"What to buy"}})),
-        ("inspect_task", json!({"taskId":"task_00000001","model":chat_model(),"askRequester":true})),
-        ("run", json!({"taskId":"task_00000001","continuation":{"epoch":2,"expected_checkpoint_digest":"0".repeat(64)}})),
+        (
+            "inspect_scope",
+            json!({"sharedList":{"title":"Groceries","description":"What to buy"}}),
+        ),
+        (
+            "inspect_task",
+            json!({"taskId":"task_00000001","model":chat_model(),"sharedList":{"title":"Groceries","description":"What to buy"}}),
+        ),
+        (
+            "inspect_task",
+            json!({"taskId":"task_00000001","model":chat_model(),"askRequester":true}),
+        ),
+        (
+            "run",
+            json!({"taskId":"task_00000001","continuation":{"epoch":2,"expected_checkpoint_digest":"0".repeat(64)}}),
+        ),
     ] {
         let (result, success) = invoke_with(3, false, kind, extra);
         assert!(!success, "{kind}");

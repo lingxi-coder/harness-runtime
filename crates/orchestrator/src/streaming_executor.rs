@@ -382,7 +382,11 @@ impl<'a> StreamingToolExecutor<'a> {
             session_root,
             publication_commit_lock,
             Some(model_context_resolver),
-            Some(orch.lifecycle_runtime.session_tool_hook_generation.transient_publications()),
+            Some(
+                orch.lifecycle_runtime
+                    .session_tool_hook_generation
+                    .transient_publications(),
+            ),
         );
         let publication_fence = scheduler.current_publication_fence();
         Ok(Self {
@@ -748,12 +752,17 @@ impl<'a> StreamingToolExecutor<'a> {
     /// consuming a completed tool result or pausing autonomous execution.
     pub(crate) fn progress_waiter(&self) -> Option<futures::future::BoxFuture<'static, ()>> {
         if self.scheduler_failed.load(Ordering::Acquire)
-            || !self.tools.iter().any(|tool| tool.status != ToolStatus::Yielded)
+            || !self
+                .tools
+                .iter()
+                .any(|tool| tool.status != ToolStatus::Yielded)
         {
             return None;
         }
         let waiter = self.scheduler.progress_waiter();
-        Some(Box::pin(async move { let _ = waiter.await; }))
+        Some(Box::pin(async move {
+            let _ = waiter.await;
+        }))
     }
 
     pub(crate) async fn drain_one(&mut self) -> Option<usize> {

@@ -205,8 +205,8 @@ impl ConversationOrchestrator {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-        noop_hook_executor,
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
     };
     use lingxi_core::host::OrchestratorHandle;
     use std::sync::Arc;
@@ -321,12 +321,10 @@ mod tests {
             owner.take_queued_goal_origin(&"goal".into()),
             GoalOrigin::User
         );
-        assert!(
-            owner
-                .queue_goal_proposal_kickoff("stale".into(), GoalOrigin::ProposalApproved, epoch)
-                .await
-                .is_err()
-        );
+        assert!(owner
+            .queue_goal_proposal_kickoff("stale".into(), GoalOrigin::ProposalApproved, epoch)
+            .await
+            .is_err());
         assert_eq!(queue.0.lock().unwrap().len(), 1);
     }
 
@@ -408,16 +406,14 @@ mod tests {
         let (new_epoch, new_cancel) = owner.goal_proposal_scope();
         assert!(new_cancel.is_cancelled());
         assert!(!owner.goal_proposal_queue_available());
-        assert!(
-            owner
-                .queue_goal_proposal_kickoff(
-                    "after teardown".into(),
-                    GoalOrigin::ProposalApproved,
-                    new_epoch
-                )
-                .await
-                .is_err()
-        );
+        assert!(owner
+            .queue_goal_proposal_kickoff(
+                "after teardown".into(),
+                GoalOrigin::ProposalApproved,
+                new_epoch
+            )
+            .await
+            .is_err());
         assert_eq!(queue.0.lock().unwrap().len(), 1);
     }
 }

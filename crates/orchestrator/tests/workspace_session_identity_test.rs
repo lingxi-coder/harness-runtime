@@ -66,6 +66,193 @@ fn write_source(path: &Path, cwd: &Path, id: SessionId) -> String {
 }
 
 #[tokio::test]
+async fn initial_display_starts_at_latest_compact_without_losing_resumable_context() {
+    let root = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+    let mut source = write_source(&path, root.path(), id);
+    let first_boundary = uuid::Uuid::new_v4();
+    let boundary = uuid::Uuid::new_v4();
+    let latest = uuid::Uuid::new_v4();
+    for row in [
+        serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":first_boundary,"sessionId":id.as_uuid(),"parentUuid":null,"content":"old compact","compactMetadata":{}}),
+        serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id.as_uuid(),"parentUuid":first_boundary,"message":{"role":"user","content":"old visible history"}}),
+        serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":boundary,"sessionId":id.as_uuid(),"parentUuid":null,"content":"latest compact","compactMetadata":{}}),
+        serde_json::json!({"type":"user","uuid":latest,"sessionId":id.as_uuid(),"parentUuid":boundary,"message":{"role":"user","content":"latest user message"}}),
+    ] {
+        source.push_str(&format!("{row}\n"));
+    }
+    std::fs::write(&path, &source).unwrap();
+    let fs: Arc<dyn FileSystem> =
+        Arc::new(platform_posix::PosixFileSystem::new(root.path().into()));
+    let replayed = orchestrator::resume::replay_session_state_from_path(&path, id.as_uuid(), fs)
+        .await
+        .unwrap();
+    assert!(replayed.display_history.iter().all(|message| !message
+        .text_content()
+        .contains("old visible history")
+        && !message.text_content().contains("source-history")));
+    assert_eq!(replayed.display_history[0].id().as_uuid(), boundary);
+    assert!(replayed
+        .display_history
+        .iter()
+        .any(|message| message.id().as_uuid() == latest));
+    assert!(replayed
+        .state
+        .history
+        .iter()
+        .any(|message| message.id().as_uuid() == latest));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[tokio::test]
+async fn mixed_history_cannot_supply_foreign_compact_or_deferred_work() {
+    let root = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let foreign = SessionId::new();
+    let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+    let mut source = write_source(&path, root.path(), id);
+    let loaded = session::jsonl::route_lines(&source);
+    let parent = loaded.messages_in_order[0].uuid.clone();
+    // The owner's off-chain hook remains resumable even though the assistant
+    // is the chain tip. Foreign/sidechain results cannot resolve that work.
+    for (owner, sidechain, call) in [
+        (id, false, "main"),
+        (foreign, true, "child"),
+        (foreign, false, "foreign"),
+        (id, true, "sidechain"),
+    ] {
+        let row = serde_json::json!({"type":"attachment","uuid":uuid::Uuid::new_v4(),"parentUuid":parent,
+            "sessionId":owner.as_uuid(),"isSidechain":sidechain,
+            "attachment":{"type":"hook_deferred_tool","toolUseID":call,"toolName":"Bash","toolInput":{"command":"must not run foreign work"}}});
+        source.push_str(&format!("{row}\n"));
+    }
+    source.push_str(&format!("{}\n",serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":foreign.as_uuid(),
+        "parentUuid":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"main","content":"foreign completion"}]}})));
+    source.push_str(&format!("{}\n",serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":uuid::Uuid::new_v4(),
+        "sessionId":foreign.as_uuid(),"parentUuid":null,"content":"foreign compact","compactMetadata":{}})));
+    let replayed = orchestrator::resume::replay_captured_session(
+        path,
+        source.clone(),
+        session::jsonl::route_lines(&source),
+        id.as_uuid(),
+    )
+    .unwrap();
+    assert_eq!(
+        replayed
+            .runtime_metadata
+            .deferred_tools
+            .iter()
+            .map(|tool| tool.tool_use_id.as_str())
+            .collect::<Vec<_>>(),
+        ["main"]
+    );
+    assert!(replayed
+        .display_history
+        .iter()
+        .any(|message| message.text_content() == "source-history"));
+    assert!(replayed
+        .display_history
+        .iter()
+        .all(|message| !message.text_content().contains("foreign")));
+    assert!(replayed
+        .state
+        .model_context_history()
+        .iter()
+        .all(|message| !message.text_content().contains("foreign")));
+}
+
+#[tokio::test]
+async fn resume_errors_distinguish_rejection_from_a_committed_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("work");
+    let initial = SessionId::new();
+    let target = SessionId::new();
+    let (orch, writer, _, _) = fixture(&home, &cwd, initial).await;
+    let path = transcript(&home, &cwd, target);
+    write_source(&path, &cwd, target);
+    let replayed = orchestrator::resume::replay_captured_session(
+        path.clone(),
+        std::fs::read_to_string(&path).unwrap(),
+        session::jsonl::route_lines(&std::fs::read_to_string(&path).unwrap()),
+        target.as_uuid(),
+    )
+    .unwrap();
+    let mut invalid = replayed.handle_runtime_snapshot();
+    invalid.transcript_path = Some(
+        root.path()
+            .join("missing")
+            .join(format!("{}.jsonl", target.as_uuid())),
+    );
+    let rejected = orch
+        .resume_session(target, replayed.state.history.clone(), None, None, invalid)
+        .await
+        .unwrap_err();
+    assert!(!matches!(
+        rejected,
+        lingxi_core::host::HandleError::ResumeCommitted { .. }
+    ));
+    assert_eq!(orch.current_session_id().await, initial);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("deferred-tool-replay"), b"not a directory").unwrap();
+    let mut runtime = replayed.handle_runtime_snapshot();
+    runtime
+        .deferred_tools
+        .push(lingxi_core::host::DeferredToolReplay {
+            tool_use_id: "pending".into(),
+            assistant_message_id: None,
+            tool_name: "Read".into(),
+            tool_input: Utf16JsonProjection::parse("{}").unwrap(),
+            permission_mode: None,
+            traceparent: None,
+        });
+    let error = orch
+        .resume_session(target, replayed.state.history, None, None, runtime)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, lingxi_core::host::HandleError::ResumeCommitted { session_id, .. } if session_id == target)
+    );
+    assert_eq!(orch.current_session_id().await, target);
+    assert_eq!(writer.active_path(), path);
+}
+
+#[test]
+fn visible_results_keep_structured_payloads_when_their_calls_precede_compact() {
+    let id = uuid::Uuid::new_v4();
+    let call = uuid::Uuid::new_v4();
+    let boundary = uuid::Uuid::new_v4();
+    let rows = [
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+        serde_json::json!({"type":"assistant","uuid":call,"sessionId":id,"parentUuid":null,"message":{"role":"assistant","content":[{"type":"tool_use","id":"saved-agent","name":"Agent","input":{}},{"type":"tool_use","id":"old-agent","name":"Agent","input":{}}]}}),
+        serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"parentUuid":call,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"old-agent","content":"old model text"}]},"toolUseResult":{"agentId":"old"}}),
+        serde_json::json!({"type":"system","uuid":boundary,"sessionId":id,"parentUuid":null,"subtype":"compact_boundary","content":"compact","compactMetadata":{}}),
+        serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"parentUuid":boundary,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"saved-agent","content":"model completion text"}]},"toolUseResult":{"agentId":"saved-child","status":"completed"}}),
+    ];
+    let source = rows
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
+    let replayed = orchestrator::resume::replay_captured_session(
+        PathBuf::from(format!("{id}.jsonl")),
+        source.clone(),
+        session::jsonl::route_lines(&source),
+        id,
+    )
+    .unwrap();
+    assert_eq!(
+        replayed.client_state_tool_results["saved-agent"].string_at("/agentId"),
+        Some("saved-child")
+    );
+    assert!(!replayed.client_state_tool_results.contains_key("old-agent"));
+    assert!(replayed
+        .display_history
+        .iter()
+        .all(|message| message.id().as_uuid() != call));
+}
+
+#[tokio::test]
 async fn selected_transcript_path_wins_over_a_current_bucket_copy_of_the_same_uuid() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");

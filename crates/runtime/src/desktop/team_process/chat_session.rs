@@ -69,7 +69,8 @@ pub fn inspect_task(
                 .claim_session_id(&id.to_string(), std::process::id())
                 .map_err(storage_error)?
                 .into_shared();
-        let state = SessionStateCoordinator::open(home.clone(), id, lease).map_err(storage_error)?;
+        let state =
+            SessionStateCoordinator::open(home.clone(), id, lease).map_err(storage_error)?;
         state.hydrate_blocking().map_err(storage_error)?;
         let admitted = match &batch_id {
             Some(wanted) => state
@@ -139,7 +140,9 @@ impl DispatchLedger {
             .orchestrator
             .session_transcript_writer()
             .ok_or(TeamProcessError::Worker)?;
-        self.writer.set(writer).map_err(|_| TeamProcessError::Worker)
+        self.writer
+            .set(writer)
+            .map_err(|_| TeamProcessError::Worker)
     }
     pub(super) async fn record(&self) -> Result<(), TeamProcessError> {
         let writer = self.writer.get().ok_or(TeamProcessError::Worker)?;

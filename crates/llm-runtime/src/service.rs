@@ -37,6 +37,17 @@ use crate::{
 
 const NATIVE_ANTHROPIC_FIRST_PARTY_BASE_URL: &str = "https://api.anthropic.com";
 
+// Keep provider state machines out of the generic trace/retry scope futures.
+// Construct through a factory so their large temporaries stay off the caller's
+// poll stack as well as the final boxed future.
+#[inline(never)]
+fn boxed_model_future<'a, T, F>(create: impl FnOnce() -> F) -> crate::BoxFuture<'a, T>
+where
+    F: std::future::Future<Output = T> + Send + 'a,
+{
+    Box::pin(create())
+}
+
 #[path = "service_native_media.rs"]
 mod native_media;
 use native_media::{strip_native_media_with_sources, NativeMediaLimits};
@@ -1160,7 +1171,11 @@ struct StreamState {
     )>,
     account_derived_token: bool,
     per_turn_effort: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-    context_1m_latch: Option<(crate::thinking_scope::ThinkingRecoveryScope, Vec<u16>)>,
+    context_usage_prefix: Option<crate::context_usage::ContextUsagePrefix>,
+    context_1m_latch: Option<(
+        crate::thinking_scope::ThinkingRecoveryScope,
+        crate::thinking_scope::Context1mRouteKey,
+    )>,
     mark_context_1m_latch_on_message_start: bool,
     safety: crate::safety_observation::SafetyObservation,
     attempt: crate::model_attempt::WireAttempt,
@@ -1543,7 +1558,6 @@ pub struct ApiService {
     request_session_id_source: RwLock<Option<RequestSessionIdSource>>,
     client: Arc<ModelRuntime>,
     transport: Arc<dyn Transport>,
-    independent_web_services: OnceLock<Result<crate::services::ProviderServices, String>>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
     ///
     /// Build-time seed/fallback: when [`Self::subscription`] is attached and
@@ -2402,6 +2416,42 @@ fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json
     }
 }
 
+struct DeepSeekWebOperation {
+    client: lingxi_llm_client::providers::DeepSeekClient,
+    options: lingxi_llm_client::RequestOptions,
+    source: Arc<ModelRuntime>,
+    profile: String,
+    credential_revision: Option<u64>,
+    coordinator: Option<crate::accounts::AttemptCoordinator>,
+}
+
+impl DeepSeekWebOperation {
+    async fn settle<T>(&mut self, result: &Result<T, LlmError>) {
+        let Some(coordinator) = self.coordinator.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(_) => coordinator.succeeded().await,
+            Err(error) => {
+                if matches!(
+                    error.classification_source(),
+                    LlmError::Authentication { .. } | LlmError::OAuthRefreshDead
+                ) && self
+                    .source
+                    .current_service_credential_revision(&self.profile)
+                    .await
+                    .ok()
+                    != Some(self.credential_revision)
+                {
+                    return;
+                }
+                coordinator.set_rejected_credential_revision(self.credential_revision);
+                let _ = coordinator.failed(error).await;
+            }
+        }
+    }
+}
+
 impl ApiService {
     /// Publish the resolved provider gate without changing another live session.
     pub fn set_tool_search_enabled(&self, enabled: bool) {
@@ -2446,13 +2496,8 @@ impl ApiService {
         &self,
         model: &str,
         profile: Option<&str>,
-    ) -> Result<
-        (
-            lingxi_llm_client::providers::DeepSeekClient,
-            lingxi_llm_client::RequestOptions,
-        ),
-        LlmError,
-    > {
+        operation: &'static str,
+    ) -> Result<DeepSeekWebOperation, LlmError> {
         if self.scope_output_quota.is_some() {
             return Err(LlmError::UnsupportedCapability {
                 capability: "independent web requests are disabled for output-limited scopes"
@@ -2461,25 +2506,44 @@ impl ApiService {
         }
         let started = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_secs(60);
-        let profile = self
-            .client()
+        // One operation owns one current directory, route and credential source.
+        // The service lifetime can span account/catalog publications.
+        let operation_client = self.client.account_call_snapshot().await?;
+        let profile = operation_client
             .deepseek_web_profile(model, profile)
             .ok_or_else(|| LlmError::UnsupportedCapability {
                 capability: "independent DeepSeek web APIs require a first-party route".into(),
             })?;
-        let services = self
-            .independent_web_services
-            .get_or_init(|| {
-                self.client()
-                    .provider_services(
-                        lingxi_llm_client::protocol::Region::International,
-                        self.transport.clone(),
-                    )
-                    .map_err(|error| error.to_string())
-            })
-            .as_ref()
-            .map_err(|message| LlmError::InvalidRequest {
-                message: message.clone(),
+        let mut coordinator = operation_client.service_account_coordinator(&profile, operation)?;
+        if let Some(coordinator) = coordinator.as_mut() {
+            coordinator.retain_supported(|candidate| {
+                (!profile.starts_with("account.") || candidate.profile_name == profile)
+                    && operation_client
+                        .deepseek_web_profile(model, Some(&candidate.profile_name))
+                        .is_some()
+            });
+        }
+        let profile = match coordinator.as_mut() {
+            Some(coordinator) => {
+                tokio::time::timeout(
+                    timeout.saturating_sub(started.elapsed()),
+                    coordinator.select(),
+                )
+                .await
+                .map_err(|_| LlmError::TransportTimeout {
+                    message: "DeepSeek web account deadline elapsed".into(),
+                })??
+                .profile_name
+            }
+            None => profile,
+        };
+        let services = operation_client
+            .provider_services(
+                lingxi_llm_client::protocol::Region::International,
+                self.transport.clone(),
+            )
+            .map_err(|error| LlmError::InvalidRequest {
+                message: error.to_string(),
             })?;
         let client = services
             .client()
@@ -2487,21 +2551,42 @@ impl ApiService {
             .map_err(|error| LlmError::InvalidRequest {
                 message: error.to_string(),
             })?;
+        let credential = tokio::time::timeout(
+            timeout.saturating_sub(started.elapsed()),
+            operation_client.service_credential_versioned(&profile),
+        )
+        .await
+        .map_err(|_| LlmError::TransportTimeout {
+            message: "DeepSeek web credential deadline elapsed".into(),
+        })?;
+        let (credential, credential_revision) = match credential {
+            Ok(credential) => credential,
+            Err(failure) => {
+                let mut failed = DeepSeekWebOperation {
+                    client,
+                    options: Default::default(),
+                    source: operation_client,
+                    profile,
+                    credential_revision: failure.credential_revision,
+                    coordinator,
+                };
+                failed.settle::<()>(&Err(failure.error.clone())).await;
+                return Err(failure.error);
+            }
+        };
         let options = lingxi_llm_client::RequestOptions {
-            credential: Some(
-                tokio::time::timeout(
-                    timeout.saturating_sub(started.elapsed()),
-                    self.client().service_credential(&profile),
-                )
-                .await
-                .map_err(|_| LlmError::TransportTimeout {
-                    message: "DeepSeek web credential deadline elapsed".into(),
-                })??,
-            ),
+            credential: Some(credential),
             total_timeout: Some(timeout.saturating_sub(started.elapsed())),
             ..Default::default()
         };
-        Ok((client, options))
+        Ok(DeepSeekWebOperation {
+            client,
+            options,
+            source: operation_client,
+            profile,
+            credential_revision,
+            coordinator,
+        })
     }
 
     /// One independent request; retries and turn generation are not involved.
@@ -2512,12 +2597,17 @@ impl ApiService {
         request: &lingxi_llm_client::providers::deepseek::web::DeepSeekSearchRequest,
     ) -> Result<lingxi_llm_client::providers::deepseek::web::DeepSeekSearchResponse, LlmError> {
         request.validate().map_err(crate::upstream::error)?;
-        let (client, options) = self.deepseek_web_client(model, profile).await?;
-        client
+        let mut operation = self
+            .deepseek_web_client(model, profile, "web/search")
+            .await?;
+        let result = operation
+            .client
             .web()
-            .search(request, &options)
+            .search(request, &operation.options)
             .await
-            .map_err(crate::upstream::error)
+            .map_err(crate::upstream::error);
+        operation.settle(&result).await;
+        result
     }
 
     pub async fn deepseek_fetch(
@@ -2527,12 +2617,17 @@ impl ApiService {
         request: &lingxi_llm_client::providers::deepseek::web::DeepSeekFetchRequest,
     ) -> Result<lingxi_llm_client::providers::deepseek::web::DeepSeekFetchResponse, LlmError> {
         request.validate().map_err(crate::upstream::error)?;
-        let (client, options) = self.deepseek_web_client(model, profile).await?;
-        client
+        let mut operation = self
+            .deepseek_web_client(model, profile, "web/fetch")
+            .await?;
+        let result = operation
+            .client
             .web()
-            .fetch(request, &options)
+            .fetch(request, &operation.options)
             .await
-            .map_err(crate::upstream::error)
+            .map_err(crate::upstream::error);
+        operation.settle(&result).await;
+        result
     }
 
     pub fn hosted_search_route(
@@ -2639,6 +2734,7 @@ impl ApiService {
     ) -> Result<HistoryResponse, LlmError> {
         request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        crate::anthropic_extra_body::capture(&mut request)?;
         let sub = self.effective_subscriber();
         let mut control = resolve_retry_control_with_settings(
             &request.input.model,
@@ -2716,6 +2812,14 @@ impl ApiService {
         request.execution.query_source = Some("model_validation".to_owned());
         request.execution.anthropic_request_kind =
             lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        // Validation owns its minimal caller-supplied body. Pin an empty
+        // capture so the common driver cannot inherit session environment.
+        request.execution.anthropic_extra_body = Some(
+            crate::anthropic_extra_body::CapturedAnthropicExtraBody::new(
+                None,
+                request.execution.anthropic_request_kind,
+            )?,
+        );
 
         let mut retry_control = RetryControl {
             primary_model: request.input.model.clone(),
@@ -3478,7 +3582,7 @@ impl ApiService {
         let Some(budget) = context.effective_input_budget else {
             return Ok(());
         };
-        let estimate = crate::model::count_tokens::estimate_input_tokens(request);
+        let estimate = self.client().estimate_input_tokens_for_route(request)?;
         if estimate < budget.saturating_sub(13_000.min(budget / 10)) {
             return Ok(());
         }
@@ -3739,7 +3843,6 @@ impl ApiService {
             effort_table_options: Default::default(),
             session_effort: RwLock::new(Default::default()),
             transport,
-            independent_web_services: OnceLock::new(),
             subscriber,
             subscription: None,
             retry_reporter: None,
@@ -7032,9 +7135,28 @@ impl ApiService {
         Self::native_first_party_endpoint(prepared)
     }
 
-    /// Native `eRe(cc(model))` gate for the model-validation 1m repair. The
-    /// host-captured assumption wins when present; only a service without a
-    /// NativeSystemPrefix snapshot falls back to the process-env dispatch gate.
+    /// Capture a connection before preparation, after account/fallback selection.
+    fn context_1m_route_key(
+        &self,
+        request: &LlmRequest,
+    ) -> Option<crate::thinking_scope::Context1mRouteKey> {
+        let client = self.client();
+        let route = client
+            .resolve_media_route(&request.input.model, request.profile.as_deref())
+            .ok()?
+            .main;
+        let profile =
+            client.prompt_cache_profile(&request.input.model, Some(&route.profile_name))?;
+        Some(crate::thinking_scope::Context1mRouteKey {
+            provider: serde_json::to_string(&route.provider_id).ok()?,
+            profile: route.profile_name,
+            endpoint: profile.base_url.trim_end_matches('/').to_owned(),
+            protocol: profile.protocol,
+            model: native_context_1m_model_key(request),
+        })
+    }
+
+    /// Native `eRe(cc(model))` gate for the model-validation 1m repair.
     fn native_context_1m_resend_allowed(&self, prepared: &crate::PreparedLlmCall) -> bool {
         if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
             return true;
@@ -8323,6 +8445,8 @@ impl ApiService {
         policy: NonStreamDrivePolicy,
     ) -> crate::BoxFuture<'a, Result<HistoryResponse, LlmError>> {
         Box::pin(async move {
+            let mut req = req;
+            crate::anthropic_extra_body::capture(&mut req)?;
             let client = self.client.account_call_snapshot().await?;
             let owner = Arc::as_ptr(&self.client) as usize;
             ACCOUNT_CALL_CLIENT
@@ -8342,15 +8466,16 @@ impl ApiService {
                         } else {
                             None
                         };
-                    let drive =
-                        crate::model::request_trace::non_stream(self.drive_non_stream_inner(
+                    let drive = crate::model::request_trace::non_stream(boxed_model_future(|| {
+                        self.drive_non_stream_inner(
                             req,
                             retry_control,
                             initial_consecutive_overloaded,
                             chain,
                             dispatch,
                             policy,
-                        ));
+                        )
+                    }));
                     if let Some(deadline) = deadline {
                         tokio::time::timeout_at(deadline, scope.run(drive))
                             .await
@@ -8456,7 +8581,6 @@ impl ApiService {
         let context_1m_scope = (policy == NonStreamDrivePolicy::Standard)
             .then(|| req.execution.thinking_recovery_scope.clone())
             .flatten();
-        let context_1m_model_key = native_context_1m_model_key(&req);
         retry_control = retry_scope.configure(&retry_control, &mut state);
         // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
         let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
@@ -8474,7 +8598,8 @@ impl ApiService {
         let mut model_validation_oauth_refreshed = false;
         let mut suppress_context_1m_for_retry = false;
         let mut context_1m_ordinary_retry_attempted = false;
-        let mut context_1m_ordinary_retry_pending = false;
+        let mut context_1m_repair_key: Option<crate::thinking_scope::Context1mRouteKey> = None;
+        let caller_context_1m_suppressed = req.execution.context_1m_beta_suppressed;
         let timeout = match policy {
             NonStreamDrivePolicy::Standard => {
                 Some(match req.execution.classifier_attempt_timeout_ms {
@@ -8525,11 +8650,16 @@ impl ApiService {
             if policy == NonStreamDrivePolicy::Standard {
                 self.apply_native_main_thinking_policy(&mut req)?;
             }
+            let context_1m_attempt_key = self.context_1m_route_key(&req);
             if policy == NonStreamDrivePolicy::Standard {
-                req.execution.context_1m_beta_suppressed |= context_1m_ordinary_retry_pending
+                req.execution.context_1m_beta_suppressed = caller_context_1m_suppressed
+                    || context_1m_repair_key
+                        .as_ref()
+                        .is_some_and(|key| Some(key) == context_1m_attempt_key.as_ref())
                     || context_1m_scope
                         .as_ref()
-                        .is_some_and(|scope| scope.context_1m_refused(&context_1m_model_key));
+                        .zip(context_1m_attempt_key.as_ref())
+                        .is_some_and(|(scope, key)| scope.context_1m_refused_for(key));
             }
             let model_source_units = native_request_model_identity(&req);
             self.strip_cached_foundry_tool_features(&mut req, &model_source_units);
@@ -8542,6 +8672,7 @@ impl ApiService {
                     self.refresh_effort_settings(&mut req)?;
                     req.execution.resolve_native_effort = true;
                 }
+                self.client().bind_context_usage_for_route(&mut req)?;
                 self.ensure_context_fit(&req).await?;
                 let request_client = self.client();
                 let mut prepared = request_client
@@ -8985,6 +9116,9 @@ impl ApiService {
                             provider_resp.clone(),
                             crate::upstream::family(&prepared.route.protocol),
                         )?;
+                        if let Some(prefix) = req.execution.context_usage_prefix.as_ref().filter(|prefix| prefix.matches_prompt(&req)) {
+                            prefix.attach(&mut response.usage)?;
+                        }
                         let budget = prepared_output_budget_observation(&prepared, &req.input);
                         crate::history_projection::attach_output_budget(
                             &mut response.provider_metadata,
@@ -9113,9 +9247,15 @@ impl ApiService {
                             // #5: surface this drive's retry count to the cost
                             // path via `last_retry_count()`.
                             *self.last_retry_count.lock().unwrap() = retry_scope.retry_count();
-                            if context_1m_ordinary_retry_attempted {
-                                if let Some(scope) = context_1m_scope.as_ref() {
-                                    scope.mark_context_1m_refused(&context_1m_model_key);
+                            if context_1m_repair_key
+                                .as_ref()
+                                .is_some_and(|key| Some(key) == context_1m_attempt_key.as_ref())
+                            {
+                                if let Some((scope, key)) = context_1m_scope
+                                    .as_ref()
+                                    .zip(context_1m_attempt_key.clone())
+                                {
+                                    scope.mark_context_1m_refused_for(key);
                                 }
                             }
                             if let Some(coordinator) = account_coordinator.as_mut() {
@@ -9136,7 +9276,7 @@ impl ApiService {
                                 )
                             {
                                 context_1m_ordinary_retry_attempted = true;
-                                context_1m_ordinary_retry_pending = true;
+                                context_1m_repair_key = context_1m_attempt_key.clone();
                                 req.execution.context_1m_beta_suppressed = true;
                                 continue;
                             }
@@ -9879,6 +10019,7 @@ impl ApiService {
             }
         }
         req.set_effort(effort)?;
+        crate::anthropic_extra_body::capture(&mut req)?;
         Ok(req)
     }
 
@@ -9928,6 +10069,7 @@ impl ApiService {
         if query_source.is_some() {
             req.execution.query_source = query_source.map(str::to_string);
         }
+        crate::anthropic_extra_body::capture(&mut req)?;
         Ok(req)
     }
 
@@ -10156,12 +10298,9 @@ impl ApiService {
             false,
             PromptCacheQuerySource::Unspecified,
         )?;
-        crate::model::count_tokens::count_tokens(
-            self.client().as_ref(),
-            self.transport.clone(),
-            &req,
-        )
-        .await
+        self.count_request_with_accounts(req, false)
+            .await
+            .map(|count| count.expect("approximate token count always returns a value"))
     }
 
     /// Return an exact provider token count when the resolved route supports
@@ -10188,12 +10327,89 @@ impl ApiService {
             false,
             PromptCacheQuerySource::Unspecified,
         )?;
-        crate::model::count_tokens::try_count_tokens_exact(
-            self.client().as_ref(),
-            self.transport.clone(),
-            &req,
-        )
-        .await
+        self.count_request_with_accounts(req, true).await
+    }
+
+    async fn count_request_with_accounts(
+        &self,
+        mut request: LlmRequest,
+        exact: bool,
+    ) -> Result<Option<u64>, LlmError> {
+        crate::anthropic_extra_body::capture(&mut request)?;
+        let runtime = self.client.account_call_snapshot().await?;
+        let owner = Arc::as_ptr(&self.client) as usize;
+        ACCOUNT_CALL_CLIENT
+            .scope((owner, runtime), async move {
+                let runtime = self.client();
+                let model = request.input.model.clone();
+                let profile = request.profile.clone();
+                let mut coordinator = None;
+                // Other protocols use a pure approximation/unsupported result and
+                // need no credential or account health mutation.
+                if runtime.protocol_for_model(&model, profile.as_deref())?
+                    == crate::ProtocolFamily::AnthropicMessages
+                {
+                    let route = runtime
+                        .resolve_media_route(&model, profile.as_deref())?
+                        .main;
+                    coordinator = runtime.account_coordinator(&model, profile.as_deref())?;
+                    if let Some(coordinator) = coordinator.as_mut() {
+                        coordinator.retain_supported(|candidate| {
+                            (!route.profile_name.starts_with("account.")
+                                || candidate.profile_name == route.profile_name)
+                                && runtime.account_supports_request(&request, candidate)
+                                && runtime
+                                    .protocol_for_model(&model, Some(&candidate.profile_name))
+                                    .is_ok_and(|protocol| {
+                                        protocol == crate::ProtocolFamily::AnthropicMessages
+                                    })
+                        });
+                        coordinator.map_candidate_models(|_| {
+                            format!("tokens/count/{}", route.request_model)
+                        });
+                        let selected = coordinator.select().await?;
+                        request.input.model = runtime
+                            .resolve_media_route(&model, Some(&selected.profile_name))?
+                            .main
+                            .request_model;
+                        request.profile = Some(selected.profile_name);
+                        request.execution.selected_account = coordinator.active_scope();
+                        request.execution.account_scope = request
+                            .execution
+                            .selected_account
+                            .as_ref()
+                            .map(|scope| serde_json::to_string(scope).expect("account scope"));
+                        request.execution.request_credentials = Some(Default::default());
+                    }
+                }
+                let result = if exact {
+                    crate::model::count_tokens::try_count_tokens_exact(
+                        runtime.as_ref(),
+                        self.transport.clone(),
+                        &request,
+                    )
+                    .await
+                } else {
+                    crate::model::count_tokens::count_tokens(
+                        runtime.as_ref(),
+                        self.transport.clone(),
+                        &request,
+                    )
+                    .await
+                    .map(Some)
+                };
+                if let Some(coordinator) = coordinator.as_mut() {
+                    match &result {
+                        Ok(_) => coordinator.succeeded().await,
+                        Err(error) => {
+                            self.record_pool_failure(&request, coordinator, error, None)
+                                .await?;
+                        }
+                    }
+                }
+                result
+            })
+            .await
     }
 
     /// Count exactly one Read source string on its selected route. This
@@ -10541,6 +10757,8 @@ impl ApiService {
     ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>>
     {
         Box::pin(async move {
+            let mut req = req;
+            crate::anthropic_extra_body::capture(&mut req)?;
             let client = self.client.account_call_snapshot().await?;
             let owner = Arc::as_ptr(&self.client) as usize;
             ACCOUNT_CALL_CLIENT
@@ -10560,7 +10778,9 @@ impl ApiService {
                         } else {
                             None
                         };
-                    let drive = crate::model::request_trace::stream(self.drive_stream_inner(req));
+                    let drive = crate::model::request_trace::stream(boxed_model_future(|| {
+                        self.drive_stream_inner(req)
+                    }));
                     if let Some(deadline) = deadline {
                         let stream = tokio::time::timeout_at(deadline, scope.run(drive))
                             .await
@@ -10672,7 +10892,6 @@ impl ApiService {
         let ctl = retry_scope.configure(&ctl, &mut state);
         let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
         let context_1m_scope = req.execution.thinking_recovery_scope.clone();
-        let context_1m_model_key = native_context_1m_model_key(&req);
         // Connection failover state — see the non-stream drive for why the chain
         // is captured once. The stream connect phase had NO fallback of any kind
         // before this, which is why `routing.fallback` never ran on desktop or
@@ -10686,7 +10905,8 @@ impl ApiService {
         // Native `oSe` is per query, not per HTTP attempt.
         let mut server_fallback_beta_repair_attempted = false;
         let mut context_1m_ordinary_retry_attempted = false;
-        let mut mark_context_1m_latch_on_message_start = false;
+        let mut context_1m_repair_key: Option<crate::thinking_scope::Context1mRouteKey> = None;
+        let caller_context_1m_suppressed = req.execution.context_1m_beta_suppressed;
         // Reset per-query state and classify the actual source independently
         // of stream/body policy: prompt hooks and scheduled streams are auxiliary.
         let mut dispatch =
@@ -10743,14 +10963,21 @@ impl ApiService {
 
             self.clamp_scope_output(&mut req, any_dispatched)?;
             self.apply_native_main_thinking_policy(&mut req)?;
-            req.execution.context_1m_beta_suppressed |= mark_context_1m_latch_on_message_start
+            let context_1m_attempt_key = self.context_1m_route_key(&req);
+            let mark_context_1m_latch_on_message_start = context_1m_repair_key
+                .as_ref()
+                .is_some_and(|key| Some(key) == context_1m_attempt_key.as_ref());
+            req.execution.context_1m_beta_suppressed = caller_context_1m_suppressed
+                || mark_context_1m_latch_on_message_start
                 || context_1m_scope
                     .as_ref()
-                    .is_some_and(|scope| scope.context_1m_refused(&context_1m_model_key));
+                    .zip(context_1m_attempt_key.as_ref())
+                    .is_some_and(|(scope, key)| scope.context_1m_refused_for(key));
             // Prepare so we can inject headers, then call execute_stream via
             // a thin wrapper transport that uses our already-modified request.
             self.refresh_effort_settings(&mut req)?;
             req.execution.resolve_native_effort = true;
+            self.client().bind_context_usage_for_route(&mut req)?;
             self.ensure_context_fit(&req).await?;
             let request_client = self.client();
             let mut prepared = match request_client
@@ -11206,7 +11433,7 @@ impl ApiService {
                             )
                         {
                             context_1m_ordinary_retry_attempted = true;
-                            mark_context_1m_latch_on_message_start = true;
+                            context_1m_repair_key = context_1m_attempt_key.clone();
                             req.execution.context_1m_beta_suppressed = true;
                             continue;
                         }
@@ -11907,9 +12134,14 @@ impl ApiService {
                             ),
                         ),
                         per_turn_effort: self.prepared_per_turn_effort(&prepared),
+                        context_usage_prefix: req
+                            .execution
+                            .context_usage_prefix
+                            .clone()
+                            .filter(|prefix| prefix.matches_prompt(&req)),
                         context_1m_latch: context_1m_scope
                             .clone()
-                            .map(|scope| (scope, context_1m_model_key.clone())),
+                            .zip(context_1m_attempt_key.clone()),
                         mark_context_1m_latch_on_message_start,
                         safety: safety.clone(),
                         attempt,
@@ -11945,6 +12177,17 @@ impl ApiService {
                             let result=async move {
                             loop {
                                 if let Some(mut event) = s.queue.pop_front() {
+                                    let usage = match &mut event {
+                                        HistoryEvent::MessageStart { response } | HistoryEvent::Completed { response } => Some(&mut response.usage),
+                                        HistoryEvent::MessageDelta { usage, .. } => usage.as_mut(),
+                                        _ => None,
+                                    };
+                                    if let Some((prefix, usage)) = s.context_usage_prefix.as_ref().zip(usage) {
+                                        if let Err(error) = prefix.attach(usage) {
+                                            s.finished = true;
+                                            return Some((Err(error), s));
+                                        }
+                                    }
                                     if let HistoryEvent::MessageStart { response }
                                     | HistoryEvent::Completed { response } = &mut event
                                     {
@@ -11965,7 +12208,7 @@ impl ApiService {
                                         if let Some((scope, model_key)) =
                                             s.context_1m_latch.as_ref()
                                         {
-                                            scope.mark_context_1m_refused(model_key);
+                                            scope.mark_context_1m_refused_for(model_key.clone());
                                         }
                                         s.mark_context_1m_latch_on_message_start = false;
                                     }
@@ -12908,7 +13151,8 @@ impl ApiService {
             &mut msgs,
             tool_result_reminder_suffixes,
         );
-        let context_tokens = crate::context_usage::estimate(model, profile, &msgs);
+        let context_measurement = crate::context_usage::measurement(model, profile, &msgs);
+        let context_history = crate::context_usage::HistoryPrefix::new(&msgs);
         let native_system_prefix = self
             .native_system_prefix
             .as_ref()
@@ -13164,6 +13408,8 @@ impl ApiService {
         req.input = input;
         req.execution.request_content_source_ids = request_content_source_ids;
         req.execution.input_protocol = Some(family);
+        req.execution.prompt_projection_profile =
+            self.client().prompt_cache_profile(model, profile);
         req.execution.message_json_string_overrides = overrides;
         crate::computer::apply_request_projection(&mut req)?;
         // No tool-array breakpoint (matches TS baseline).
@@ -13280,8 +13526,14 @@ impl ApiService {
         if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
             req.set_effort(Some(effort))?;
         }
-        req.execution.context_usage_estimate = context_tokens
-            .and_then(|tokens| crate::context_usage::ContextUsageEstimate::bind(&req, tokens));
+        crate::anthropic_extra_body::capture(&mut req)?;
+        req.execution.context_usage_binding = context_history.clone().map(|history| {
+            crate::context_usage::ContextUsageBinding::new(history, context_measurement.clone())
+        });
+        req.execution.context_usage_prefix = context_history
+            .and_then(|history| crate::context_usage::ContextUsagePrefix::new(&req, history));
+        req.execution.context_usage_estimate =
+            context_measurement.and_then(|measurement| measurement.bind(&req));
         Ok(req)
     }
 
@@ -13395,6 +13647,7 @@ impl ApiService {
         req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         self.apply_side_query_thinking(&mut req, &model, Some(thinking), None);
         req.set_effort(effort)?;
+        crate::anthropic_extra_body::capture(&mut req)?;
         Ok(req)
     }
 
@@ -13776,6 +14029,10 @@ fn new_telemetry_id() -> String {
 #[cfg(test)]
 #[path = "service_test.rs"]
 mod service_test;
+
+#[cfg(test)]
+#[path = "service_live_web_tests.rs"]
+mod live_web_tests;
 
 #[cfg(test)]
 #[path = "service_read_token_count_test.rs"]

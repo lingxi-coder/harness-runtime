@@ -84,8 +84,8 @@ impl Serialize for ExecutionUsage {
         let counts = self.counts();
         let mut provider_metadata = source_object_or_native(&self.provider_metadata, true)
             .map_err(ser_source_error::<S::Error>)?;
-        let upstream_state = generated_payload(&self.report.state)
-            .map_err(ser_source_error::<S::Error>)?;
+        let upstream_state =
+            generated_payload(&self.report.state).map_err(ser_source_error::<S::Error>)?;
         provider_metadata = provider_metadata
             .with_object_field("upstreamUsageState", &upstream_state)
             .map_err(ser_source_error::<S::Error>)?;

@@ -3261,7 +3261,10 @@ mod tests {
         transport.frames.pop();
         let mut delta: serde_json::Value =
             serde_json::from_str(transport.frames.last().unwrap()).unwrap();
-        delta["delta"].as_object_mut().unwrap().remove("stop_reason");
+        delta["delta"]
+            .as_object_mut()
+            .unwrap()
+            .remove("stop_reason");
         *transport.frames.last_mut().unwrap() = delta.to_string();
         let client = structured_session_client(Arc::new(transport), None);
         let mut request = req(None);

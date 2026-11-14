@@ -120,14 +120,21 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             let history = session
                 .history
                 .iter()
-                .filter(|message| !session.model_context_excluded_messages.contains(&message.id()))
+                .filter(|message| {
+                    !session
+                        .model_context_excluded_messages
+                        .contains(&message.id())
+                })
                 .collect::<Vec<_>>();
             // Render only the classifier's filtered view while borrowing the
             // current session version, rather than cloning every tool result
             // and assistant body just to discard them in transcript_blocks.
-            let tokens = history.iter().map(|message| {
-                compaction::grouping::estimate_tokens_for_range(std::slice::from_ref(*message))
-            }).sum();
+            let tokens = history
+                .iter()
+                .map(|message| {
+                    compaction::grouping::estimate_tokens_for_range(std::slice::from_ref(*message))
+                })
+                .sum();
             (
                 session.model.clone(),
                 session.model_profile.clone(),
@@ -163,12 +170,7 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             system: classifier_system_snapshot(orch.perms.as_ref(), deny_rules),
             user_configuration,
         };
-        loop_llm::classify(
-            &transport,
-            name,
-            blocks,
-        )
-        .await
+        loop_llm::classify(&transport, name, blocks).await
     }
 
     /// `EZe` — review a finished subagent's hand-back.

@@ -150,10 +150,20 @@ impl From<&ReadFileEntry> for ReadFileMetadata {
     }
 }
 
-/// One LRU slot: the entry plus its recency stamp and cached byte size.
+type FileIdentity = lingxi_core::host::rooted_fs::RootIdentity;
+
+/// Physical identity sampled from the descriptor that supplied a Read snapshot.
+pub type ReadFileIdentity = lingxi_core::host::rooted_fs::RootIdentity;
+
+/// Capture a Read's identity before asynchronous processing or publication.
+pub fn opened_read_file_identity(file: &std::fs::File) -> std::io::Result<ReadFileIdentity> {
+    lingxi_core::host::rooted_fs::opened_file_identity(file)
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Node {
-    entry: ReadFileEntry,
+    entry: Arc<ReadFileEntry>,
     /// Exact JavaScript code units when disk decoding cannot be represented by
     /// Rust text. Ordinary producers leave this absent and use UTF-16 of text.
     content_units: Option<Vec<u16>>,
@@ -163,11 +173,15 @@ struct Node {
     /// pass the live Read-deny check without treating the I/O key as an
     /// alternate authorization route.
     requested_path_groups: Vec<Vec<PathBuf>>,
+    /// Route spellings for the current snapshot, without historical targets.
+    snapshot_requested_paths: Vec<PathBuf>,
     /// Whether this cache slot represents content the model has actually seen.
     /// Host-provided seed snapshots participate in staleness/dedup but must
     /// stay out of model-context consumers such as `/files` and post-compact
     /// restore.
     in_model_context: bool,
+    snapshot_in_model_context: bool,
+    model_file_identity: Option<FileIdentity>,
     /// Monotonic recency stamp; higher = more recently used.
     last_used: u64,
     /// Cached content bytes plus any nonredundant exact UTF-16 sidecar.
@@ -242,7 +256,7 @@ impl ReadFileStateLru {
         let node = self.map.get_mut(path)?;
         self.clock = next;
         node.last_used = next;
-        Some(node.entry.clone())
+        Some((*node.entry).clone())
     }
 
     /// Fetch scalar metadata and promote `path` exactly as [`Self::get`] does,
@@ -252,7 +266,7 @@ impl ReadFileStateLru {
         let node = self.map.get_mut(path)?;
         self.clock = next;
         node.last_used = next;
-        Some(ReadFileMetadata::from(&node.entry))
+        Some(ReadFileMetadata::from(node.entry.as_ref()))
     }
 
     /// Fetch exact cached text without losing unpaired UTF-16 code units.
@@ -269,12 +283,38 @@ impl ReadFileStateLru {
         )
     }
 
+    /// Inspect exact cached text without changing its eviction order.
+    #[must_use]
+    pub fn peek_content_units(&self, path: &Path) -> Option<Vec<u16>> {
+        let node = self.map.get(path)?;
+        Some(
+            node.content_units
+                .clone()
+                .unwrap_or_else(|| node.entry.content.encode_utf16().collect()),
+        )
+    }
+
     /// Record that instruction context exposed only a prefix of this file.
     /// Never infer clipping merely from stripped frontmatter or comments.
     pub fn mark_start_only(&mut self, path: PathBuf) {
         let path = normalized_fence_path(&path);
-        if !self.start_only_paths.contains(&path) {
-            self.start_only_paths.push(path);
+        let aliases = self
+            .map
+            .iter()
+            .filter(|(key, node)| {
+                normalized_fence_path(key) == path
+                    || node
+                        .snapshot_requested_paths
+                        .iter()
+                        .any(|alias| normalized_fence_path(alias) == path)
+            })
+            .flat_map(|(_, node)| node.snapshot_requested_paths.iter().cloned())
+            .collect::<Vec<_>>();
+        for alias in std::iter::once(path).chain(aliases) {
+            let alias = normalized_fence_path(&alias);
+            if !self.start_only_paths.contains(&alias) {
+                self.start_only_paths.push(alias);
+            }
         }
     }
 
@@ -298,7 +338,7 @@ impl ReadFileStateLru {
             .get(path)
             .or_else(|| self.map.get(&normalized_fence_path(path)))
             .is_some_and(|node| {
-                (node.in_model_context || node.entry.seeded_from_context)
+                (node.snapshot_in_model_context || node.entry.seeded_from_context)
                     && entry_covers_full_file(&node.entry)
             })
     }
@@ -322,7 +362,30 @@ impl ReadFileStateLru {
     /// model's back and silently change which entry the LRU evicts next.
     #[must_use]
     pub fn peek(&self, path: &Path) -> Option<ReadFileEntry> {
-        self.map.get(path).map(|n| n.entry.clone())
+        self.map.get(path).map(|n| (*n.entry).clone())
+    }
+
+    /// Retain an immutable content snapshot without copying text or promoting
+    /// recency. Later cache writes cannot change this observation.
+    #[must_use]
+    pub fn peek_snapshot(&self, path: &Path) -> Option<Arc<ReadFileEntry>> {
+        self.map.get(path).map(|node| Arc::clone(&node.entry))
+    }
+
+    /// Capture metadata and its nonredundant exact text under one observation,
+    /// without promoting recency or copying ordinary cached file bodies.
+    /// A later Read may replace this slot; callers must keep these units beside
+    /// this exact Arc rather than fetching the new slot after asynchronous I/O.
+    #[must_use]
+    pub fn peek_snapshot_with_units(
+        &self,
+        path: &Path,
+    ) -> Option<(Arc<ReadFileEntry>, Option<Arc<[u16]>>)> {
+        let node = self.map.get(path)?;
+        Some((
+            Arc::clone(&node.entry),
+            node.content_units.as_deref().map(Arc::from),
+        ))
     }
 
     /// Mark a snapshot stale only if no concurrent Read/Edit/Write replaced
@@ -332,10 +395,10 @@ impl ReadFileStateLru {
         let Some(node) = self.map.get_mut(path) else {
             return false;
         };
-        if node.entry != *expected {
+        if node.entry.as_ref() != expected {
             return false;
         }
-        node.entry.mtime_ms = i64::MIN;
+        Arc::make_mut(&mut node.entry).mtime_ms = i64::MIN;
         true
     }
 
@@ -376,7 +439,9 @@ impl ReadFileStateLru {
     /// tools; their inherited history must not rely on a seeded Read stub.
     pub fn strip_seeded_from_context(&mut self) {
         for node in self.map.values_mut() {
-            node.entry.seeded_from_context = false;
+            if node.entry.seeded_from_context {
+                Arc::make_mut(&mut node.entry).seeded_from_context = false;
+            }
         }
     }
 
@@ -449,6 +514,25 @@ impl ReadFileStateLru {
         new_requested_paths: Vec<PathBuf>,
         content_units: Option<Vec<u16>>,
     ) {
+        self.set_with_requested_aliases_units_and_identity(
+            path,
+            entry,
+            in_model_context,
+            new_requested_paths,
+            content_units,
+            None,
+        );
+    }
+
+    fn set_with_requested_aliases_units_and_identity(
+        &mut self,
+        path: PathBuf,
+        entry: ReadFileEntry,
+        in_model_context: bool,
+        new_requested_paths: Vec<PathBuf>,
+        content_units: Option<Vec<u16>>,
+        opened_identity: Option<FileIdentity>,
+    ) {
         let content_units =
             content_units.filter(|units| entry.content.encode_utf16().ne(units.iter().copied()));
         // The canonical cache key may be reached through more than one model
@@ -476,14 +560,38 @@ impl ReadFileStateLru {
             .max(1);
         self.clock += 1;
         let last_used = self.clock;
+        // Only the I/O producer can bind snapshot bytes to a physical file.
+        // Generic seeds and replayed metadata must not authorize a target that
+        // replaced the original file before this publication boundary.
+        let model_file_identity = (in_model_context || entry.seeded_from_context)
+            .then_some(opened_identity)
+            .flatten();
+        if self.start_only_paths.iter().any(|marked| {
+            *marked == normalized_fence_path(&path)
+                || route
+                    .iter()
+                    .any(|alias| normalized_fence_path(alias) == *marked)
+        }) {
+            for alias in &route {
+                let alias = normalized_fence_path(alias);
+                if !self.start_only_paths.contains(&alias) {
+                    self.start_only_paths.push(alias);
+                }
+            }
+        }
+        let entry = Arc::new(entry);
         match self.map.entry(path) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
                 let node = slot.get_mut();
+                node.snapshot_requested_paths = route.clone();
                 if !route.is_empty() && !node.requested_path_groups.contains(&route) {
                     node.requested_path_groups.push(route);
                 }
-                // A non-model seed cannot erase an earlier model-visible route.
+                // Visibility authorizes this snapshot, not all future content
+                // inserted under its path. Route history is retained separately.
                 node.in_model_context |= in_model_context;
+                node.snapshot_in_model_context = in_model_context;
+                node.model_file_identity = model_file_identity;
                 self.total_bytes = self.total_bytes.saturating_sub(node.size);
                 node.entry = entry;
                 node.content_units = content_units;
@@ -494,12 +602,15 @@ impl ReadFileStateLru {
                 slot.insert(Node {
                     entry,
                     content_units,
+                    snapshot_requested_paths: route.clone(),
                     requested_path_groups: if route.is_empty() {
                         Vec::new()
                     } else {
                         vec![route]
                     },
                     in_model_context,
+                    snapshot_in_model_context: in_model_context,
+                    model_file_identity,
                     last_used,
                     size,
                 });
@@ -515,7 +626,7 @@ impl ReadFileStateLru {
     pub fn remove(&mut self, path: &Path) -> Option<ReadFileEntry> {
         let node = self.map.remove(path)?;
         self.total_bytes = self.total_bytes.saturating_sub(node.size);
-        Some(node.entry)
+        Some(Arc::unwrap_or_clone(node.entry))
     }
 
     /// Drop LRU entries while over budget. Never evicts the last remaining entry
@@ -547,7 +658,9 @@ impl ReadFileStateLru {
     pub fn drain(&mut self) -> impl Iterator<Item = (PathBuf, ReadFileEntry)> + '_ {
         self.total_bytes = 0;
         self.clock = 0;
-        self.map.drain().map(|(k, node)| (k, node.entry))
+        self.map
+            .drain()
+            .map(|(k, node)| (k, Arc::unwrap_or_clone(node.entry)))
     }
 
     /// Every cached path in most-recently-used → least-recently-used order
@@ -598,7 +711,7 @@ impl ReadFileStateLru {
         for path in model_paths {
             if let Some(node) = self.map.remove(&path) {
                 self.total_bytes = self.total_bytes.saturating_sub(node.size);
-                drained.push((path, node.entry));
+                drained.push((path, Arc::unwrap_or_clone(node.entry)));
             }
         }
         if self.map.is_empty() {
@@ -643,6 +756,41 @@ pub(crate) struct MemoryForkReadState {
 
 tokio::task_local! {
     static MEMORY_FORK_READ_STATE: Arc<MemoryForkReadState>;
+    static REMINDER_READ_TARGET: (PathBuf, PathBuf);
+}
+
+/// Bind an internal changed-file Read to the route whose policy was checked.
+/// The binding is request-only and is restored on cancellation or nesting.
+pub async fn with_reminder_read_target<T>(
+    requested: PathBuf,
+    approved: PathBuf,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    REMINDER_READ_TARGET
+        .scope((requested, approved), future)
+        .await
+}
+
+/// An internal Read tried to use a request other than the one policy approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReminderReadTargetMismatch;
+
+/// Current physical target for the exact, unmodified `file_path` input.
+///
+/// Read checks this before path normalization. A scoped request mismatch must
+/// fail closed rather than look like an ordinary, unbound explicit Read.
+pub fn reminder_read_target(
+    requested: &Path,
+) -> Result<Option<PathBuf>, ReminderReadTargetMismatch> {
+    REMINDER_READ_TARGET
+        .try_with(|(route, target)| {
+            if route.as_os_str() == requested.as_os_str() {
+                Ok(Some(target.clone()))
+            } else {
+                Err(ReminderReadTargetMismatch)
+            }
+        })
+        .unwrap_or(Ok(None))
 }
 
 impl MemoryForkReadState {
@@ -814,28 +962,50 @@ impl ReadFileStateWriteContext {
         requested_paths: Vec<PathBuf>,
         content_units: Option<Vec<u16>>,
     ) {
+        self.set_after_write_with_identity(
+            path,
+            entry,
+            in_model_context,
+            requested_paths,
+            content_units,
+            None,
+        );
+    }
+
+    /// Publish mutation bytes with the identity from the successful write handle.
+    pub fn set_after_write_with_identity(
+        &self,
+        path: PathBuf,
+        entry: ReadFileEntry,
+        in_model_context: bool,
+        requested_paths: Vec<PathBuf>,
+        content_units: Option<Vec<u16>>,
+        identity: Option<ReadFileIdentity>,
+    ) {
         if let Some(fork) = &self.memory_fork {
             self.map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_with_requested_aliases_and_units(
+                .set_with_requested_aliases_units_and_identity(
                     path.clone(),
                     entry.clone(),
                     in_model_context,
                     requested_paths,
                     content_units.clone(),
+                    identity,
                 );
             fork.invalidate_parent_write(&path, &entry, content_units.as_deref());
         } else {
             self.map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_with_requested_aliases_and_units(
+                .set_with_requested_aliases_units_and_identity(
                     path,
                     entry,
                     in_model_context,
                     requested_paths,
                     content_units,
+                    identity,
                 );
         }
     }
@@ -960,6 +1130,29 @@ pub fn set_with_requested_aliases_and_units(
             in_model_context,
             requested_paths,
             content_units,
+        );
+    }
+}
+
+/// Publish a model-visible Read with the identity of its actual opened source.
+/// An unavailable identity stays unavailable; the current pathname must never
+/// grant an exemption to bytes read from an earlier target.
+pub fn set_from_opened_file(
+    map: &ReadFileStateMap,
+    path: PathBuf,
+    entry: ReadFileEntry,
+    requested_paths: Vec<PathBuf>,
+    content_units: Option<Vec<u16>>,
+    identity: Option<ReadFileIdentity>,
+) {
+    if let Ok(mut guard) = active_map(map).lock() {
+        guard.set_with_requested_aliases_units_and_identity(
+            path,
+            entry,
+            true,
+            requested_paths,
+            content_units,
+            identity,
         );
     }
 }
@@ -1111,22 +1304,31 @@ pub fn start_only_write_guard(
     observed_path: &Path,
     io_path: &Path,
 ) -> Option<StartOnlyWriteBlock> {
-    let (marked, direct) = {
+    let (marked, direct, observed_identity) = {
         let map = active_map(map);
         let state = map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.has_full_model_view(observed_path) {
-            return None;
-        }
-        let direct = state.holds_only_start_of(observed_path) || state.holds_only_start_of(io_path);
+        let full_identity = |path: &Path| {
+            state
+                .map
+                .get(path)
+                .or_else(|| state.map.get(&normalized_fence_path(path)))
+                .filter(|_| state.has_full_model_view(path))
+                .and_then(|node| node.model_file_identity.clone())
+        };
+        let observed = normalized_fence_path(observed_path);
+        let io = normalized_fence_path(io_path);
+        let direct = state
+            .start_only_paths
+            .iter()
+            .any(|path| *path == observed || *path == io);
         let marked = state
             .start_only_paths
             .iter()
-            .filter(|path| !state.has_full_model_view(path))
-            .cloned()
+            .map(|path| (path.clone(), full_identity(path)))
             .collect::<Vec<_>>();
-        (marked, direct)
+        (marked, direct, full_identity(observed_path))
     };
     if marked.is_empty() {
         return None;
@@ -1142,25 +1344,37 @@ pub fn start_only_write_guard(
             })
         }
     };
-    if direct {
-        return Some(StartOnlyWriteBlock::Direct);
+    if observed_identity.as_ref() == Some(&candidate) {
+        return None;
     }
     let mut unknown = false;
-    for path in marked {
+    for (path, full_identity) in marked {
         match file_object_identity(&path) {
-            Ok(Some(identity)) if identity == candidate => return Some(StartOnlyWriteBlock::Alias),
+            Ok(Some(identity)) if full_identity.as_ref() == Some(&identity) => {}
+            Ok(Some(identity)) if identity == candidate => {
+                return Some(if direct {
+                    StartOnlyWriteBlock::Direct
+                } else {
+                    StartOnlyWriteBlock::Alias
+                })
+            }
             Ok(_) => {}
             Err(_) => unknown = true,
         }
+    }
+    if direct {
+        return Some(StartOnlyWriteBlock::Direct);
     }
     unknown.then_some(StartOnlyWriteBlock::UnknownIdentity)
 }
 
 #[cfg(unix)]
-fn file_object_identity(path: &Path) -> std::io::Result<Option<(u64, u64)>> {
+fn file_object_identity(path: &Path) -> std::io::Result<Option<FileIdentity>> {
     use std::os::unix::fs::MetadataExt;
     match std::fs::metadata(path) {
-        Ok(metadata) if metadata.ino() != 0 => Ok(Some((metadata.dev(), metadata.ino()))),
+        Ok(metadata) if metadata.ino() != 0 => Ok(Some(
+            lingxi_core::host::rooted_fs::metadata_file_identity(&metadata),
+        )),
         Ok(_) => Err(std::io::Error::other("file identity is unavailable")),
         Err(error)
             if matches!(
@@ -1203,7 +1417,7 @@ fn file_object_identity(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn file_object_identity(_path: &Path) -> std::io::Result<Option<()>> {
+fn file_object_identity(_path: &Path) -> std::io::Result<Option<FileIdentity>> {
     Err(std::io::Error::other("file identity is unavailable"))
 }
 
@@ -1211,6 +1425,45 @@ fn file_object_identity(_path: &Path) -> std::io::Result<Option<()>> {
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn reminder_binding_keeps_raw_request_identity_and_restores_nested_scopes() {
+        let raw = PathBuf::from("/workspace/source.txt ");
+        let normalized = PathBuf::from("/workspace/source.txt");
+        let approved = PathBuf::from("/workspace/approved.txt");
+        assert_eq!(reminder_read_target(&raw), Ok(None));
+        with_reminder_read_target(raw.clone(), approved.clone(), async {
+            assert_eq!(reminder_read_target(&raw), Ok(Some(approved.clone())));
+            assert_eq!(
+                reminder_read_target(&normalized),
+                Err(ReminderReadTargetMismatch)
+            );
+            with_reminder_read_target(normalized.clone(), normalized.clone(), async {
+                assert_eq!(
+                    reminder_read_target(&normalized),
+                    Ok(Some(normalized.clone()))
+                );
+                assert_eq!(reminder_read_target(&raw), Err(ReminderReadTargetMismatch));
+            })
+            .await;
+            assert_eq!(reminder_read_target(&raw), Ok(Some(approved.clone())));
+        })
+        .await;
+        assert_eq!(reminder_read_target(&raw), Ok(None));
+
+        // Dropping a suspended internal call must not bind the next explicit Read.
+        let mut pending = Box::pin(with_reminder_read_target(raw.clone(), approved, async {
+            assert!(reminder_read_target(&raw).unwrap().is_some());
+            std::future::pending::<()>().await;
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(pending.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(pending);
+        assert_eq!(reminder_read_target(&raw), Ok(None));
+    }
 
     fn entry(content: &str) -> ReadFileEntry {
         ReadFileEntry {
@@ -1222,6 +1475,219 @@ mod tests {
             seeded_from_context: false,
             is_partial_view: false,
         }
+    }
+
+    fn record_full_read(
+        map: &ReadFileStateMap,
+        path: PathBuf,
+        content: &str,
+        aliases: Vec<PathBuf>,
+    ) {
+        let mut file = std::fs::File::open(aliases.last().unwrap_or(&path)).unwrap();
+        let mut actual = String::new();
+        std::io::Read::read_to_string(&mut file, &mut actual).unwrap();
+        assert_eq!(actual, content);
+        let identity = opened_read_file_identity(&file).unwrap();
+        set_from_opened_file(map, path, entry(content), aliases, None, Some(identity));
+    }
+
+    #[test]
+    fn generic_snapshots_do_not_grant_current_path_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, "unseen suffix").unwrap();
+        let map = new_read_file_state_map();
+        mark_start_only(&map, path.clone());
+        set(&map, path.clone(), entry("old full snapshot"));
+        assert_eq!(
+            start_only_write_guard(&map, &path, &path),
+            Some(StartOnlyWriteBlock::Direct)
+        );
+        set_from_opened_file(
+            &map,
+            path.clone(),
+            entry("unseen suffix"),
+            vec![path.clone()],
+            None,
+            None,
+        );
+        assert_eq!(
+            start_only_write_guard(&map, &path, &path),
+            Some(StartOnlyWriteBlock::Direct)
+        );
+    }
+
+    #[test]
+    fn translated_partial_read_keeps_host_alias_fenced_after_a_host_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("file");
+        let guest = PathBuf::from("/virtual/file");
+        std::fs::write(&host, "prefix and unseen suffix").unwrap();
+        let map = new_read_file_state_map();
+        mark_start_only(&map, guest.clone());
+        let identity = opened_read_file_identity(&std::fs::File::open(&host).unwrap()).unwrap();
+        set_from_opened_file(
+            &map,
+            guest.clone(),
+            ReadFileEntry {
+                is_partial_view: true,
+                ..entry("prefix")
+            },
+            vec![guest.clone(), host.clone()],
+            None,
+            Some(identity),
+        );
+        set_with_model_context(&map, host.clone(), entry("prefix and unseen suffix"), false);
+        assert_eq!(
+            start_only_write_guard(&map, &host, &host),
+            Some(StartOnlyWriteBlock::Direct)
+        );
+        map.lock().unwrap().drain().for_each(drop);
+        assert_eq!(
+            start_only_write_guard(&map, &host, &host),
+            Some(StartOnlyWriteBlock::Direct)
+        );
+        record_full_read(
+            &map,
+            guest.clone(),
+            "prefix and unseen suffix",
+            vec![guest.clone(), host.clone()],
+        );
+        assert_eq!(start_only_write_guard(&map, &guest, &host), None);
+    }
+
+    #[test]
+    fn full_guest_read_uses_its_translated_io_identity_to_satisfy_the_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let host = root.path().join("file");
+        std::fs::write(&host, "whole").unwrap();
+        let guest = PathBuf::from(format!(
+            "/virtual-guest-{}/file",
+            root.path().file_name().unwrap().to_string_lossy()
+        ));
+        let map = new_read_file_state_map();
+        mark_start_only(&map, guest.clone());
+        assert_eq!(
+            start_only_write_guard(&map, &guest, &host),
+            Some(StartOnlyWriteBlock::Direct)
+        );
+        record_full_read(
+            &map,
+            guest.clone(),
+            "whole",
+            vec![guest.clone(), host.clone()],
+        );
+        assert_eq!(start_only_write_guard(&map, &guest, &host), None);
+    }
+
+    #[test]
+    fn host_refresh_cannot_promote_a_partial_model_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, "prefix and unseen suffix").unwrap();
+        let map = new_read_file_state_map();
+        set(
+            &map,
+            path.clone(),
+            ReadFileEntry {
+                limit: Some(1),
+                ..entry("prefix")
+            },
+        );
+        mark_start_only(&map, path.clone());
+        set_with_model_context(&map, path.clone(), entry("prefix and unseen suffix"), false);
+        assert_eq!(
+            start_only_write_guard(&map, &path, &path),
+            Some(StartOnlyWriteBlock::Direct)
+        );
+        assert_eq!(
+            map.lock().unwrap().requested_path_groups(&path),
+            vec![vec![path.clone()]]
+        );
+        record_full_read(
+            &map,
+            path.clone(),
+            "prefix and unseen suffix",
+            vec![path.clone()],
+        );
+        assert_eq!(start_only_write_guard(&map, &path, &path), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_view_does_not_authorize_a_retargeted_hardlink_or_directory_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = dir.path().join("full");
+        let clipped = dir.path().join("clipped");
+        let route = dir.path().join("route");
+        std::fs::write(&full, "full").unwrap();
+        std::fs::write(&clipped, "prefix suffix").unwrap();
+        std::fs::hard_link(&full, &route).unwrap();
+        let map = new_read_file_state_map();
+        record_full_read(&map, route.clone(), "full", vec![route.clone()]);
+        mark_start_only(&map, clipped.clone());
+        std::fs::remove_file(&route).unwrap();
+        std::fs::hard_link(&clipped, &route).unwrap();
+        assert_eq!(
+            start_only_write_guard(&map, &route, &route),
+            Some(StartOnlyWriteBlock::Alias)
+        );
+        assert_eq!(std::fs::read_to_string(&clipped).unwrap(), "prefix suffix");
+        record_full_read(&map, route.clone(), "prefix suffix", vec![route.clone()]);
+        assert_eq!(start_only_write_guard(&map, &route, &route), None);
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(a.join("x"), "A").unwrap();
+        std::fs::write(b.join("x"), "B suffix").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let route = link.join("x");
+        record_full_read(&map, route.clone(), "A", vec![route.clone()]);
+        mark_start_only(&map, b.join("x"));
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&b, &link).unwrap();
+        assert_eq!(
+            start_only_write_guard(&map, &route, &route),
+            Some(StartOnlyWriteBlock::Alias)
+        );
+    }
+
+    #[test]
+    fn shared_snapshots_preserve_content_recency_and_copy_on_write() {
+        let path = PathBuf::from("/project/a");
+        let mut cache = ReadFileStateLru::with_limits(2, 1024);
+        cache.set(
+            path.clone(),
+            ReadFileEntry {
+                seeded_from_context: true,
+                ..entry("original")
+            },
+        );
+        cache.set(PathBuf::from("/project/b"), entry("other"));
+        let order = cache.keys();
+        let snapshot = cache.peek_snapshot(&path).unwrap();
+        assert!(Arc::ptr_eq(&snapshot, &cache.peek_snapshot(&path).unwrap()));
+        assert_eq!(cache.keys(), order, "snapshot lookup must not promote LRU");
+        let mut fork = cache.clone();
+        fork.strip_seeded_from_context();
+        assert!(snapshot.seeded_from_context);
+        assert!(cache.peek_snapshot(&path).unwrap().seeded_from_context);
+        assert!(!fork.peek_snapshot(&path).unwrap().seeded_from_context);
+        assert!(cache.mark_stale_if_unchanged(&path, &snapshot));
+        assert_eq!(
+            snapshot.mtime_ms, 1,
+            "metadata changes cannot mutate snapshots"
+        );
+        assert_eq!(cache.peek_snapshot(&path).unwrap().mtime_ms, i64::MIN);
+        cache.set(path.clone(), entry("updated"));
+        assert_eq!(snapshot.content, "original");
+        assert_eq!(cache.remove(&path).unwrap().content, "updated");
+        assert_eq!(
+            snapshot.content, "original",
+            "removal cannot invalidate a snapshot"
+        );
     }
 
     #[test]
@@ -1328,7 +1794,12 @@ mod tests {
             None,
             "new-file creation cannot overwrite a hidden suffix"
         );
-        set(&map, alias.clone(), entry("prefix\nhidden tail"));
+        record_full_read(
+            &map,
+            alias.clone(),
+            "prefix\nhidden tail",
+            vec![alias.clone()],
+        );
         assert_eq!(
             start_only_write_guard(&map, &alias, &alias),
             None,
@@ -1972,6 +2443,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_snapshot_peeks_preserve_recency_and_the_next_eviction() {
+        let map = new_read_file_state_map_with_limits(3, u64::MAX);
+        for name in ["/A", "/B", "/C"] {
+            set(&map, PathBuf::from(name), entry(name));
+        }
+        {
+            let cache = map.lock().unwrap();
+            let before = cache.keys();
+            for path in &before {
+                assert_eq!(
+                    cache.peek_content_units(path).unwrap(),
+                    cache
+                        .peek(path)
+                        .unwrap()
+                        .content
+                        .encode_utf16()
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(cache.keys(), before);
+        }
+        set(&map, PathBuf::from("/D"), entry("d"));
+        let cache = map.lock().unwrap();
+        assert!(cache.peek(Path::new("/A")).is_none());
+        assert!(cache.peek(Path::new("/C")).is_some());
+    }
+
+    #[test]
     fn overwrite_updates_byte_total_not_count() {
         // Overwriting a key subtracts the old size, not double-counts: set P=10B
         // then P=3B → 1 entry, total_bytes = 3.
@@ -2227,5 +2726,53 @@ mod tests {
         assert_eq!(guard.keys(), vec![PathBuf::from("/seed")]);
         assert_eq!(guard.model_context_keys(), Vec::<PathBuf>::new());
         assert_eq!(guard.total_bytes(), 4);
+    }
+
+    #[test]
+    fn exact_snapshot_keeps_its_original_units_and_eviction_order() {
+        let map = new_read_file_state_map();
+        let path = PathBuf::from("/exact");
+        set_with_requested_aliases_and_units(
+            &map,
+            path.clone(),
+            entry("\u{fffd}"),
+            true,
+            vec![],
+            Some(vec![0xd800]),
+        );
+        set(&map, PathBuf::from("/ordinary"), entry("ordinary"));
+        let (snapshot, units) = {
+            let state = map.lock().unwrap();
+            let order = state.keys();
+            let capture = state.peek_snapshot_with_units(&path).unwrap();
+            assert!(Arc::ptr_eq(
+                &capture.0,
+                &state.peek_snapshot(&path).unwrap()
+            ));
+            assert!(state
+                .peek_snapshot_with_units(Path::new("/ordinary"))
+                .unwrap()
+                .1
+                .is_none());
+            assert_eq!(
+                state.keys(),
+                order,
+                "a scan must not promote either observation"
+            );
+            capture
+        };
+        set_with_requested_aliases_and_units(
+            &map,
+            path.clone(),
+            entry("\u{fffd}"),
+            true,
+            vec![],
+            Some(vec![0xdc00]),
+        );
+        assert_eq!(units.as_deref(), Some(&[0xd800][..]));
+        let state = map.lock().unwrap();
+        let (current, current_units) = state.peek_snapshot_with_units(&path).unwrap();
+        assert!(!Arc::ptr_eq(&snapshot, &current));
+        assert_eq!(current_units.as_deref(), Some(&[0xdc00][..]));
     }
 }

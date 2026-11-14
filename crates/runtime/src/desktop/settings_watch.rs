@@ -385,6 +385,9 @@ pub(super) struct ManagedPolicyReadDiagnostic {
 /// carrier used by consumers.
 #[derive(Debug, Clone)]
 pub(super) struct ManagedSettingsSnapshot {
+    /// Assigned by the owning cache on every publication, including changes
+    /// to reader diagnostics that are outside the Native selection.
+    publication_revision: u64,
     pub selection: NativePolicySelection,
     pub file_reads: Vec<ManagedPolicyFileRead>,
     pub drop_in_directory_state: NativePolicyLoadState,
@@ -397,6 +400,8 @@ pub(super) struct ManagedSettingsSnapshot {
 /// loaded snapshot whose effective policy is absent.
 #[derive(Clone)]
 pub(super) struct ManagedPolicySnapshotCache {
+    mutation: Arc<std::sync::Mutex<()>>,
+    publication_revision: Arc<std::sync::atomic::AtomicU64>,
     state: Arc<std::sync::RwLock<ManagedPolicySnapshotState>>,
     initializer: Arc<tokio::sync::Mutex<()>>,
     helper_output: Arc<std::sync::RwLock<Option<AppliedNativePolicyHelperOutput>>>,
@@ -408,6 +413,8 @@ pub(super) struct ManagedPolicySnapshotCache {
 impl Default for ManagedPolicySnapshotCache {
     fn default() -> Self {
         Self {
+            mutation: Arc::new(std::sync::Mutex::new(())),
+            publication_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             state: Arc::new(std::sync::RwLock::new(
                 ManagedPolicySnapshotState::Uninitialized,
             )),
@@ -477,13 +484,56 @@ impl ManagedPolicySnapshotCache {
     }
 
     pub fn replace(&self, snapshot: ManagedSettingsSnapshot) {
-        self.clear_helper_failure_for_other_source(snapshot.selection.selected_admin);
-        let snapshot = self.reapply_current_helper(snapshot);
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.replace_locked(snapshot);
+    }
+
+    fn publish_locked(&self, mut snapshot: ManagedSettingsSnapshot) -> ManagedSettingsSnapshot {
+        snapshot.publication_revision = self
+            .publication_revision
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |revision| revision.checked_add(1),
+            )
+            .expect("managed policy publication revision exhausted")
+            + 1;
         *self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            ManagedPolicySnapshotState::Loaded(snapshot);
+            ManagedPolicySnapshotState::Loaded(snapshot.clone());
+        snapshot
+    }
+
+    fn replace_locked(&self, snapshot: ManagedSettingsSnapshot) {
+        self.clear_helper_failure_for_other_source(snapshot.selection.selected_admin);
+        let snapshot = self.reapply_current_helper(snapshot);
+        self.publish_locked(snapshot);
+    }
+
+    /// Publish asynchronous validation only if its exact source snapshot is
+    /// still current. A same-source watcher edit is also a conflicting write.
+    pub fn replace_if_current(
+        &self,
+        expected: &ManagedSettingsSnapshot,
+        updated: ManagedSettingsSnapshot,
+    ) -> bool {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.snapshot().is_none_or(|current| {
+            current.publication_revision != expected.publication_revision
+                || current.selection != expected.selection
+        }) {
+            return false;
+        }
+        self.replace_locked(updated);
+        true
     }
 
     /// Replace a watcher snapshot and report the source-origin transition that
@@ -492,6 +542,10 @@ impl ManagedPolicySnapshotCache {
         &self,
         snapshot: ManagedSettingsSnapshot,
     ) -> (ManagedSettingsSnapshot, bool) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_snapshot = self.snapshot();
         let previous_source = previous_snapshot
             .as_ref()
@@ -512,12 +566,7 @@ impl ManagedPolicySnapshotCache {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         }
-        let snapshot = self.reapply_current_helper(snapshot);
-        *self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            ManagedPolicySnapshotState::Loaded(snapshot.clone());
+        let snapshot = self.publish_locked(self.reapply_current_helper(snapshot));
         (snapshot, source_changed)
     }
 
@@ -601,6 +650,10 @@ impl ManagedPolicySnapshotCache {
         input: NativePolicyHelperSettingsInput,
         output: Option<NativePolicyHelperOutput>,
     ) -> Result<ManagedSettingsSnapshot, NativePolicyHelperApplyStatus> {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut snapshot = self
             .snapshot()
             .ok_or(NativePolicyHelperApplyStatus::SourceMismatch)?;
@@ -622,8 +675,10 @@ impl ManagedPolicySnapshotCache {
                         input,
                         output,
                     });
-                self.replace(snapshot.clone());
-                Ok(snapshot)
+                self.replace_locked(snapshot.clone());
+                Ok(self
+                    .snapshot()
+                    .expect("helper publication initialized the cache"))
             }
             status => Err(status),
         }
@@ -776,8 +831,8 @@ pub(super) async fn managed_settings_snapshot_for_cache(
         return snapshot;
     }
     let snapshot = managed_settings_snapshot().await;
-    cache.replace(snapshot.clone());
-    snapshot
+    cache.replace(snapshot);
+    cache.snapshot().expect("managed policy cache initialized")
 }
 
 pub(super) async fn refresh_managed_settings_snapshot_cache(
@@ -1251,6 +1306,7 @@ fn select_managed_policy(
     }
 
     ManagedSettingsSnapshot {
+        publication_revision: 0,
         selection,
         file_reads,
         drop_in_directory_state,
@@ -1987,6 +2043,74 @@ mod tests {
     use super::*;
     use lingxi_core::host::FileEventKind;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn helper_validation_cannot_replace_a_newer_same_source_policy() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("managed-settings.json"),
+            r#"{"disableAutoMode":"disable"}"#,
+        )
+        .unwrap();
+        let old = read_managed_settings_snapshot(root.path()).await;
+        let cache = ManagedPolicySnapshotCache::default();
+        cache.replace(old);
+        let old = cache.snapshot().unwrap();
+        std::fs::write(
+            root.path().join("managed-settings.json"),
+            r#"{"disableAutoMode":"disable","permissions":{"deny":["Bash(curl:*)"]}}"#,
+        )
+        .unwrap();
+        let new = read_managed_settings_snapshot(root.path()).await;
+        assert_eq!(old.selection.selected_admin, new.selection.selected_admin);
+        assert_ne!(old.selection, new.selection);
+        let (new, _) = cache.replace_from_watch(new);
+        assert!(!cache.replace_if_current(&old, old.clone()));
+        assert_eq!(cache.snapshot().unwrap().selection, new.selection);
+        assert!(cache.replace_if_current(&new, new.clone()));
+    }
+
+    #[tokio::test]
+    async fn paused_helper_validation_cannot_erase_same_selection_read_failure() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("managed-settings.json"),
+            r#"{"disableAutoMode":"disable"}"#,
+        )
+        .unwrap();
+        let cache = ManagedPolicySnapshotCache::default();
+        cache.replace(read_managed_settings_snapshot(root.path()).await);
+        let expected = cache.snapshot().unwrap();
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let helper = tokio::spawn({
+            let cache = cache.clone();
+            let gate = gate.clone();
+            let expected = expected.clone();
+            async move {
+                gate.wait().await;
+                gate.wait().await;
+                cache.replace_if_current(&expected, expected.clone())
+            }
+        });
+        gate.wait().await;
+        let mut incomplete = expected.clone();
+        incomplete.drop_in_directory_state = NativePolicyLoadState::DidNotLoad;
+        incomplete
+            .read_diagnostics
+            .push(ManagedPolicyReadDiagnostic {
+                path: root.path().join("managed-settings.d"),
+                message: "injected directory read failure".into(),
+            });
+        let (incomplete, _) = cache.replace_from_watch(incomplete);
+        assert_eq!(incomplete.selection, expected.selection);
+        assert!(incomplete.publication_revision > expected.publication_revision);
+        gate.wait().await;
+        assert!(!helper.await.unwrap());
+        let current = cache.snapshot().unwrap();
+        assert!(current.read_failed());
+        assert_eq!(current.read_diagnostics, incomplete.read_diagnostics);
+        assert!(cache.replace_if_current(&current, current.clone()));
+    }
 
     #[tokio::test]
     async fn managed_policy_cache_distinguishes_uninitialized_from_loaded_absence_and_refreshes_clones(

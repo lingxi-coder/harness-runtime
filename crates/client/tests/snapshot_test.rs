@@ -28,6 +28,10 @@
 //! BLESS=1 cargo test -p client --test snapshot_test
 //! ```
 //!
+//! To generate only the Decision extension's four goldens, use the
+//! `decision_variants_match_goldens` test filter. The full variant-coverage
+//! and golden checks remain required after generation.
+//!
 //! The "red" at F1-08 is that NO goldens exist yet, so every case fails with a
 //! missing-file error; `BLESS=1` generates them, the goldens are reviewed, and a
 //! plain run goes green. Any later structural drift (a renamed tag, a retyped
@@ -161,10 +165,28 @@ where
 // Canonical instances — ONE per variant, with stable field values.
 // ─────────────────────────────────────────────────────────────────────────────
 
+const DECISION_REQUEST_ID: &str = "00000000-0000-4000-8000-000000000071";
+const DECISION_INPUT_JSON: &str = r#"{"state":{"text":"检查 \"quoted\" evidence\n你好😀"},"questions":{"supported":{"type":"binary","instructions":"Does the evidence support the change?"}}}"#;
+const DECISION_RESULT_JSON: &str = r#"{"result":{"state_revision":0,"answers":{"supported":{"type":"binary","probability":0.8}},"usage":{"input_tokens":24,"output_tokens":null},"actual_model":null,"elapsed_ms":12}}"#;
+
 /// Every `ClientEvent` variant, paired with its golden filename.
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        (
+            "event/decision_request.json",
+            ClientEvent::DecisionRequest {
+                request_id: DECISION_REQUEST_ID.into(),
+                input_json: DECISION_INPUT_JSON.into(),
+                timeout_ms: 1_000,
+            },
+        ),
+        (
+            "event/decision_cancel.json",
+            ClientEvent::DecisionCancel {
+                request_id: DECISION_REQUEST_ID.into(),
+            },
+        ),
         ("event/provider_accounts_updated.json", ClientEvent::ProviderAccountsUpdated {operation_id: 7, snapshot_json: "{}".into(), error: None}),
         ("event/provider_account_routing.json", ClientEvent::ProviderAccountRouting {event_json: "{}".into()}),
         ("event/provider_account_refresh_requested.json", ClientEvent::ProviderAccountRefreshRequested {account_id: "account-a".into(), identity_generation: 2, credential_revision: 3}),
@@ -546,6 +568,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 messages: vec![
                     MessageDto {
                         transcript_uuid: None,
+                        skill_name: None,
                         sent_at_ms: None,
                         loop_wakeup: None,
                         visualization_context: None,
@@ -1357,6 +1380,17 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        (
+            "command/decision_configuration_changed.json",
+            ClientCommand::DecisionConfigurationChanged { configured: true },
+        ),
+        (
+            "command/decision_response.json",
+            ClientCommand::DecisionResponse {
+                request_id: DECISION_REQUEST_ID.into(),
+                result_json: DECISION_RESULT_JSON.into(),
+            },
+        ),
         ("command/provider_accounts.json", ClientCommand::ProviderAccounts {operation_id: 7, action: "list".into(), request_json: "{}".into(), credential: None}),
         ("command/update_prompt_suggestion_context.json", ClientCommand::UpdatePromptSuggestionContext { session_id: "session-1".into(), focus: "focused".into(), input_empty: true, pending_permission: false, elicitation_active: false }),
         ("command/prompt_suggestion_feedback.json", ClientCommand::PromptSuggestionFeedback { session_id: "session-1".into(), uuid: "suggestion-1".into(), action: "accepted".into() }),
@@ -2285,6 +2319,7 @@ fn canonical_cost() -> CostDto {
 fn canonical_message() -> MessageDto {
     MessageDto {
         transcript_uuid: None,
+        skill_name: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
@@ -2500,6 +2535,85 @@ fn canonical_coordinator_worker() -> CoordinatorWorkerDto {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Keep a narrow regeneration target so adding the missing Decision fixtures
+/// cannot rewrite unrelated checked-in protocol snapshots under `BLESS=1`.
+#[test]
+fn decision_variants_match_goldens() {
+    let mut failures = Vec::new();
+    let mut filenames = BTreeSet::new();
+    for (filename, command) in command_goldens().into_iter().filter(|(_, command)| {
+        matches!(
+            command,
+            ClientCommand::DecisionConfigurationChanged { .. }
+                | ClientCommand::DecisionResponse { .. }
+        )
+    }) {
+        assert!(filenames.insert(filename));
+        check_golden(filename, &command, &mut failures);
+    }
+    for (filename, event) in event_goldens().into_iter().filter(|(_, event)| {
+        matches!(
+            event,
+            ClientEvent::DecisionRequest { .. } | ClientEvent::DecisionCancel { .. }
+        )
+    }) {
+        assert!(filenames.insert(filename));
+        check_golden(filename, &event, &mut failures);
+    }
+    assert_eq!(
+        filenames,
+        BTreeSet::from([
+            "command/decision_configuration_changed.json",
+            "command/decision_response.json",
+            "event/decision_request.json",
+            "event/decision_cancel.json",
+        ])
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// These fields carry opaque JSON text. The outer command/event serializer
+/// must preserve its whitespace, quotes, Unicode and escaped lone UTF-16 units
+/// without parsing or normalizing the embedded payload.
+#[test]
+fn decision_json_envelopes_preserve_escaped_utf16() {
+    let input_json = r#"{ "state": {"text":"检查😀\ud800\n\"quoted\""}, "questions": {} }"#;
+    let event = ClientEvent::DecisionRequest {
+        request_id: DECISION_REQUEST_ID.into(),
+        input_json: input_json.into(),
+        timeout_ms: 30_000,
+    };
+    let encoded = pretty(&event);
+    let decoded: ClientEvent = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, event);
+    let ClientEvent::DecisionRequest {
+        input_json: actual, ..
+    } = decoded
+    else {
+        panic!("Decision request must retain its variant");
+    };
+    assert_eq!(actual.as_bytes(), input_json.as_bytes());
+    assert!(encoded.contains(r#"\\ud800"#));
+
+    let result_json = r#"{ "error": "证据不足😀\udfff\n\"quoted\"" }"#;
+    let command = ClientCommand::DecisionResponse {
+        request_id: DECISION_REQUEST_ID.into(),
+        result_json: result_json.into(),
+    };
+    let encoded = pretty(&command);
+    let decoded: ClientCommand = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, command);
+    let ClientCommand::DecisionResponse {
+        result_json: actual,
+        ..
+    } = decoded
+    else {
+        panic!("Decision response must retain its variant");
+    };
+    assert_eq!(actual.as_bytes(), result_json.as_bytes());
+    assert!(encoded.contains(r#"\\udfff"#));
+}
 
 /// EVERY `ClientEvent` variant has a byte-stable golden. This is the wire-format
 /// freeze: a renamed tag / retyped field / dropped variant flips the golden.

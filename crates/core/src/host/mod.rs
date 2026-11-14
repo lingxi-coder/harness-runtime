@@ -29,10 +29,10 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
-pub mod prompt_policy;
-pub mod result_usage;
 pub mod goal;
+pub mod prompt_policy;
 pub mod remote_ui;
+pub mod result_usage;
 pub mod session_context;
 pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};
 
@@ -352,8 +352,9 @@ pub use orchestrator::{
     PromptSnapshot, PromptSuggestionContext, PromptSuggestionResult, PromptToolDescription,
     RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection,
     RecapOutcome, RefusalContinuationJoin, RefusalContinuationPhase, RegisterRepoRootOutcome,
-    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage,
-    SkillInfo, StatusSnapshot, SummarizeDirection, ToolResultProjection, TurnOutcome,
+    RegisterRepoRootRequest, ResumeRuntimeSnapshot, ResumeTransientReminderAuthority,
+    RewindRowData, ServerFallbackTombstoneMessage, SkillInfo, StatusSnapshot, SummarizeDirection,
+    ToolResultProjection, TurnOutcome,
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{

@@ -1197,3 +1197,30 @@ mod current_usage_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[test]
+fn skill_companion_origin_survives_lowering_without_tool_body_or_title_matching() {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let mut message = ConversationMessage::user(
+        lingxi_core::types::MessageId::new(),
+        "# Renamed document\n\nRevised instructions.".to_string(),
+    );
+    if let ConversationMessage::User { origin, .. } = &mut message {
+        *origin = Some(
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                "type": "skill_activation", "skill_name": "lingxi-api", "context_epoch": 0
+            }))
+            .expect("valid host metadata"),
+        );
+    }
+    let dto = lower_conversation_message(&message);
+    assert_eq!(dto.skill_name.as_deref(), Some("lingxi-api"));
+    let restored = lower_transcript(&[message]);
+    assert_eq!(restored[0].skill_name.as_deref(), Some("lingxi-api"));
+    let ordinary = ConversationMessage::user(
+        lingxi_core::types::MessageId::new(),
+        "# Renamed document".to_string(),
+    );
+    assert_eq!(lower_conversation_message(&ordinary).skill_name, None);
+}

@@ -680,7 +680,10 @@ pub(crate) async fn mount_prepared(
         if !prepared.fork {
             orchestrator::replay_deferred_tools_after_resume(
                 &runtime.orchestrator,
-                orchestrator::deferred_tool_replays_from_messages(&prepared.entries),
+                orchestrator::deferred_tool_replays_for_session(
+                    &prepared.entries,
+                    prepared.session_id,
+                ),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -995,6 +998,61 @@ mod tests {
             serde_json::to_string(&first).unwrap(),
             serde_json::json!({"type": "agent-setting", "sessionId": source_id.to_string(), "agentSetting": "reviewer"})
         )
+    }
+
+    #[tokio::test]
+    async fn resumed_headless_does_not_dispatch_foreign_or_sidechain_deferred_tools() {
+        for continued in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4();
+            let mut config = startup_config(root.path(), id);
+            let path = session::jsonl::session_path(
+                &config.lingxi_home,
+                &config.cwd.to_string_lossy(),
+                &id.to_string(),
+            );
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let parent = Uuid::new_v4();
+            let mut rows = vec![
+                serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+                serde_json::json!({"type":"user","uuid":parent,"sessionId":id,"cwd":config.cwd,"parentUuid":null,"timestamp":"2026-11-12T00:00:00Z","message":{"role":"user","content":"main"}}),
+            ];
+            for (owner, sidechain, call) in
+                [(Uuid::new_v4(), false, "foreign"), (id, true, "sidechain")]
+            {
+                rows.push(serde_json::json!({"type":"attachment","uuid":Uuid::new_v4(),"sessionId":owner,"isSidechain":sidechain,"cwd":config.cwd,"parentUuid":parent,"attachment":{"type":"hook_deferred_tool","toolUseID":call,"toolName":"Bash","toolInput":{"command":"true"}}}));
+            }
+            std::fs::write(
+                &path,
+                rows.iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let start = if continued {
+                SessionStart::Continue { fork: false }
+            } else {
+                resume(id, false)
+            };
+            let prepared = prepare(&mut config, &start, false).await.unwrap();
+            let trace = Arc::new(StartupTrace::default());
+            let runtime = build_prepared(config, prepared, trace.clone(), startup_sink())
+                .await
+                .unwrap();
+            assert!(trace
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|event| !matches!(event, StartupEvent::Tool(_))));
+            assert!(
+                runtime
+                    .session_lifecycle
+                    .shutdown_and_drain()
+                    .await
+                    .complete
+            );
+        }
     }
 
     async fn fixture() -> (
