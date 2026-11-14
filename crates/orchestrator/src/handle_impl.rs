@@ -8507,8 +8507,11 @@ mod tests {
 
         assert_eq!(mounted_a.session_id, session_a);
         assert_eq!(tracker.session_id().await, session_a);
+        // Session A's transcript route stays intact. Since d2ef3720 the B
+        // target is activated inside the publication transaction, before the
+        // conversation lock held above, so whether it is already present
+        // depends on scheduling and is not asserted here.
         assert_eq!(writer.session_target_path(session_a), Some(path_a));
-        assert!(writer.session_target_path(session_b).is_none());
 
         let draining = {
             let orchestrator = orchestrator.clone();

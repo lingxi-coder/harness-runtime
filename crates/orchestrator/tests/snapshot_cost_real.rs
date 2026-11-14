@@ -341,7 +341,13 @@ async fn status_restores_hydrated_totals_before_a_turn_and_keeps_sessions_isolat
         .await
         .unwrap();
     restarted
-        .resume_session(saved_id, history.clone(), None, None, Default::default())
+        .resume_session(
+            saved_id,
+            history.clone(),
+            None,
+            None,
+            orchestrator::test_support::code_resume_runtime_snapshot(saved_id),
+        )
         .await
         .unwrap();
     let status = restarted.get_status_snapshot().await;
@@ -352,7 +358,13 @@ async fn status_restores_hydrated_totals_before_a_turn_and_keeps_sessions_isolat
 
     let other_id = SessionId::new();
     restarted
-        .resume_session(other_id, Vec::new(), None, None, Default::default())
+        .resume_session(
+            other_id,
+            Vec::new(),
+            None,
+            None,
+            orchestrator::test_support::code_resume_runtime_snapshot(other_id),
+        )
         .await
         .unwrap();
     let other = restarted.get_status_snapshot().await;
@@ -368,7 +380,13 @@ async fn status_restores_hydrated_totals_before_a_turn_and_keeps_sessions_isolat
     assert_eq!(other.total_cost_usd, 0.0);
 
     restarted
-        .resume_session(saved_id, history, None, None, Default::default())
+        .resume_session(
+            saved_id,
+            history,
+            None,
+            None,
+            orchestrator::test_support::code_resume_runtime_snapshot(saved_id),
+        )
         .await
         .unwrap();
     let restored = restarted.get_status_snapshot().await;
