@@ -843,22 +843,21 @@ mod tests {
 
     #[test]
     fn literal_model_id_wins_over_a_conflicting_profile_family_default() {
+        // Since d3b14318 route context is rebuilt from the live catalog, so the
+        // conflicting family default is catalog data: `different-model` owns
+        // the `opus` alias while a model's literal request id is `opus`.
         let mut configured = profile(ProviderId::OpenAI, "custom", "opus");
+        configured.models[0].display_model = "literal".into();
+        configured.models[0].aliases.clear();
         let mut alias_target = configured.models[0].clone();
         alias_target.request_model = "different-model".into();
         alias_target.display_model = "different-model".into();
         alias_target.billing_model = "different-model".into();
-        alias_target.aliases.clear();
+        alias_target.aliases = vec!["opus".into()];
         configured.models.push(alias_target);
-        let mut provider = resolution_provider(ClientConfig {
+        let provider = resolution_provider(ClientConfig {
             providers: vec![configured],
         });
-        provider
-            .profiles
-            .get_mut("custom")
-            .unwrap()
-            .family_defaults
-            .opus = Some("different-model".into());
         let context = provider.context_for_route("opus", Some("custom")).unwrap();
         assert_eq!(
             context.family_defaults.opus.as_deref(),
