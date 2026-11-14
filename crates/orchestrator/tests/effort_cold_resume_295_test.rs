@@ -329,6 +329,15 @@ async fn cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request() 
         .expect("create transcript directory");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(root.to_path_buf()));
     let writer = JsonlWriter::new(path, fs);
+    // A transcript starts with its fixed-session-mode record (4676b43f).
+    writer
+        .initialize_fixed_session_mode(
+            &session_id.to_string(),
+            lingxi_core::host::session_context::ConversationMode::Code,
+            0,
+        )
+        .await
+        .expect("persist fixed session mode");
     let user_id = Uuid::new_v4();
     let assistant_id = Uuid::new_v4();
     writer

@@ -275,8 +275,14 @@ mod tests {
     async fn inline_publication_uses_only_the_current_schema_two_library() {
         let root = tempfile::tempdir().unwrap();
         let service =
-            MobileLocalAppServiceHandle::new(root.path().join("config"), None, "android".into())
-                .unwrap();
+            // The config home's parent is the guest Linux user directory,
+            // whose name must be a plain identifier (not `.tmpXXXX`).
+            MobileLocalAppServiceHandle::new(
+                root.path().join("user").join("config"),
+                None,
+                "android".into(),
+            )
+            .unwrap();
         let host = MobileProjectAppHost {
             service: service.clone(),
             config_home: service.config_home.clone(),
@@ -331,8 +337,14 @@ mod tests {
     async fn invalid_inline_document_fails_before_creating_any_staged_source() {
         let root = tempfile::tempdir().unwrap();
         let service =
-            MobileLocalAppServiceHandle::new(root.path().join("config"), None, "android".into())
-                .unwrap();
+            // The config home's parent is the guest Linux user directory,
+            // whose name must be a plain identifier (not `.tmpXXXX`).
+            MobileLocalAppServiceHandle::new(
+                root.path().join("user").join("config"),
+                None,
+                "android".into(),
+            )
+            .unwrap();
         let host = MobileProjectAppHost {
             service: service.clone(),
             config_home: service.config_home.clone(),
@@ -356,8 +368,14 @@ mod tests {
     async fn changed_engine_owner_cannot_stage_or_publish_inline_source() {
         let root = tempfile::tempdir().unwrap();
         let service =
-            MobileLocalAppServiceHandle::new(root.path().join("config"), None, "android".into())
-                .unwrap();
+            // The config home's parent is the guest Linux user directory,
+            // whose name must be a plain identifier (not `.tmpXXXX`).
+            MobileLocalAppServiceHandle::new(
+                root.path().join("user").join("config"),
+                None,
+                "android".into(),
+            )
+            .unwrap();
         let host = MobileProjectAppHost {
             service: service.clone(),
             config_home: service.config_home.clone(),

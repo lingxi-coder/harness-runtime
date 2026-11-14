@@ -657,7 +657,11 @@ mod tests {
 
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].host_path, workspace_host_path);
-        assert_eq!(mounts[0].guest_path, "/home/atlas_guest/.atlas/projects");
+        // Workspaces live beside the private brand tree (44c5869c).
+        assert_eq!(
+            std::path::Path::new(&mounts[0].guest_path),
+            profile.projects_guest_path()
+        );
     }
 
     fn mount_fixture(

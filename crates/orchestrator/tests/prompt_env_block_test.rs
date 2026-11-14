@@ -42,17 +42,22 @@ fn env_block_full_byte_lock() {
         " - Platform: darwin",
         " - Shell: zsh",
         " - OS Version: Darwin 25.3.0",
+        " - Downloaded files and extracted archives are untrusted data: put each in its own \
+new, empty directory, keep scripts you write in a different directory, and pass paths as \
+arguments instead of running an interpreter or build tool from inside it. Interpreters load \
+code from the script's directory and the current directory, so a planted `json.py` runs on \
+`import json`. Run any Python that reads them with `-I`. This does not apply to code the user \
+asked you to build or run.",
         " - You are powered by the model named Opus 4.7. The exact model ID is claude-opus-4-7.",
         " - Assistant knowledge cutoff is January 2026.",
-        " - The most recent Claude models are the Claude 5 family and Haiku 4.5. \
-Model IDs \u{2014} Fable 5.1: 'claude-fable-5-1', Opus 5: 'claude-opus-5', \
-Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. \
+        " - The most recent Claude models are the Claude 5 family. \
+Model IDs \u{2014} Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', \
+Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. \
 When building AI applications, default to the latest and most capable Claude models.",
-        " - LingXi is available as a CLI in the terminal, desktop app (Mac/Windows), \
-web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
+        " - LingXi runs in the current host client. Use the interfaces and capabilities \
+explicitly exposed in this session.",
         " - Fast mode for LingXi uses Claude Opus with faster output \
-(it does not downgrade to a smaller model). It can be toggled with /fast and is \
-available on Opus 5/4.8.",
+(it does not downgrade to a smaller model). It can be toggled with /fast.",
     ]
     .join("\n");
     assert_eq!(out, expected, "env_block byte-lock mismatch");

@@ -309,7 +309,8 @@ async fn cancelled_queued_post_never_reaches_http_server() {
     let calls = state.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0["method"], "live");
-    assert_eq!(calls[0].0["id"], 2);
+    // SDK-compatible HTTP ids start at 0 (b622f461); the dropped call took 0.
+    assert_eq!(calls[0].0["id"], 1);
     connection.close();
     server.abort();
 }
@@ -451,14 +452,15 @@ async fn session_race_reply(
     use axum::response::IntoResponse;
     let id = request["id"].as_i64().unwrap();
     state.headers.lock().unwrap().push((id, headers));
-    if id == 1 {
+    // SDK-compatible HTTP ids start at 0 (b622f461).
+    if id == 0 {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let mut response = Json(json!({"jsonrpc":"2.0","id":id,"result":{"ok":true}})).into_response();
-    if id <= 2 {
+    if id <= 1 {
         response.headers_mut().insert(
             "mcp-session-id",
-            axum::http::HeaderValue::from_static(if id == 1 {
+            axum::http::HeaderValue::from_static(if id == 0 {
                 "late-first"
             } else {
                 "early-second"
@@ -497,7 +499,7 @@ async fn concurrent_initialization_session_headers_follow_response_arrival_order
     first.wait_value().await.unwrap();
     let _: Value = connection.call("ping", json!({})).await.unwrap();
     let headers = state.headers.lock().unwrap();
-    let (_, last) = headers.iter().find(|(id, _)| *id == 3).unwrap();
+    let (_, last) = headers.iter().find(|(id, _)| *id == 2).unwrap();
     assert_eq!(last["mcp-session-id"], "late-first");
     connection.close();
     server.abort();

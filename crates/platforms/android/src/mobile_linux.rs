@@ -246,7 +246,8 @@ mod tests {
         use mobile_linux_api::guest_paths as sdk;
         assert_eq!(sdk::HOME, "/home/lingxi");
         assert_eq!(sdk::SCRATCH, &["/tmp", "/var/tmp"]);
-        let workspace_root = format!("/home/lingxi/{}", branding::DOT_DIR);
+        // Workspaces live beside the private brand tree (44c5869c).
+        let workspace_root = format!("/home/lingxi/{}-workspaces", branding::DOT_DIR);
         assert_eq!(sdk::WORKSPACE_ROOT, workspace_root);
         assert_eq!(
             sdk::workspace("abc-123"),
