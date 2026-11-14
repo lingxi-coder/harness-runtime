@@ -67,7 +67,6 @@ struct Fixture {
     patch_truncation_suffix: StringRow,
     output_truncation: OutputTruncationRow,
     glob_cap: ValueRow<usize>,
-    grep_records_cap: ValueRow<usize>,
     line_indexing_base: ValueRow<u32>,
     telemetry_events: TelemetryEventsRow,
 }
@@ -156,12 +155,6 @@ fn file_tools_fixture_matches_production_constants() {
 
     assert_eq!(fx.glob_cap.value, tool_file::glob::MAX_GLOB_MATCHES);
     assert_eq!(fx.glob_cap.value, 100);
-
-    // Per-file match cap removed for claude-code/rg parity (no per-file cap);
-    // GREP_RECORDS_CAP is now a memory valve on recorded lines only — it never
-    // caps the count. head_limit (default 250) is the real truncation.
-    assert_eq!(fx.grep_records_cap.value, tool_file::grep::GREP_RECORDS_CAP);
-    assert_eq!(fx.grep_records_cap.value, 10_000);
 
     assert_eq!(fx.line_indexing_base.value, 1);
 

@@ -1,6 +1,6 @@
 ---
 name: decision
-description: Use the Desktop Decision tool to classify supplied evidence, estimate a condition's probability, select among explicit alternatives, or score against a rubric. Applies when these structured judgments help the user's task.
+description: Use the Desktop Decision tool to classify evidence, estimate a probability, choose among explicit alternatives, or score against a rubric when a structured judgment helps.
 ---
 
 Use `Decision` for a bounded judgment over evidence you already have. Gather missing facts with the appropriate tools first. Ordinary calculations and deterministic comparisons usually need no model call.

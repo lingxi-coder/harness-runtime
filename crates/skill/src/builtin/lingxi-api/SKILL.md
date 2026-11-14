@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: Explain, configure, troubleshoot, or integrate LingXi (灵犀) CLI, sessions, settings, tools, models, and host APIs. For app building use local-app; for ordinary coding use task tools.
+description: Explain, configure, debug, or integrate LingXi (灵犀) CLI, sessions, settings, tools, models, and host APIs. For app building use local-app; for ordinary coding use task tools.
 ---
 
 # LingXi API guide

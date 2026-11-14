@@ -36,10 +36,6 @@
     "value": 100,
     "note": "MAX_GLOB_MATCHES. Excess returns truncated=true."
   },
-  "grep_records_cap": {
-    "value": 10000,
-    "note": "GREP_RECORDS_CAP. Memory valve on RECORDED content-mode lines per file; never caps the count (claude-code/rg have no per-file cap). head_limit (default 250) is the real truncation; count mode reports the true total."
-  },
   "line_indexing_base": {
     "value": 1,
     "note": "1-based for tool input/output (claude-code convention). LSP wire is 0-based — converted in M2-03."
