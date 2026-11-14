@@ -39,10 +39,6 @@ fn observe_mod_stream_response(
     event: &HistoryEvent,
 ) -> Option<llm_runtime::HistoryResponse> {
     use llm_runtime::stream_accumulator::{ResponseAccumulator, ResponseAccumulatorUpdate};
-    if matches!(event, HistoryEvent::Completed { .. }) {
-        *accumulator = Some(ResponseAccumulator::default());
-        return None;
-    }
     let result = accumulator
         .as_mut()
         .map(|value| value.observe(event.clone()));
@@ -54,7 +50,10 @@ fn observe_mod_stream_response(
         }
         _ => None,
     };
-    if matches!(event, HistoryEvent::MessageStop) {
+    if matches!(
+        event,
+        HistoryEvent::MessageStop | HistoryEvent::Completed { .. }
+    ) {
         *accumulator = Some(ResponseAccumulator::default());
     }
     response

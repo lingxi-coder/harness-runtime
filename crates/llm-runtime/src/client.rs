@@ -2792,7 +2792,9 @@ impl ModelRuntime {
         &self,
         request: &LlmRequest,
     ) -> Result<ProviderRequest, LlmError> {
-        let (draft, mut host, failure) = self.count_draft(request, None).await?;
+        let captured = self.source.as_ref().map(|_| self.current());
+        let runtime = captured.as_deref().unwrap_or(self);
+        let (draft, mut host, failure) = runtime.count_draft(request, None).await?;
         let call = crate::execution::seal(draft, &host, None)
             .await
             .map_err(|error| {
@@ -2812,10 +2814,12 @@ impl ModelRuntime {
         &self,
         request: &LlmRequest,
     ) -> Result<u64, LlmError> {
-        let route = self
+        let captured = self.source.as_ref().map(|_| self.current());
+        let runtime = captured.as_deref().unwrap_or(self);
+        let route = runtime
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
-        let entry = self
+        let entry = runtime
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
@@ -2989,10 +2993,12 @@ impl ModelRuntime {
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
     ) -> Result<Option<u64>, LlmError> {
-        let route = self
+        let captured = self.source.as_ref().map(|_| self.current());
+        let runtime = captured.as_deref().unwrap_or(self);
+        let route = runtime
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
-        let entry = self
+        let entry = runtime
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
@@ -3005,7 +3011,9 @@ impl ModelRuntime {
         // Counting is an auxiliary operation outside the generation watchdog.
         // Bound preparation/authentication, dispatch and response collection together.
         tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            let (draft, host, failure) = self.count_draft(request, Some(transport.clone())).await?;
+            let (draft, host, failure) = runtime
+                .count_draft(request, Some(transport.clone()))
+                .await?;
             let call = crate::execution::seal(draft, &host, None)
                 .await
                 .map_err(|error| {
@@ -3382,6 +3390,10 @@ pub struct PreparedLlmCall {
     pub route: Route,
     pub provider_request: ProviderRequest,
 }
+
+#[cfg(test)]
+#[path = "count_catalog_snapshot_tests.rs"]
+mod count_catalog_snapshot_tests;
 
 #[cfg(test)]
 mod physical_input_projection_tests {

@@ -611,6 +611,21 @@ struct PendingTransportCleanup {
     retrying: bool,
 }
 
+// Raw discovery can be canceled after transport creation but before its
+// catalog is ready. Retire only that unpublished transport, never the live
+// registry slot retained for the next foreground attempt.
+struct DiscoveryCancellationGuard(Option<(McpRegistry, McpConnectionId)>);
+
+impl Drop for DiscoveryCancellationGuard {
+    fn drop(&mut self) {
+        if let Some((registry, connection_id)) = self.0.take() {
+            tokio::spawn(async move {
+                registry.disconnect_or_schedule_cleanup(connection_id).await;
+            });
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct ListenerReopenState {
     delay_index: usize,
@@ -4258,6 +4273,8 @@ impl McpRegistry {
                 ));
             }
         };
+        let mut cancellation_cleanup =
+            DiscoveryCancellationGuard(Some((self.clone_for_background(), conn.connection_id)));
         // Capture the grant-bound partition immediately after the authenticated
         // transport is established and before any catalog RPC. The write path
         // re-resolves it and refuses a mismatch, so a concurrent refresh-token
@@ -4289,7 +4306,7 @@ impl McpRegistry {
             negotiation_mode,
             &negotiated,
         ));
-        match std::panic::AssertUnwindSafe(async {
+        let result = match std::panic::AssertUnwindSafe(async {
             let gate_url = {
                 let u = spec_url(&config.spec);
                 (!u.is_empty()).then(|| u.to_string())
@@ -4556,7 +4573,9 @@ impl McpRegistry {
                     "post-connect discovery",
                 ))
             }
-        }
+        };
+        cancellation_cleanup.0 = None;
+        result
     }
 
     async fn run_lazy_upgrade_owner(&self, key: String, slot: Arc<LazyUpgradeSlot>) {
@@ -6370,7 +6389,7 @@ impl McpRegistry {
         rejected_client: &Arc<McpClient>,
     ) -> Result<(), McpError> {
         let lifecycle = self.lifecycle_lock(name);
-        let _guard = lifecycle.lock().await;
+        let guard = lifecycle.lock_owned().await;
         match self.clients.read().await.get(name) {
             Some(entry) if Arc::ptr_eq(&entry.client, rejected_client) => {}
             Some(_) => return Ok(()),
@@ -6387,61 +6406,73 @@ impl McpRegistry {
             .get(name)
             .map(|state| state.config().clone())
             .ok_or_else(|| McpError::Connection("MCP authentication owner was removed".into()))?;
-        self.disconnect_locked_inner(name, false, false).await?;
-        let Some(rejected) = rejected_client.oauth_credential_identity() else {
-            return self
-                .connect_locked(config, Some(name.to_owned()))
-                .await
-                .map(|_| ());
-        };
-        let recovered = match self.recover_oauth_spec(&config, rejected).await {
-            Ok(recovered) => recovered,
-            Err(error) => {
-                self.connections.write().await.insert(
-                    name.to_owned(),
-                    Self::connection_failure_state(config.clone(), &error),
-                );
-                return Err(error);
-            }
-        };
         let negotiation_mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
             &config.spec,
             config.metadata.transport.as_deref(),
             mcp_connection_timeout().as_millis() as u64,
         );
-        self.connections.write().await.insert(
-            name.to_owned(),
-            McpConnectionState::Connecting {
-                config: config.clone(),
-                started_at: SystemTime::now(),
-            },
-        );
-        let result = match self
-            .discover_live_connection_with_oauth(&config, negotiation_mode, Some(recovered))
-            .await
-        {
-            Ok(discovery) => {
-                self.install_live_discovery(
-                    name.to_owned(),
-                    config.clone(),
-                    discovery,
-                    None,
-                    None,
-                    None,
-                )
+        // Authentication/discovery may wait for a browser or HTTP. Leave the
+        // old registered generation intact until these cancelable steps settle:
+        // cancellation must not strand Stopped without a client. The server
+        // continues to enforce the rejected bearer's authority on any retry.
+        let discovery = async {
+            let recovered = match rejected_client.oauth_credential_identity() {
+                Some(rejected) => Some(self.recover_oauth_spec(&config, rejected).await?),
+                None => None,
+            };
+            self.discover_live_connection_with_oauth(&config, negotiation_mode, recovered)
                 .await
-            }
-            Err(error) => Err(error),
-        };
-        if let Err(error) = &result {
-            self.record_connection_failure_diagnostic(&config, error)
-                .await;
-            self.connections.write().await.insert(
-                name.to_owned(),
-                Self::connection_failure_state(config, error),
-            );
         }
-        result.map(|_| ())
+        .await;
+        // Once destructive retirement begins, an owned finite publication
+        // finishes even if the RPC waiter is canceled. Retire the old catalog
+        // before install so a new grant never inherits failed-list fallbacks
+        // from the previous identity. No browser authentication remains here.
+        let registry = self.clone_for_background();
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let result = match registry.disconnect_locked_inner(&name, false, false).await {
+                Ok(()) => match discovery {
+                    Ok(discovery) => {
+                        registry
+                            .install_live_discovery(
+                                name.clone(),
+                                config.clone(),
+                                discovery,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => {
+                    if let Ok(discovery) = discovery {
+                        registry.discard_live_discovery(discovery).await;
+                    }
+                    Err(error)
+                }
+            };
+            if let Err(error) = &result {
+                registry
+                    .record_connection_failure_diagnostic(&config, error)
+                    .await;
+                registry
+                    .connections
+                    .write()
+                    .await
+                    .insert(name, Self::connection_failure_state(config, error));
+            }
+            result.map(|_| ())
+        })
+        .await
+        .map_err(|error| {
+            McpError::Connection(
+                format!("MCP authentication publication task failed: {error}").into(),
+            )
+        })?
     }
 
     /// Re-establish a stale Streamable HTTP session without revoking the

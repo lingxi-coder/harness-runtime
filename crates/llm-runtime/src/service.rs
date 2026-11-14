@@ -3551,6 +3551,12 @@ impl ApiService {
         })
     }
 
+    /// Estimate selected-route input without credentials or transport. Host
+    /// preflight callers must use the same schema/replay projection as generation.
+    pub fn estimate_input_tokens(&self, request: &LlmRequest) -> Result<u64, LlmError> {
+        self.client().estimate_input_tokens_for_route(request)
+    }
+
     /// Check each physical route before generation. Only a provider count may
     /// produce ContextOverflow; approximations can enforce an application soft
     /// budget but are explicitly identified as estimates in that local error.

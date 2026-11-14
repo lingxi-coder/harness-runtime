@@ -768,9 +768,120 @@ fn source_first_invalid_property_key(schema: &Utf16JsonProjection) -> Option<Str
         .map(|entry| entry.display_key.chars().take(80).collect())
 }
 
-/// Normalize or drop a tool schema without converting arbitrary schema data
-/// through `serde_json::Value`. Meta-schema checking remains deferred until a
-/// source-native schema-document validator is available.
+// Boon consumes a serde validation view, never the advertised source. Encode
+// unpaired UTF-16 injectively in that view so distinct enum/required values or
+// object keys cannot collapse into the same replacement character. Ordinary
+// schema keywords and values keep their spelling. Nothing is reconstructed
+// from this temporary view for caching, normalization or model requests.
+fn schema_validation_string(units: &[u16]) -> String {
+    match String::from_utf16(units) {
+        Ok(value) if !value.starts_with('\0') => value,
+        Ok(value) => format!("\0v{value}"),
+        Err(_) => {
+            use std::fmt::Write as _;
+            let mut value = String::from("\0u");
+            for unit in units {
+                write!(&mut value, "{unit:04x}").unwrap();
+            }
+            value
+        }
+    }
+}
+
+fn drop_validation_values(mut pending: Vec<Value>) {
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(mut values) => pending.append(&mut values),
+            Value::Object(map) => pending.extend(map.into_values()),
+            _ => {}
+        }
+    }
+}
+
+fn source_meta_validity(schema: &Utf16JsonProjection) -> Result<(), String> {
+    use lingxi_core::types::utf16_json::JsonValueView;
+    enum Task<'a> {
+        Node(JsonValueView<'a>),
+        Array(usize),
+        Object(Vec<String>),
+    }
+    let mut pending = vec![Task::Node(
+        schema.at_pointer("").expect("valid schema projection"),
+    )];
+    let mut values = Vec::<Value>::new();
+    while let Some(task) = pending.pop() {
+        match task {
+            Task::Node(node) => {
+                if let Some(entries) = node.object_entries() {
+                    let keys = entries
+                        .iter()
+                        .map(|entry| schema_validation_string(entry.code_units))
+                        .collect();
+                    pending.push(Task::Object(keys));
+                    pending.extend(
+                        entries
+                            .into_iter()
+                            .rev()
+                            .map(|entry| Task::Node(entry.value)),
+                    );
+                } else if let Some((length, entries)) = node.array_entries() {
+                    // An MCP JSON document has dense arrays and no JS-only
+                    // named properties. Reject rather than materialize holes.
+                    if length as usize != entries.len()
+                        || node.array_named_properties().is_some_and(|p| !p.is_empty())
+                    {
+                        drop_validation_values(values);
+                        return Err("schema arrays must contain only JSON values".into());
+                    }
+                    pending.push(Task::Array(entries.len()));
+                    pending.extend(
+                        entries
+                            .into_iter()
+                            .rev()
+                            .map(|(_, value)| Task::Node(value)),
+                    );
+                } else if let Some(units) = node.code_units() {
+                    values.push(Value::String(schema_validation_string(units)));
+                } else if let Some(number) = node.as_number() {
+                    values.push(
+                        serde_json::Number::from_f64(number).map_or(Value::Null, Value::Number),
+                    );
+                } else if let Some(value) = node.as_bool() {
+                    values.push(Value::Bool(value));
+                } else {
+                    values.push(Value::Null);
+                }
+            }
+            Task::Array(len) => {
+                let children = values.split_off(values.len() - len);
+                values.push(Value::Array(children));
+            }
+            Task::Object(keys) => {
+                let children = values.split_off(values.len() - keys.len());
+                values.push(Value::Object(keys.into_iter().zip(children).collect()));
+            }
+        }
+    }
+    let mut instance = values.pop().expect("schema validation root");
+    if let Value::Object(map) = &mut instance {
+        map.retain(|_, value| !value.is_null());
+    }
+    let skip = instance.get("$schema").is_some_and(|schema| {
+        !matches!(schema.as_str(),
+        Some(value) if value == META_SCHEMA_URL || value == format!("{META_SCHEMA_URL}#"))
+    });
+    let result = if skip {
+        Ok(())
+    } else {
+        validate_against_meta_schema(&instance)
+    };
+    // Unknown annotations can be arbitrarily deep; dropping the validation
+    // view must not recursively drop a tree that the source arena kept flat.
+    drop_validation_values(vec![instance]);
+    result
+}
+
+/// Normalize or drop a tool schema while retaining its exact source carrier.
 #[must_use]
 pub fn decide_tool_schema_source(
     server_url: Option<&str>,
@@ -807,9 +918,13 @@ pub fn decide_tool_schema_source(
             };
         }
     };
-    if let Some(bad_key) = source_first_invalid_property_key(&working) {
-        let detail =
-            format!("property key {bad_key:?} does not match {PROPERTY_KEY_PATTERN_RENDERED}");
+    let invalid = source_first_invalid_property_key(&working)
+        .map(|bad_key| {
+            format!("property key {bad_key:?} does not match {PROPERTY_KEY_PATTERN_RENDERED}")
+        })
+        .or_else(|| source_meta_validity(&working).err());
+    if let Some(detail) = invalid {
+        let is_property_key = detail.starts_with("property key ");
         if drop_gate {
             return ToolSchemaProjectionDecision {
                 schema: working,
@@ -819,7 +934,11 @@ pub fn decide_tool_schema_source(
                 )),
                 warning: None,
                 normalized,
-                classification: Some(DegradedReason::ToolPropertyKeyInvalid),
+                classification: Some(if is_property_key {
+                    DegradedReason::ToolPropertyKeyInvalid
+                } else {
+                    DegradedReason::ToolSchemaInvalid
+                }),
             };
         }
         return ToolSchemaProjectionDecision {
@@ -830,7 +949,7 @@ pub fn decide_tool_schema_source(
                 "input schema would be rejected by the Anthropic API ({detail}); requests that include it may fail"
             )),
             normalized,
-            classification: Some(DegradedReason::ToolPropertyKeyInvalidGated),
+            classification: Some(if is_property_key { DegradedReason::ToolPropertyKeyInvalidGated } else { DegradedReason::ToolSchemaInvalidGated }),
         };
     }
     ToolSchemaProjectionDecision {
@@ -1361,6 +1480,61 @@ mod tests {
         let schema = json!({"type": 5});
         let d = decide_tool_schema(None, &schema);
         assert!(d.drop_reason.is_some(), "{d:?}");
+        clear_flags();
+    }
+
+    #[test]
+    fn source_meta_validation_matches_drop_and_warning_policy_without_rewriting_source() {
+        let _g = lock();
+        clear_flags();
+        for drop_invalid in [false, true] {
+            if drop_invalid {
+                telemetry::test_set_flag_list(FLAG_DROP_INVALID_TOOL_SCHEMAS, vec!["*".into()]);
+            }
+            for bad in [
+                json!({"type":"not-a-json-schema-type"}),
+                json!({"type":"object","properties":{"x":{"type":123}}}),
+            ] {
+                let source = Utf16JsonProjection::from_serde_value(&bad).unwrap();
+                let legacy = decide_tool_schema(None, &bad);
+                let decision = decide_tool_schema_source(None, &source);
+                assert_eq!(decision.drop_reason.is_some(), legacy.drop_reason.is_some());
+                assert_eq!(decision.warning.is_some(), legacy.warning.is_some());
+                assert_eq!(decision.classification, legacy.classification);
+                assert_eq!(
+                    decision.schema, source,
+                    "validation must never replace the source carrier"
+                );
+            }
+            let valid = Utf16JsonProjection::parse(r#"{"type":"object","properties":{"x":{"type":"string","enum":["\ud800","\udc00","�","\u0000ud800"]}},"required":["\ud800","\udc00"],"description":"\udfff","x-native":{"\ud800":1,"\udc00":2}}"#).unwrap();
+            let decision = decide_tool_schema_source(None, &valid);
+            assert!(
+                decision.drop_reason.is_none() && decision.warning.is_none(),
+                "{decision:?}"
+            );
+            assert_eq!(decision.schema, valid);
+            assert_eq!(
+                decision.schema.to_json_string().unwrap(),
+                valid.to_json_string().unwrap()
+            );
+        }
+        clear_flags();
+    }
+
+    #[test]
+    fn source_meta_validation_retains_dialect_and_shallow_null_rules() {
+        let _g = lock();
+        clear_flags();
+        telemetry::test_set_flag_list(FLAG_DROP_INVALID_TOOL_SCHEMAS, vec!["*".into()]);
+        for input in [
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":5}"#,
+            r#"{"type":"object","properties":null}"#,
+        ] {
+            let source = Utf16JsonProjection::parse(input).unwrap();
+            let decision = decide_tool_schema_source(None, &source);
+            assert!(decision.drop_reason.is_none() && decision.warning.is_none());
+            assert_eq!(decision.schema, source);
+        }
         clear_flags();
     }
 

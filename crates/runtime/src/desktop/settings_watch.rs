@@ -1827,6 +1827,7 @@ impl SettingsWatcher {
         // Own each task before awaiting the next watch setup. Cancellation of
         // construction must abort prior loops even before a handle is returned.
         let handle = SettingsWatcherHandle::empty();
+        let refresh_lock = Arc::new(tokio::sync::Mutex::new(()));
         for dir in paths.watch_dirs() {
             if !dir.is_dir() {
                 continue;
@@ -1847,6 +1848,7 @@ impl SettingsWatcher {
             let main_model_selection_refresher = main_model_selection_refresher.clone();
             let native_settings_refresher = native_settings_refresher.clone();
             let managed_policy_snapshot_cache = managed_policy_snapshot_cache.clone();
+            let refresh_lock = refresh_lock.clone();
             let mut state = handle
                 .owner
                 .state
@@ -1866,6 +1868,7 @@ impl SettingsWatcher {
                     main_model_selection_refresher,
                     native_settings_refresher,
                     managed_policy_snapshot_cache,
+                    refresh_lock,
                 )
                 .await;
             }));
@@ -1902,6 +1905,7 @@ pub async fn run_watch_loop_with_permission_gate(
         None,
         None,
         None,
+        Arc::new(tokio::sync::Mutex::new(())),
     )
     .await;
 }
@@ -1916,8 +1920,12 @@ async fn run_watch_loop_with_settings_refresh(
     main_model_selection_refresher: Option<Arc<dyn MainModelSelectionRefresher>>,
     native_settings_refresher: Option<Arc<dyn NativeSettingsRefresher>>,
     managed_policy_snapshot_cache: Option<ManagedPolicySnapshotCache>,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
 ) {
     while let Some(event) = stream.next().await {
+        // Capture effective inputs only after the preceding publication has
+        // settled, including other directories' managed-policy snapshots.
+        let _refresh = refresh_lock.lock().await;
         handle_event_with_settings_refresh(
             &event,
             &paths,
@@ -2037,6 +2045,10 @@ async fn handle_event_with_settings_refresh(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "settings_watch_concurrency_tests.rs"]
+mod concurrency_tests;
 
 #[cfg(test)]
 mod tests {

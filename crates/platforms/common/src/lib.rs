@@ -22,6 +22,7 @@ pub mod mcp_ws;
 pub mod mobile_linux;
 pub mod proxy_auth_helper;
 pub mod runtime;
+pub mod secure_storage;
 #[cfg(feature = "desktop")]
 pub mod watch_helper;
 pub mod worktree_create_guard;

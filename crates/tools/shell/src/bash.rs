@@ -1256,12 +1256,8 @@ fn path_relative(from: &std::path::Path, to: &std::path::Path) -> String {
 /// `since_ms` is the oracle's `i = Math.floor(Date.now()/1000)*1000`, sampled at
 /// the top of `call`.
 ///
-/// RESIDUAL: the registry exposes no non-promoting `(path, entry)` iterator, so
-/// the LRU recency read is deferred to the CANDIDATES only — paths whose on-disk
-/// mtime already bumped past `since_ms`. lru-cache's `entries()` promotes
-/// nothing; here a file the command actually rewrote is promoted. Untouched
-/// files (the overwhelming majority) are never `get`-ed, so eviction order is
-/// unchanged in the common case.
+/// Advisory observation uses non-promoting metadata reads. Neither a changed
+/// candidate nor an untouched file changes LRU eviction or reminder order.
 fn stale_read_file_state_hint(
     ctx: &BuiltinToolContext,
     command: &str,
@@ -1292,10 +1288,10 @@ fn stale_read_file_state_hint(
             continue;
         }
         let entry_mtime = {
-            let Ok(mut state) = ctx.read_file_state.lock() else {
+            let Ok(state) = ctx.read_file_state.lock() else {
                 continue;
             };
-            state.get(&path).map(|e| e.mtime_ms)
+            state.peek(&path).map(|e| e.mtime_ms)
         };
         if entry_mtime.is_some_and(|t| mtime_ms > t) {
             modified.push(path);
@@ -6520,6 +6516,30 @@ mod tests {
             hint,
             "[This command modified 7 files you've previously read: f6.rs, f5.rs, f4.rs, f3.rs, f2.rs and 2 more. Call Read before editing.]"
         );
+    }
+
+    #[test]
+    fn formatter_advisory_preserves_mru_reminder_order_and_eviction_victim() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = noop_ctx();
+        ctx.read_file_state =
+            tool_api::read_file_state::new_read_file_state_map_with_limits(2, 1_000_000);
+        let a = dir.path().join("a.rs");
+        let b = dir.path().join("b.rs");
+        let c = dir.path().join("c.rs");
+        for path in [&a, &b] {
+            std::fs::write(path, "formatter output").unwrap();
+            seed_read_entry(&ctx, path, 0);
+        }
+        let before = ctx.read_file_state.lock().unwrap().keys();
+        assert_eq!(before, vec![b.clone(), a.clone()]);
+        for _ in 0..2 {
+            assert_eq!(stale_read_file_state_hint(&ctx, "prettier --write .", dir.path(), 0).unwrap(),
+                "[This command modified 2 files you've previously read: b.rs, a.rs. Call Read before editing.]");
+            assert_eq!(ctx.read_file_state.lock().unwrap().keys(), before);
+        }
+        seed_read_entry(&ctx, &c, 0);
+        assert_eq!(ctx.read_file_state.lock().unwrap().keys(), vec![c, b]);
     }
 
     // ===== BASH-07 — `ghRateLimitHint` (oracle `ikf`/`V_v`/`K_v`) ===========

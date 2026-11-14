@@ -253,7 +253,11 @@ async fn run_lookup(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stdout_trimmed = stdout.trim();
-    match classify_lookup(output.status.success(), stdout_trimmed) {
+    match classify_lookup(
+        output.status.code(),
+        stdout_trimmed,
+        String::from_utf8_lossy(&output.stderr).trim(),
+    ) {
         LookupOutcome::NotFound => Ok(None),
         LookupOutcome::Failed => Err(SecureStorageError::BackendUnavailable(format!(
             "secret-tool lookup exited {}: {}",
@@ -312,19 +316,23 @@ enum LookupOutcome {
 /// Classify a `secret-tool lookup` outcome from its exit status and trimmed
 /// stdout.
 ///
-/// `secret-tool lookup` exits non-zero and prints nothing when no item
+/// `secret-tool lookup` exits 1 and prints nothing when no item
 /// matches; that is the not-found sentinel (analogous to the macOS exit-44
 /// `errSecItemNotFound`). A success with payload is [`LookupOutcome::Found`];
-/// a non-zero exit that nonetheless produced stdout is treated as a failure so
-/// a malformed-but-present payload is not silently swallowed.
-fn classify_lookup(status_success: bool, stdout_trimmed: &str) -> LookupOutcome {
-    if status_success {
+/// a non-zero exit with either payload or a diagnostic is a backend failure.
+/// In particular, daemon/locked errors normally only write to stderr.
+fn classify_lookup(
+    exit_code: Option<i32>,
+    stdout_trimmed: &str,
+    stderr_trimmed: &str,
+) -> LookupOutcome {
+    if exit_code == Some(0) {
         if stdout_trimmed.is_empty() {
             LookupOutcome::NotFound
         } else {
             LookupOutcome::Found
         }
-    } else if stdout_trimmed.is_empty() {
+    } else if exit_code == Some(1) && stdout_trimmed.is_empty() && stderr_trimmed.is_empty() {
         LookupOutcome::NotFound
     } else {
         LookupOutcome::Failed
@@ -361,24 +369,42 @@ mod tests {
 
     #[test]
     fn classify_lookup_success_with_payload_is_found() {
-        assert_eq!(classify_lookup(true, "{\"v\":1}"), LookupOutcome::Found);
+        assert_eq!(
+            classify_lookup(Some(0), "{\"v\":1}", ""),
+            LookupOutcome::Found
+        );
     }
 
     #[test]
     fn classify_lookup_nonzero_empty_is_not_found() {
-        assert_eq!(classify_lookup(false, ""), LookupOutcome::NotFound);
+        assert_eq!(classify_lookup(Some(1), "", ""), LookupOutcome::NotFound);
     }
 
     #[test]
     fn classify_lookup_success_empty_is_not_found() {
-        assert_eq!(classify_lookup(true, ""), LookupOutcome::NotFound);
+        assert_eq!(classify_lookup(Some(0), "", ""), LookupOutcome::NotFound);
     }
 
     #[test]
     fn classify_lookup_nonzero_with_stderr_payload_is_failed() {
         assert_eq!(
-            classify_lookup(false, "daemon error"),
+            classify_lookup(Some(1), "", "secret-tool: daemon unavailable"),
             LookupOutcome::Failed
         );
+    }
+
+    #[test]
+    fn classify_lookup_nonzero_with_payload_is_failed() {
+        assert_eq!(
+            classify_lookup(Some(1), "unexpected payload", ""),
+            LookupOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn abnormal_exit_without_diagnostics_is_unknown_not_missing() {
+        for code in [None, Some(2), Some(126), Some(127), Some(143)] {
+            assert_eq!(classify_lookup(code, "", ""), LookupOutcome::Failed);
+        }
     }
 }

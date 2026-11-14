@@ -30,7 +30,10 @@ pub async fn count_tokens(
     transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<u64, LlmError> {
-    match try_count_tokens_exact(client, transport, request).await? {
+    // An unsupported exact endpoint must fall back on the same catalog that
+    // was selected before the await, not a newly published route.
+    let client = client.current();
+    match try_count_tokens_exact(client.as_ref(), transport, request).await? {
         Some(tokens) => Ok(tokens),
         None => client.estimate_input_tokens_for_route(request),
     }

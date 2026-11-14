@@ -3939,14 +3939,14 @@ json.dump(reply, sys.stdout)
             );
         let isolated_credentials = manager(memory_only);
         assert_eq!(scope(&isolated_credentials), original_scope);
-        assert!(
+        assert!(matches!(
             isolated_credentials
                 .get_account_credential(&second.credential_ref)
-                .await
-                .unwrap()
-                .is_none(),
-            "a memory fallback never reads the plaintext policy's credentials"
-        );
+                .await,
+            Err(secret::CredentialError::Storage(
+                SecureStorageError::BackendUnavailable(_)
+            ))
+        ), "a memory fallback cannot read the plaintext policy's credentials or infer an inaccessible native slot is missing");
 
         std::fs::remove_file(root.path().join("broker-fail")).unwrap();
         let restarted = platform_posix::secure_storage::factory::runtime_fallback_storage_for_test(
