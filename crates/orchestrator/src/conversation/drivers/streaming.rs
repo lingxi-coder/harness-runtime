@@ -4685,7 +4685,9 @@ impl StreamingTurnDriver<'_> {
                 .history
                 .last()
                 .map(ConversationMessage::id)
-                .ok_or_else(|| OrchestratorError::Internal("no durable history to resume".into()))?;
+                .ok_or_else(|| {
+                    OrchestratorError::Internal("no durable history to resume".into())
+                })?;
             let user = session
                 .history
                 .iter()

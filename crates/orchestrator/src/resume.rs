@@ -2870,7 +2870,6 @@ async fn persist_replayed_tool_results(
     Ok(())
 }
 
-
 /// Execute calls whose assistant row is durable but whose result row is not,
 /// through the ordinary dispatch/permission/hook path. Unlike a deferred hook
 /// replay this keeps no Started checkpoint: the caller guarantees that every
@@ -2885,10 +2884,9 @@ pub async fn replay_unfinished_read_only_tool_calls(
     let mut injected_messages: Vec<(ConversationMessage, ToolUseId)> = Vec::new();
     for call in calls {
         orch.check_storage_pause().await?;
-        let outcome = crate::turn_loop::boxed_turn_future(|| {
-            replay_deferred_tool_after_resume(orch, call)
-        })
-        .await?;
+        let outcome =
+            crate::turn_loop::boxed_turn_future(|| replay_deferred_tool_after_resume(orch, call))
+                .await?;
         if outcome.tool_results.is_empty() {
             continue;
         }

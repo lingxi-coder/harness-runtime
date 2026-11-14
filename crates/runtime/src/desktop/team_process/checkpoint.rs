@@ -200,9 +200,13 @@ pub(super) fn record_start(
 ) -> Result<(), TeamProcessError> {
     let dir = task_dir(home, task_id);
     {
-        use std::os::unix::fs::DirBuilderExt;
         let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
         builder.create(&dir)?;
     }
     let recorded = epochs(&dir)?;
@@ -219,6 +223,7 @@ pub(super) fn record_start(
     }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
+    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o400);
@@ -232,6 +237,8 @@ pub(super) fn record_start(
     };
     std::io::Write::write_all(&mut file, &tombstone_body(task_id, batch_id, epoch)?)?;
     file.sync_all()?;
+    // A directory cannot be opened as a file to flush its entry on Windows.
+    #[cfg(unix)]
     std::fs::File::open(&dir)?.sync_all()?;
     Ok(())
 }
@@ -825,6 +832,7 @@ mod tests {
         let c = eval(&format!("{flight}{foreign}\n"), true, CHAT).checkpoint;
         assert_eq!(c.dispatches_observed, 0);
     }
+    #[cfg(unix)]
     #[test]
     fn epoch_tombstones_are_create_new_and_strictly_increasing() {
         use std::os::unix::fs::PermissionsExt;
