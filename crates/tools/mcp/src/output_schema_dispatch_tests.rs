@@ -132,7 +132,10 @@ mod output_schema_dispatch {
         }
     }
 
-    async fn registered_tools(registry: &Arc<McpRegistry>) -> tool_api::registry::ToolRegistry {
+    async fn registered_tools(
+        registry: &Arc<McpRegistry>,
+        raw: Option<&str>,
+    ) -> tool_api::registry::ToolRegistry {
         let mut ctx = tool_api::test_support::ctx_for_file_tools(
             tool_api::test_support::make_dummy_fs(),
             Arc::new(AnalyticsBus::new()),
@@ -140,12 +143,32 @@ mod output_schema_dispatch {
         );
         ctx.mcp_registry = Some(registry.clone());
         let tools = tool_api::registry::ToolRegistry::new();
-        tools.replace_mcp_tools(build_registered_mcp_tools(registry, ctx).await);
+        let bound = build_registered_mcp_tools(registry, ctx).await;
+        tools.replace_mcp_tools(
+            bound
+                .into_iter()
+                .map(|(connection, tools)| {
+                    (
+                        connection,
+                        tools
+                            .into_iter()
+                            .filter(|tool| {
+                                raw.is_none_or(|raw| {
+                                    tool.mcp_tool_identity()
+                                        .is_some_and(|identity| identity.raw_tool_name == raw)
+                                })
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
         tools
     }
 
     #[tokio::test]
-    async fn registered_colliding_names_keep_selected_schema_in_live_and_cached_mod_snapshots() {
+    async fn ambiguous_names_are_hidden_and_exact_selected_schema_survives_live_and_cached_snapshots(
+    ) {
         let _env = CacheEnv(std::env::var_os("MCP_DISCOVERY_CACHE"));
         std::env::set_var("MCP_DISCOVERY_CACHE", "true");
         let directory = tempfile::tempdir().unwrap();
@@ -202,7 +225,10 @@ mod output_schema_dispatch {
         };
         let live = make_registry();
         live.connect(config.clone()).await.unwrap();
-        let live_tools = registered_tools(&live).await;
+        let ambiguous = registered_tools(&live, None).await;
+        assert!(ambiguous.find_by_name("mcp__srv__a_b").is_none());
+        assert!(!ambiguous.all_names().contains(&"mcp__srv__a_b".to_owned()));
+        let live_tools = registered_tools(&live, Some("a.b")).await;
         let selected = live_tools.find_by_name("mcp__srv__a_b").unwrap();
         assert_eq!(selected.mcp_tool_identity().unwrap().raw_tool_name, "a.b");
         let bad = source_fixture(&json!({"bad":true}));
@@ -241,7 +267,10 @@ mod output_schema_dispatch {
             cached.connections.read().await.get("srv"),
             Some(mcp::McpConnectionState::Cached { .. })
         ));
-        let cached_tools = registered_tools(&cached).await;
+        let ambiguous = registered_tools(&cached, None).await;
+        assert!(ambiguous.find_by_name("mcp__srv__a_b").is_none());
+        assert!(!ambiguous.all_names().contains(&"mcp__srv__a_b".to_owned()));
+        let cached_tools = registered_tools(&cached, Some("a.b")).await;
         let selected = cached_tools.find_by_name("mcp__srv__a_b").unwrap();
         assert_eq!(selected.mcp_tool_identity().unwrap().raw_tool_name, "a.b");
         assert!(selected

@@ -381,14 +381,63 @@ impl McpRegistry {
         else {
             return Ok(original.into_tokens());
         };
-        // The per-server lifecycle lock serializes same-process connects.
-        // Reload before refreshing so a credential rotation completed by
-        // another owner is adopted instead of replaying its old refresh token.
-        let stored = oauth::load_tokens(&deps.storage, key)
+        // The refresh lease does not exclude login/logout publishers. Stage
+        // HTTP discovery, session changes and token writes against one frozen
+        // authority, then compare both token and session in the short commit.
+        let transaction =
+            oauth::retry_storage::OAuthRetryStorage::capture(deps.storage.clone(), key.to_owned())
+                .await
+                .map_err(|error| McpError::Connection(error.to_string().into()))?;
+        let stored = transaction.tokens()?.ok_or_else(|| {
+            McpError::Connection("MCP OAuth credential was removed while waiting to refresh".into())
+        })?;
+        let mut isolated = deps.clone();
+        isolated.storage = transaction.clone();
+        let mut owner = self.clone_for_background();
+        owner.oauth.as_mut().expect("OAuth dependencies").storage = transaction.clone();
+        owner.raw_name_oauth_storage = Some(transaction.clone());
+        let result = owner
+            .refresh_standard_token_snapshot(
+                config,
+                oauth_cfg,
+                key,
+                &isolated,
+                telemetry_ctx,
+                stored.clone(),
+            )
+            .await;
+        let (current, committed) = transaction
+            .finish(result.is_ok())
             .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| original.clone());
+            .map_err(|error| McpError::Connection(error.to_string().into()))?;
+        if committed || (result.is_err() && current.as_ref() == Some(&stored)) {
+            return result;
+        }
+        current
+            .filter(|token| {
+                !token.access_token.is_empty()
+                    && !token
+                        .remaining_seconds(deps.clock.now())
+                        .is_some_and(|seconds| seconds <= 0.0)
+            })
+            .map(oauth::StoredTokens::into_tokens)
+            .ok_or_else(|| {
+                McpError::Connection(
+                    "MCP OAuth refresh was superseded by a missing or expired credential".into(),
+                )
+            })
+    }
+
+    async fn refresh_standard_token_snapshot(
+        &self,
+        config: &McpServerConfig,
+        oauth_cfg: &lingxi_core::host::McpOAuthConfigDto,
+        key: &str,
+        deps: &OAuthDeps,
+        telemetry_ctx: &oauth::McpOAuthTelemetryContext,
+        original: oauth::StoredTokens,
+    ) -> Result<oauth::Tokens, McpError> {
+        let stored = original.clone();
         let now = deps.clock.now();
         if stored.is_fresh_refresh_winner(now) {
             return Ok(stored.into_tokens());

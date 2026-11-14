@@ -260,6 +260,10 @@ impl Fixture {
     }
 
     async fn new_with_steering(read_first: bool, steering: Option<Kind>) -> Self {
+        Self::new_with_terminal(read_first, steering, false).await
+    }
+
+    async fn new_with_terminal(read_first: bool, steering: Option<Kind>, completed: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let canonical = root.path().canonicalize().unwrap();
         let cwd = canonical.join("repo");
@@ -308,6 +312,7 @@ impl Fixture {
                         Some("end_turn"),
                     )
                 };
+                reply.id = format!("consumed-{index}");
                 reply.model = MODEL.into();
                 reply
             })
@@ -316,6 +321,11 @@ impl Fixture {
             .iter()
             .enumerate()
             .map(|(index, reply)| {
+                if completed {
+                    return vec![llm_runtime::HistoryEvent::Completed {
+                        response: Box::new(reply.clone()),
+                    }];
+                }
                 let mut events = vec![message_start(&format!("consumed-{index}"), MODEL)];
                 match &reply.content[0] {
                     llm_runtime::ContentBlock::ToolCall { id, name, input } => {
@@ -801,6 +811,137 @@ fn synthetic_mod_answers_do_not_ack_unsent_consume_once_sources_both_drivers() {
                     1
                 );
                 assert!(!calls[1].iter().any(|row| kind.matches(row, "A")));
+            }
+        }
+    });
+}
+
+const PASS_THROUGH_STEP: &str = r#"export function register(on) {
+    on('turn.step', async function*($, e, next) {
+        const below = next(e); for await (const chunk of below) yield chunk;
+        return await below.result;
+    });
+}"#;
+
+#[test]
+fn physical_mod_terminals_ack_retained_sources_after_cancel_and_hot_or_cold_recovery() {
+    run_test(async {
+        for streaming in [false, true] {
+            for completed in [false, true] {
+                if !streaming && completed {
+                    continue;
+                }
+                for recovery in 0..4 {
+                    let mut fixture = Fixture::new_with_terminal(false, None, completed).await;
+                    fixture.add_mod(PASS_THROUGH_STEP).await;
+                    for kind in [Kind::Hook, Kind::Memory] {
+                        fixture.sources.push(kind, "A", &fixture.generation);
+                    }
+                    fixture.interrupt(streaming).await;
+                    assert!(fixture.calls(streaming).await.is_empty());
+                    let ids = [Kind::Hook, Kind::Memory].map(|kind| {
+                        fixture
+                            .orch
+                            .consumed_reminders_for_kind(fixture.session, kind.name())
+                            .into_iter()
+                            .find(|row| kind.matches(&row.message, "A"))
+                            .unwrap()
+                            .message
+                            .id()
+                    });
+                    fixture.recover(recovery).await;
+                    for kind in [Kind::Hook, Kind::Memory] {
+                        fixture.sources.push(kind, "B", &fixture.generation);
+                    }
+                    fixture.run(streaming, "continue after cancellation").await;
+                    fixture.run(streaming, "same sources stay quiet").await;
+                    let calls = fixture.calls(streaming).await;
+                    assert_eq!(calls.len(), 2);
+                    let mut order = Vec::new();
+                    for row in &calls[0] {
+                        for (index, kind) in [Kind::Hook, Kind::Memory].into_iter().enumerate() {
+                            for suffix in ["A", "B"] {
+                                if kind.matches(row, suffix) {
+                                    if suffix == "A" {
+                                        assert_eq!(row.id(), ids[index]);
+                                    }
+                                    order.push(format!("{}-{suffix}", kind.name()));
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        order,
+                        [
+                            "async_hook_response-A",
+                            "async_hook_response-B",
+                            "memory_update-A",
+                            "memory_update-B"
+                        ]
+                    );
+                    assert!(!calls[1].iter().any(|row| [Kind::Hook, Kind::Memory]
+                        .into_iter()
+                        .any(|kind| kind.matches(row, "A") || kind.matches(row, "B"))));
+                    fixture.recover(3).await;
+                    fixture
+                        .run(streaming, "cold after successful delivery")
+                        .await;
+                    assert!(!fixture
+                        .calls(streaming)
+                        .await
+                        .last()
+                        .unwrap()
+                        .iter()
+                        .any(|row| [Kind::Hook, Kind::Memory]
+                            .into_iter()
+                            .any(|kind| kind.matches(row, "A") || kind.matches(row, "B"))));
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn physical_mod_terminals_ack_sources_with_running_user_append_both_drivers() {
+    run_test(async {
+        for streaming in [false, true] {
+            for completed in [false, true] {
+                if !streaming && completed {
+                    continue;
+                }
+                for kind in [Kind::Memory, Kind::Hook] {
+                    let fixture = Fixture::new_with_terminal(true, Some(kind), completed).await;
+                    fixture.add_mod(PASS_THROUGH_STEP).await;
+                    fixture.sources.push(kind, "BEFORE", &fixture.generation);
+                    fixture
+                        .run(streaming, "read before the steering input")
+                        .await;
+                    fixture.run(streaming, "no repeated reminders").await;
+                    let calls = fixture.calls(streaming).await;
+                    assert_eq!(calls.len(), 3);
+                    assert_eq!(
+                        calls[0]
+                            .iter()
+                            .filter(|row| kind.matches(row, "BEFORE"))
+                            .count(),
+                        1
+                    );
+                    assert!(!calls[0].iter().any(|row| kind.matches(row, "DURING_TOOLS")));
+                    assert_eq!(
+                        calls[1]
+                            .iter()
+                            .filter(|row| kind.matches(row, "DURING_TOOLS"))
+                            .count(),
+                        1
+                    );
+                    assert!(calls[1]
+                        .iter()
+                        .any(|row| row.text_content().contains("USER_STEERING_AFTER_REAL_READ")));
+                    assert!(!calls[1].iter().any(|row| kind.matches(row, "BEFORE")));
+                    assert!(!calls[2].iter().any(
+                        |row| kind.matches(row, "BEFORE") || kind.matches(row, "DURING_TOOLS")
+                    ));
+                }
             }
         }
     });

@@ -1109,6 +1109,10 @@ impl Tool for FileEditTool {
             fh.track_edit(&canon.to_string_lossy()).await;
         }
 
+        // A clean targeted edit can recover a stale observation without ever
+        // showing the surrounding external changes to the model. Publishing
+        // the new disk snapshot must not grant whole-file overwrite authority.
+        let content_not_in_model_context = prior_partial_view || stale_recovered;
         let commit_path = path.clone();
         let commit_canon = canon.clone();
         let commit_requested = requested_path.clone();
@@ -1152,7 +1156,7 @@ impl Tool for FileEditTool {
                     limit: None,
                     from_read: false,
                     seeded_from_context: false,
-                    is_partial_view: prior_partial_view,
+                    is_partial_view: content_not_in_model_context,
                 },
                 true,
                 vec![commit_requested, commit_path],
@@ -1197,7 +1201,7 @@ impl Tool for FileEditTool {
             file_path,
             replace_all,
             stale_recovered,
-            prior_partial_view,
+            content_not_in_model_context,
         );
 
         // claude-code FileEditTool result data (2.1.191): {filePath, oldString,
@@ -1222,7 +1226,7 @@ impl Tool for FileEditTool {
         if stale_recovered {
             data["staleRecovered"] = json!(true);
         }
-        if prior_partial_view {
+        if content_not_in_model_context {
             data["contentNotInModelContext"] = json!(true);
         }
         let mut data = crate::generated_result(&data);

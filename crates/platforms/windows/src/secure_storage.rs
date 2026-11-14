@@ -10,6 +10,7 @@ use lingxi_core::host::{
     SecureStorageError,
 };
 use lingxi_core::types::SecureStorageData;
+use platform_common::secure_storage::RuntimeFallbackStorage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -136,7 +137,7 @@ impl WindowsCredentialVaultStorage {
     }
 
     fn delete_all_targets(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
-        let prefix = self.target_prefix(service, account);
+        let prefix = format!("{}/", self.target_prefix(service, account));
         for target in self.backend.enumerate_targets()? {
             if target.starts_with(&prefix) {
                 self.backend.delete(&target)?;
@@ -359,16 +360,17 @@ pub async fn secure_storage_for_policy(
     plaintext_path: PathBuf,
     policy: CredentialStoragePolicy,
 ) -> Result<Arc<dyn SecureStorage>, SecureStorageError> {
+    let lock_directory = config_dir.join("credential-fallback-locks");
     match policy {
         CredentialStoragePolicy::PlainTextFixture => plaintext_secure_storage(plaintext_path).await,
         CredentialStoragePolicy::NativePreferred => {
             let fallback =
                 Arc::new(PlainTextSecureStorage::new(fallback_directory(&plaintext_path)).await?);
-            build_native_or_fallback(user, config_dir, fallback).await
+            build_native_or_fallback(user, config_dir, fallback, lock_directory)
         }
         CredentialStoragePolicy::NativeOrMemory => {
             let fallback = Arc::new(InMemorySecureStorage::new());
-            build_native_or_fallback(user, config_dir, fallback).await
+            build_native_or_fallback(user, config_dir, fallback, lock_directory)
         }
     }
 }
@@ -389,32 +391,39 @@ pub async fn secure_storage_for_platform(
     .await
 }
 
-async fn build_native_or_fallback(
+fn build_native_or_fallback(
     user: String,
     config_dir: PathBuf,
     fallback: Arc<dyn SecureStorage>,
+    lock_directory: PathBuf,
 ) -> Result<Arc<dyn SecureStorage>, SecureStorageError> {
-    match build_native_storage(user, config_dir) {
-        Ok(storage) => Ok(Arc::new(storage)),
-        Err(error) => {
-            tracing::warn!(
-                target: "lingxi::secure_storage",
-                %error,
-                fallback = ?fallback.backend(),
-                "Windows native credential storage unavailable during init."
-            );
-            Ok(fallback)
-        }
-    }
+    Ok(wrap_native_storage(
+        WindowsCredentialVaultStorage::new(user, config_dir),
+        fallback,
+        lock_directory,
+    ))
 }
 
-fn build_native_storage(
-    user: String,
-    config_dir: PathBuf,
-) -> Result<WindowsCredentialVaultStorage, SecureStorageError> {
-    let storage = WindowsCredentialVaultStorage::new(user, config_dir);
-    let _ = storage.backend.enumerate_targets()?;
-    Ok(storage)
+fn wrap_native_storage(
+    primary: WindowsCredentialVaultStorage,
+    fallback: Arc<dyn SecureStorage>,
+    lock_directory: PathBuf,
+) -> Arc<dyn SecureStorage> {
+    let initial_error = primary.backend.enumerate_targets().err();
+    // Keep the retryable native object even when its initial probe fails.
+    // Empty fallback means unknown native presence; deletion records a marker
+    // and successful recovery migrates fallback values under the same lock.
+    let storage = RuntimeFallbackStorage::new(Arc::new(primary), fallback, lock_directory);
+    Arc::new(if let Some(error) = initial_error {
+        tracing::warn!(
+            target: "lingxi::secure_storage",
+            %error,
+            "Windows native credential storage unavailable during init."
+        );
+        storage.with_fallback_active()
+    } else {
+        storage
+    })
 }
 
 fn encode_component(value: &str) -> String {
@@ -696,18 +705,30 @@ mod tests {
     use super::*;
     use lingxi_core::types::{SecretKindDto, SecureStorageMetadata};
     use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::time::SystemTime;
     use tempfile::tempdir;
 
     #[derive(Default)]
     struct MockCredentialBackend {
+        unavailable: AtomicBool,
         entries: Mutex<BTreeMap<String, Vec<u8>>>,
         fail_writes: Mutex<BTreeSet<String>>,
         deleted_targets: Mutex<Vec<String>>,
     }
 
     impl MockCredentialBackend {
+        fn available(&self) -> Result<(), SecureStorageError> {
+            if self.unavailable.load(Ordering::SeqCst) {
+                Err(SecureStorageError::BackendUnavailable(
+                    "synthetic vault unavailable".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
         fn fail_on_write(&self, target: String) {
             self.fail_writes.lock().unwrap().insert(target);
         }
@@ -728,6 +749,7 @@ mod tests {
             blob: &[u8],
             _username: &str,
         ) -> Result<(), SecureStorageError> {
+            self.available()?;
             if self.fail_writes.lock().unwrap().contains(target) {
                 return Err(SecureStorageError::BackendUnavailable(format!(
                     "mock write failure for {target}"
@@ -741,10 +763,12 @@ mod tests {
         }
 
         fn read(&self, target: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            self.available()?;
             Ok(self.entries.lock().unwrap().get(target).cloned())
         }
 
         fn delete(&self, target: &str) -> Result<(), SecureStorageError> {
+            self.available()?;
             self.deleted_targets
                 .lock()
                 .unwrap()
@@ -754,6 +778,7 @@ mod tests {
         }
 
         fn enumerate_targets(&self) -> Result<Vec<String>, SecureStorageError> {
+            self.available()?;
             Ok(self.entries.lock().unwrap().keys().cloned().collect())
         }
     }
@@ -873,6 +898,10 @@ mod tests {
         .await
         .expect("storage");
         assert_eq!(storage.backend(), SecureStorageBackend::MemorySession);
+        assert_eq!(
+            storage.account_ownership_backend(),
+            SecureStorageBackend::WindowsCredVault
+        );
         storage
             .store("lingxi", "provider-key-openai", payload(42))
             .await
@@ -882,6 +911,169 @@ mod tests {
             .await
             .expect("retrieve")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn repeated_missing_delete_preserves_prefix_neighbor_and_rollback() {
+        let backend = Arc::new(MockCredentialBackend::default());
+        let storage = WindowsCredentialVaultStorage::with_backend(
+            "tester".into(),
+            PathBuf::from("config"),
+            backend.clone(),
+        );
+        let a = "plugin-secret-example/API_KEY";
+        let b = "plugin-secret-example/API_KEY_BACKUP";
+        let expected = payload(CREDENTIAL_BLOB_LIMIT * 2 + 17);
+        storage.store("lingxi", a, payload(20)).await.unwrap();
+        storage.store("lingxi", b, expected.clone()).await.unwrap();
+        storage
+            .store("lingxi", "unrelated", payload(10))
+            .await
+            .unwrap();
+        storage.delete("lingxi", a).await.unwrap();
+        // A real failed-uninstall rollback restores B before deleting absent A.
+        storage.delete("lingxi", b).await.unwrap();
+        storage.store("lingxi", b, expected.clone()).await.unwrap();
+        storage.delete("lingxi", a).await.unwrap();
+        let actual = storage.retrieve("lingxi", b).await.unwrap().unwrap();
+        assert_eq!(actual.expose_secret_bytes(), expected.expose_secret_bytes());
+        assert!(storage.contains("lingxi", "unrelated").await.unwrap());
+        assert!(!storage.contains("lingxi", a).await.unwrap());
+        // Orphan cleanup still deletes the exact account's own chunks.
+        let orphan = storage.chunk_target("lingxi", a, 999, 0);
+        backend
+            .entries
+            .lock()
+            .unwrap()
+            .insert(orphan.clone(), vec![1]);
+        storage.delete("lingxi", a).await.unwrap();
+        assert!(!backend.has_target(&orphan));
+        assert!(storage.contains("lingxi", b).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_owned_fallback_preserves_scope_and_delegates_storage() {
+        for active in [
+            SecureStorageBackend::PlainText,
+            SecureStorageBackend::MemorySession,
+        ] {
+            let dir = tempdir().unwrap();
+            let inner: Arc<dyn SecureStorage> = if active == SecureStorageBackend::PlainText {
+                Arc::new(
+                    PlainTextSecureStorage::new(dir.path().join("fallback"))
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                Arc::new(InMemorySecureStorage::new())
+            };
+            let backend = Arc::new(MockCredentialBackend::default());
+            let primary = WindowsCredentialVaultStorage::with_backend(
+                "tester".into(),
+                dir.path().into(),
+                backend.clone(),
+            );
+            primary
+                .store("lingxi", "existing", payload(30))
+                .await
+                .unwrap();
+            backend.unavailable.store(true, Ordering::SeqCst);
+            let storage = wrap_native_storage(primary, inner.clone(), dir.path().join("locks"));
+            assert!(matches!(
+                storage.retrieve_uncached("lingxi", "existing").await,
+                Err(SecureStorageError::BackendUnavailable(_))
+            ));
+            assert!(matches!(
+                storage.contains("lingxi", "existing").await,
+                Err(SecureStorageError::BackendUnavailable(_))
+            ));
+            storage.delete("lingxi", "existing").await.unwrap();
+            assert!(!storage.contains("lingxi", "existing").await.unwrap());
+            assert_eq!(storage.backend(), active);
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::WindowsCredVault
+            );
+            storage
+                .store("lingxi", "account", payload(40))
+                .await
+                .unwrap();
+            assert!(storage.contains("lingxi", "account").await.unwrap());
+            assert!(storage
+                .retrieve_uncached("lingxi", "account")
+                .await
+                .unwrap()
+                .is_some());
+            assert_eq!(storage.list("lingxi").await.unwrap(), vec!["account"]);
+            storage.delete("lingxi", "account").await.unwrap();
+            assert!(!storage.contains("lingxi", "account").await.unwrap());
+            storage
+                .store("lingxi", "replacement", payload(50))
+                .await
+                .unwrap();
+            backend.unavailable.store(false, Ordering::SeqCst);
+            // A fresh owner retries native I/O and sees the same deletion markers.
+            let recovered = wrap_native_storage(
+                WindowsCredentialVaultStorage::with_backend(
+                    "tester".into(),
+                    dir.path().into(),
+                    backend,
+                ),
+                inner.clone(),
+                dir.path().join("locks"),
+            );
+            assert!(!recovered.contains("lingxi", "existing").await.unwrap());
+            assert!(recovered
+                .retrieve_uncached("lingxi", "existing")
+                .await
+                .unwrap()
+                .is_none());
+            assert!(!recovered.contains("lingxi", "account").await.unwrap());
+            assert!(recovered
+                .retrieve_uncached("lingxi", "replacement")
+                .await
+                .unwrap()
+                .is_some());
+            assert!(
+                inner
+                    .retrieve("lingxi", "replacement")
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "migration clears shadow"
+            );
+            assert_eq!(recovered.backend(), SecureStorageBackend::WindowsCredVault);
+            let fixture = plaintext_secure_storage(dir.path().join("fixture"))
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture.account_ownership_backend(),
+                SecureStorageBackend::PlainText
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn native_init_failure_keeps_ownership_for_both_policies() {
+        for policy in [
+            CredentialStoragePolicy::NativePreferred,
+            CredentialStoragePolicy::NativeOrMemory,
+        ] {
+            let dir = tempdir().unwrap();
+            let storage = secure_storage_for_policy(
+                "tester".into(),
+                dir.path().into(),
+                dir.path().join("credentials"),
+                policy,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                storage.account_ownership_backend(),
+                SecureStorageBackend::WindowsCredVault
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]

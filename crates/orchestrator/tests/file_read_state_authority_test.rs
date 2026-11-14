@@ -130,10 +130,12 @@ impl Fixture {
         context.read_file_state = map.clone();
         context.permission_gate = Some(gate.clone());
         let reader = Arc::new(tool_file::FileReadTool::new(context.clone()));
+        let editor = Arc::new(tool_file::FileEditTool::new(context.clone()));
         let writer = Arc::new(tool_file::FileWriteTool::new(context));
         let mut tools = tool_api::ToolRegistry::new();
         tools.register_builtin(wrap(reader.clone()));
         tools.register_builtin(writer.clone());
+        tools.register_builtin(editor);
         let (responses, streams) = scripts(&steps);
         let api = Arc::new(MockApiClient::new(responses));
         let streaming_api = Arc::new(MockStreamingApiClient::with_turns(streams));
@@ -1475,6 +1477,116 @@ fn cold_partial_edit_replay_preserves_write_fence_both_drivers() {
 }
 
 const EXACT_CHANGED_NOTE: &str = "changed on disk since you last read it.";
+
+#[test]
+fn stale_edit_keeps_unseen_content_write_protected_across_recovery_both_drivers() {
+    const CHILD: &str = "HARNESS_STALE_EDIT_WRITE_FENCE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "stale_edit_keeps_unseen_content_write_protected_across_recovery_both_drivers",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("RUST_MIN_STACK", "33554432")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let policy = Arc::new(permission::PermissionPolicy::from_rules(
+            permission::PermissionMode::Default,
+            [permission::PermissionRule::allow_tool_session("Read")],
+        ).with_roots(permission::FsRoots {
+            cwd: root.clone(), home: Some(root.join("home")), lingxi_home: root.join(".lingxi"),
+        }));
+        lingxi_core::host::read_auto_allow::set_read_auto_allow_probe(Arc::new(
+            permission::read_auto_allow::PolicyReadAutoAllow::new(
+                policy.clone(), vec!["Read".into(), "Edit".into(), "Write".into()],
+            ),
+        ));
+        let gate = Arc::new(permission::PolicyPermissionGate::new(policy, Arc::new(NoOpPermissionGate)));
+        for streaming in [false, true] { for utf16 in [false, true] {
+            let temp = tempfile::tempdir_in(&root).unwrap();
+            let cwd = temp.path().canonicalize().unwrap();
+            let path = cwd.join("file.txt");
+            let initial = "alpha\nold line 雪\n";
+            let external = "alpha\nUSER-EXTERNAL-未展示\n";
+            let replacement = "beta\nold line 雪\n";
+            let save_body = |body: &str, seconds| {
+                if utf16 {
+                    save_exact_utf16(&path, &body.encode_utf16().collect::<Vec<_>>(), seconds);
+                } else { save(&path, body, seconds); }
+            };
+            save_body(initial, 1_000_000);
+            let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(cwd.clone()));
+            let transcript = cwd.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+            let live = Fixture::with_recording(&cwd, fs.clone(), Arc::new(StaticMemoryProvider::empty()),
+                gate.clone(), vec![
+                    Step::Tool("Read", serde_json::json!({"file_path":path})), Step::Done,
+                    Step::Tool("Edit", serde_json::json!({"file_path":path,"old_string":"alpha","new_string":"beta"})),
+                    Step::Tool("Write", serde_json::json!({"file_path":path,"content":replacement})), Step::Done,
+                ], |reader| reader,
+                Some(Arc::new(session::JsonlWriter::new(transcript.clone(), fs.clone())))).await;
+            live.run(streaming).await;
+            save_body(external, 2_000_000);
+            live.run(streaming).await;
+            let requests = live.requests(streaming).await;
+            assert_eq!(requests.len(), 5);
+            let before_write = serde_json::to_string(&requests[3]).unwrap();
+            assert!(before_write.contains("other changes not in your context"));
+            assert!(!before_write.contains("USER-EXTERNAL"), "UI sidecars must not enter model history");
+            assert!(serde_json::to_string(&requests[4]).unwrap().contains(tool_file::FILE_NOT_READ_ERROR));
+            let expected = external.replacen("alpha", "beta", 1);
+            let units = tool_file::file_meta::decode_native_text_units(&std::fs::read(&path).unwrap());
+            assert_eq!(String::from_utf16_lossy(units.strip_prefix(&[0xfeff]).unwrap_or(&units)), expected);
+            assert!(reads::get(&live.map, &path).unwrap().is_partial_view);
+
+            let id = live.orch.current_session_id().await.as_uuid();
+            let raw = std::fs::read_to_string(&transcript).unwrap();
+            assert!(raw.contains("contentNotInModelContext"));
+            let replay = orchestrator::resume::replay_captured_session(
+                transcript, raw.clone(), session::jsonl::route_lines(&raw), id).unwrap();
+            // Same-instance and new-instance replay must retain the same fence.
+            for orch in [&live.orch] {
+                orch.restore_captured_session_history(id, &replay.messages,
+                    &session::jsonl::route_lines(&raw).messages_in_order, true,
+                    permission::PermissionMode::Default, ConversationMode::Code, &raw).await.unwrap();
+            }
+            assert!(reads::get(&live.map, &path).unwrap().is_partial_view);
+            let cold = Fixture::new(&cwd, fs, Arc::new(StaticMemoryProvider::empty()), gate.clone(), vec![
+                Step::Tool("Read", serde_json::json!({"file_path":path})),
+                Step::Tool("Write", serde_json::json!({"file_path":path,"content":replacement})), Step::Done,
+            ]).await;
+            cold.orch.restore_captured_session_history(id, &replay.messages,
+                &session::jsonl::route_lines(&raw).messages_in_order, true,
+                permission::PermissionMode::Default, ConversationMode::Code, &raw).await.unwrap();
+            assert!(reads::get(&cold.map, &path).unwrap().is_partial_view);
+            let blocked = source(serde_json::json!({"file_path":path,"content":replacement}));
+            for fixture in [&live, &cold] {
+                let error = fixture.writer.call(blocked.clone(), tool_api::test_support::fresh_ctx(),
+                    tool_api::test_support::fresh_tx()).await.unwrap_err();
+                assert_eq!(error.model_facing_message().string_at(""), Some(tool_file::FILE_NOT_READ_ERROR));
+            }
+            // A complete model-dispatched Read, and only then, permits Write.
+            cold.run(streaming).await;
+            assert!(!reads::get(&cold.map, &path).unwrap().is_partial_view);
+            let units = tool_file::file_meta::decode_native_text_units(&std::fs::read(&path).unwrap());
+            assert_eq!(String::from_utf16_lossy(units.strip_prefix(&[0xfeff]).unwrap_or(&units)), replacement);
+        }}
+    });
+}
 
 fn save_exact_utf16(path: &Path, units: &[u16], seconds: u64) {
     let bytes = std::iter::once(0xfeffu16)

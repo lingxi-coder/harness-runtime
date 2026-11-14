@@ -17,6 +17,7 @@ mod auth_recovery_and_waiters {
         list_gate: AtomicBool,
         list_entered: tokio::sync::Notify,
         list_release: tokio::sync::Notify,
+        disconnected: tokio::sync::Notify,
         conns: StdMutex<HashMap<McpConnectionId, Arc<jsonrpc::Connection>>>,
         bearers: StdMutex<Vec<String>>,
     }
@@ -148,6 +149,7 @@ mod auth_recovery_and_waiters {
         }
         async fn disconnect(&self, id: McpConnectionId) -> Result<(), McpError> {
             self.conns.lock().unwrap().remove(&id);
+            self.disconnected.notify_one();
             Ok(())
         }
         fn supported_transports(&self) -> Vec<McpTransportKind> {
@@ -224,6 +226,9 @@ mod auth_recovery_and_waiters {
     }
     impl Fixture {
         async fn new(cached: bool) -> Self {
+            Self::new_with_publish_gate(cached, None).await
+        }
+        async fn new_with_publish_gate(cached: bool, publish: Option<Arc<TestPauseHook>>) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let mut config = http_cfg("srv", "https://mcp.example.test/v1");
             config.discovery_cache = Some(true);
@@ -246,26 +251,38 @@ mod auth_recovery_and_waiters {
             let peer = Arc::new(Peer::default());
             let http = Arc::new(Http::default());
             let make = || {
-                Arc::new(
-                    McpRegistry::with_raw_conn(peer.clone(), peer.clone())
-                        .with_oauth(OAuthDeps {
-                            http: http.clone(),
-                            clock: clock.clone(),
-                            storage: storage.clone(),
-                            on_authorization_url: Arc::new(|_| {
-                                panic!("valid refresh never opens a browser")
-                            }),
-                            xaa_config: None,
-                        })
-                        .with_discovery_cache_store(
-                            crate::discovery_cache::DiscoveryCacheStore::new(directory.path()),
-                        ),
-                )
+                let mut registry = McpRegistry::with_raw_conn(peer.clone(), peer.clone())
+                    .with_oauth(OAuthDeps {
+                        http: http.clone(),
+                        clock: clock.clone(),
+                        storage: storage.clone(),
+                        on_authorization_url: Arc::new(|_| {
+                            panic!("valid refresh never opens a browser")
+                        }),
+                        xaa_config: None,
+                    })
+                    .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(
+                        directory.path(),
+                    ))
+                    .with_mcp_oauth_identity(oauth::McpOAuthIdentity {
+                        refresh_lock_dir: Some(directory.path().join("refresh-locks")),
+                        ..Default::default()
+                    });
+                if let Some(hook) = &publish {
+                    registry = registry.with_pause_before_client_publish(hook.clone());
+                }
+                Arc::new(registry)
             };
             let key = oauth::server_key(config.storage_name(), &config.spec);
             save(&storage, &clock, &key, "a").await;
             let registry = make();
+            if let Some(hook) = &publish {
+                hook.release.notify_one();
+            }
             registry.connect(config.clone()).await.unwrap();
+            if let Some(hook) = &publish {
+                entered(&hook.entered).await;
+            }
             let registry = if cached {
                 let reader = make();
                 reader.connect(config.clone()).await.unwrap();
@@ -365,6 +382,304 @@ mod auth_recovery_and_waiters {
         allowed: Arc<AtomicBool>,
     ) -> crate::tool_identity::McpToolDispatchGuard {
         Arc::new(move |current| current == &identity && allowed.load(Ordering::SeqCst))
+    }
+
+    fn ordinary_registry(fixture: &Fixture) -> Arc<McpRegistry> {
+        Arc::new(
+            McpRegistry::with_raw_conn(fixture.peer.clone(), fixture.peer.clone())
+                .with_mcp_oauth_identity(fixture.registry.oauth_identity.clone())
+                .with_oauth(OAuthDeps {
+                    http: fixture.http.clone(),
+                    clock: fixture.clock.clone(),
+                    storage: fixture.storage.clone(),
+                    on_authorization_url: Arc::new(|_| panic!("no browser")),
+                    xaa_config: None,
+                }),
+        )
+    }
+
+    async fn expire_a(fixture: &Fixture) {
+        let mut token = fixture.stored().await;
+        token.expires_at_millis =
+            oauth::OAuthExpiry::from_system_time(fixture.clock.now() - Duration::from_secs(1));
+        oauth::store_tokens(&fixture.storage, &fixture.clock, &fixture.key, &token)
+            .await
+            .unwrap();
+    }
+
+    struct RefreshStorageFault {
+        base: Arc<dyn SecureStorage>,
+        capture: AtomicBool,
+        commit: AtomicBool,
+        after_publication: bool,
+    }
+    #[async_trait::async_trait]
+    impl SecureStorage for RefreshStorageFault {
+        async fn store(
+            &self,
+            service: &str,
+            key: &str,
+            data: lingxi_core::types::SecureStorageData,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
+            let fail = self.commit.swap(false, Ordering::SeqCst);
+            if !fail || self.after_publication {
+                self.base.store(service, key, data).await?;
+            }
+            if fail {
+                return Err(lingxi_core::host::SecureStorageError::Io(
+                    "synthetic commit failure".into(),
+                ));
+            }
+            Ok(())
+        }
+        async fn retrieve(
+            &self,
+            service: &str,
+            key: &str,
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
+            self.base.retrieve(service, key).await
+        }
+        async fn retrieve_uncached(
+            &self,
+            service: &str,
+            key: &str,
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
+            if self.capture.swap(false, Ordering::SeqCst) {
+                return Err(lingxi_core::host::SecureStorageError::BackendUnavailable(
+                    "synthetic capture failure".into(),
+                ));
+            }
+            self.base.retrieve_uncached(service, key).await
+        }
+        async fn delete(
+            &self,
+            service: &str,
+            key: &str,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
+            self.base.delete(service, key).await
+        }
+        async fn list(
+            &self,
+            service: &str,
+        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
+            self.base.list(service).await
+        }
+        fn is_encrypted(&self) -> bool {
+            self.base.is_encrypted()
+        }
+        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+            self.base.backend()
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_refresh_storage_errors_preserve_grant_and_do_not_request_login() {
+        for (capture, after_publication) in [(true, false), (false, false), (false, true)] {
+            let fixture = Fixture::new(false).await;
+            expire_a(&fixture).await;
+            let original = fixture.stored().await;
+            let storage = Arc::new(RefreshStorageFault {
+                base: fixture.storage.clone(),
+                capture: AtomicBool::new(capture),
+                commit: AtomicBool::new(!capture),
+                after_publication,
+            });
+            let registry = McpRegistry::with_raw_conn(fixture.peer.clone(), fixture.peer.clone())
+                .with_mcp_oauth_identity(fixture.registry.oauth_identity.clone())
+                .with_oauth(OAuthDeps {
+                    http: fixture.http.clone(),
+                    clock: fixture.clock.clone(),
+                    storage,
+                    on_authorization_url: Arc::new(|_| {
+                        panic!("storage failure must not open login")
+                    }),
+                    xaa_config: None,
+                });
+            let error = registry.connect(fixture.config.clone()).await.unwrap_err();
+            assert!(matches!(error, McpError::Connection(_)), "{error}");
+            assert!(matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Disconnected {
+                    last_error: Some(_),
+                    ..
+                })
+            ));
+            assert_eq!(
+                fixture.stored().await,
+                original,
+                "failed commit compensates token publication"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_refresh_preserves_new_token_and_session_on_success_and_failure() {
+        for (fail, invalid) in [(false, false), (true, false), (false, true)] {
+            let fixture = Fixture::new(false).await;
+            expire_a(&fixture).await;
+            fixture.http.gate.store(true, Ordering::SeqCst);
+            fixture.http.fail.store(fail, Ordering::SeqCst);
+            fixture.http.invalid_grant.store(invalid, Ordering::SeqCst);
+            let owner = ordinary_registry(&fixture);
+            let task = {
+                let owner = owner.clone();
+                let config = fixture.config.clone();
+                tokio::spawn(async move { owner.connect(config).await })
+            };
+            entered(&fixture.http.entered).await;
+            let mut session = oauth::session::load(&fixture.storage, &fixture.key)
+                .await
+                .unwrap();
+            session.client_registration = Some("new-owner-registration".into());
+            oauth::session::save(&fixture.storage, &fixture.clock, &fixture.key, &session)
+                .await
+                .unwrap();
+            save(&fixture.storage, &fixture.clock, &fixture.key, "c").await;
+            fixture.http.release.notify_one();
+            settled(task).await.unwrap();
+            assert_eq!(fixture.stored().await.access_token, "access-c");
+            assert_eq!(
+                oauth::session::load(&fixture.storage, &fixture.key)
+                    .await
+                    .unwrap()
+                    .client_registration
+                    .as_deref(),
+                Some("new-owner-registration")
+            );
+            assert_eq!(
+                *fixture.peer.bearers.lock().unwrap(),
+                ["Bearer access-a", "Bearer access-c"]
+            );
+            owner
+                .call_tool_with_auth_retry(
+                    "srv",
+                    "mcp__srv__ping",
+                    source_json(&serde_json::json!({})),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_refresh_does_not_resurrect_a_concurrent_logout() {
+        let fixture = Fixture::new(false).await;
+        expire_a(&fixture).await;
+        fixture.http.gate.store(true, Ordering::SeqCst);
+        let owner = ordinary_registry(&fixture);
+        let task = {
+            let config = fixture.config.clone();
+            tokio::spawn(async move { owner.connect(config).await })
+        };
+        entered(&fixture.http.entered).await;
+        fixture.registry.disconnect("srv").await.unwrap();
+        fixture.http.release.notify_one();
+        assert!(settled(task).await.is_err());
+        assert!(oauth::load_tokens(&fixture.storage, &fixture.key)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn canceled_auth_http_or_catalog_wait_can_continue_without_manual_reconnect() {
+        for catalog_wait in [false, true] {
+            for status in [401, 403] {
+                let fixture = Fixture::new(false).await;
+                if catalog_wait {
+                    fixture.peer.list_gate.store(true, Ordering::SeqCst);
+                    save(&fixture.storage, &fixture.clock, &fixture.key, "c").await;
+                } else {
+                    fixture.http.gate.store(true, Ordering::SeqCst);
+                }
+                let call = fixture.reject_first(status).await;
+                fixture.peer.call_release.notify_one();
+                if catalog_wait {
+                    entered(&fixture.peer.list_entered).await;
+                } else {
+                    entered(&fixture.http.entered).await;
+                }
+                call.abort();
+                assert!(call.await.unwrap_err().is_cancelled());
+                if catalog_wait {
+                    entered(&fixture.peer.disconnected).await;
+                }
+                assert!(matches!(
+                    fixture.registry.connections.read().await.get("srv"),
+                    Some(McpConnectionState::Connected { .. })
+                ));
+                assert_eq!(
+                    fixture.peer.conns.lock().unwrap().len(),
+                    1,
+                    "only the registered generation remains"
+                );
+                save(&fixture.storage, &fixture.clock, &fixture.key, "c").await;
+                // A real server keeps rejecting the old bearer, so retry must
+                // adopt C rather than merely succeeding once with old A.
+                let resumed = fixture.reject_first(status).await;
+                fixture.peer.call_release.notify_one();
+                settled(resumed).await.unwrap();
+                assert_eq!(fixture.stored().await.access_token, "access-c");
+                assert_eq!(
+                    fixture.peer.bearers.lock().unwrap().last().unwrap(),
+                    "Bearer access-c"
+                );
+                assert_eq!(fixture.peer.calls.load(Ordering::SeqCst), 3);
+                assert_eq!(fixture.peer.conns.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_auth_publication_settles_without_replaying_rpc_and_respects_logout() {
+        for logout in [false, true] {
+            let publish = Arc::new(TestPauseHook::default());
+            let fixture = Fixture::new_with_publish_gate(false, Some(publish.clone())).await;
+            let call = fixture.reject_first(401).await;
+            save(&fixture.storage, &fixture.clock, &fixture.key, "c").await;
+            fixture.peer.call_release.notify_one();
+            entered(&publish.entered).await;
+            call.abort();
+            assert!(call.await.unwrap_err().is_cancelled());
+            if logout {
+                let registry = fixture.registry.clone();
+                let stopped = tokio::spawn(async move { registry.disconnect("srv").await });
+                publish.release.notify_one();
+                settled(stopped).await.unwrap();
+                assert!(oauth::load_tokens(&fixture.storage, &fixture.key)
+                    .await
+                    .unwrap()
+                    .is_none());
+                assert!(!fixture.registry.has_callable_server("srv").await);
+                assert_eq!(
+                    fixture.peer.calls.load(Ordering::SeqCst),
+                    1,
+                    "publication must not replay the canceled RPC"
+                );
+            } else {
+                let continued = fixture.spawn_call();
+                publish.release.notify_one();
+                settled(continued).await.unwrap();
+                assert_eq!(fixture.stored().await.access_token, "access-c");
+                assert_eq!(
+                    fixture.peer.calls.load(Ordering::SeqCst),
+                    2,
+                    "one canceled call plus one new call"
+                );
+                assert_eq!(
+                    fixture.peer.bearers.lock().unwrap().last().unwrap(),
+                    "Bearer access-c"
+                );
+            }
+        }
     }
 
     #[tokio::test]

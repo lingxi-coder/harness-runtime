@@ -492,8 +492,13 @@ fn recover_snapshot(
             let mut recovered = snapshot(without_bom(&after).to_vec(), false);
             // The full originalFile sidecar is UI/replay evidence, not proof
             // that a truncated Read's unseen suffix entered model context.
-            // Live Edit preserves this fence until a complete Read replaces it.
+            // A stale-recovered edit also discovers surrounding external
+            // changes without showing them. Only a complete Read clears that
+            // fence, including when replaying an older staleRecovered receipt.
             recovered.entry.is_partial_view = match data.at_pointer("/contentNotInModelContext") {
+                Some(value) => value.as_bool()?,
+                None => false,
+            } || match data.at_pointer("/staleRecovered") {
                 Some(value) => value.as_bool()?,
                 None => false,
             } || prior
@@ -991,6 +996,35 @@ mod tests {
             false,
         );
         assert_eq!(restored(&session).unwrap().content, "ONE\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn stale_edit_receipt_keeps_unseen_fence_until_a_complete_read_even_without_new_marker() {
+        for context_marker in [None, Some(false), Some(true)] {
+            let mut session = session();
+            append_read(&mut session, "one\nold\n");
+            let before = "one\nexternal unseen\n";
+            let after = "ONE\nexternal unseen\n";
+            let id = call(
+                &mut session,
+                "Edit",
+                json!({"file_path":FILE,"old_string":"one","new_string":"ONE"}),
+            );
+            let mut data = json!({"filePath":FILE,"originalFile":before,"staleRecovered":true,
+                "structuredPatch":tool_file::structured_patch::build_structured_patch(before, after)});
+            if let Some(marker) = context_marker {
+                data["contentNotInModelContext"] = json!(marker);
+            }
+            result(&mut session, id, Some(data), false);
+            let recovered = restored(&session).unwrap();
+            assert_eq!(recovered.content, after);
+            assert!(
+                recovered.is_partial_view,
+                "UI originalFile is not a model view"
+            );
+            append_read(&mut session, after);
+            assert!(!restored(&session).unwrap().is_partial_view);
+        }
     }
 
     #[test]

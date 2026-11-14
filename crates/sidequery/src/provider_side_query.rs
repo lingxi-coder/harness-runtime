@@ -45,15 +45,19 @@ use lingxi_core::types::{HttpRequest, HttpResponse};
 use lingxi_llm_client::providers::anthropic::system_prompt::{PromptText, SystemPromptInput};
 use llm_runtime::Transport;
 use llm_runtime::{
-    AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, LlmError, LlmRequest,
-    ModelProfile, ModelRuntime, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
-    StaticCredentialProvider, SystemBlock,
+    ApiService, AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, LlmError,
+    LlmRequest, ModelProfile, ModelRuntime, PricingConfig, ProtocolFamily, ProviderId,
+    ProviderProfile, StaticCredentialProvider, SystemBlock,
 };
 use std::sync::Arc;
 
 #[cfg(test)]
 #[path = "dispatch_admission_tests.rs"]
 mod dispatch_admission_tests;
+
+#[cfg(test)]
+#[path = "selected_route_estimate_tests.rs"]
+mod selected_route_estimate_tests;
 
 /// Default Anthropic API base URL used when the caller passes `None`.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -811,7 +815,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                     request.native_prompt_context.as_ref(),
                     query_source,
                 )?;
-                estimate_canonical_request(canonical)
+                estimate_canonical_request(service, canonical)
             }
             (
                 ProviderSideQueryBackend::Session(service),
@@ -841,7 +845,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                     temperature,
                     Some(query_source),
                 )?;
-                estimate_canonical_request(canonical)
+                estimate_canonical_request(service, canonical)
             }
             (_, request) => {
                 let serialized_bytes = match request {
@@ -1081,11 +1085,14 @@ impl SideQueryClient for ProviderSideQueryClient {
     }
 }
 
-fn estimate_canonical_request(request: LlmRequest) -> Result<SideQueryEstimate, SideQueryError> {
+fn estimate_canonical_request(
+    service: &ApiService,
+    request: LlmRequest,
+) -> Result<SideQueryEstimate, SideQueryError> {
     let serialized_bytes = crate::side_query::serialized_size(&request)?;
     Ok(SideQueryEstimate {
         serialized_bytes,
-        input_tokens: llm_runtime::model::count_tokens::approximate_tokens(&request),
+        input_tokens: service.estimate_input_tokens(&request)?,
     })
 }
 

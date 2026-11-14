@@ -265,7 +265,11 @@ impl ToolRegistry {
     /// cannot inherit a registered tool's authority.
     pub fn check_session_tool_access(&self, tool: &dyn Tool) -> Result<(), crate::ToolError> {
         if self.session_tool_lease.is_none() && self.session_allowlist.is_none() {
-            return Ok(());
+            // Ordinary sessions also cannot dispatch a captured MCP handle
+            // whose model name now identifies more than one raw capability.
+            if tool.mcp_tool_identity().is_none() || !self.mcp_name_is_ambiguous(tool.name()) {
+                return Ok(());
+            }
         }
         let allowed = self
             .find_by_name(tool.name())
@@ -285,6 +289,39 @@ impl ToolRegistry {
                 tool.mcp_tool_identity()
                     .is_some_and(|identity| lease.allows_mcp(identity))
             })
+    }
+
+    fn mcp_name_is_ambiguous(&self, name: &str) -> bool {
+        self.mcp_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .filter(|tool| {
+                self.session_allows_mcp(tool.as_ref())
+                    && (tool.name() == name || tool.aliases().contains(&name))
+            })
+            .take(2)
+            .count()
+            > 1
+    }
+
+    fn unambiguous_mcp_tools(&self) -> Vec<Arc<dyn Tool>> {
+        let mut tools = self
+            .mcp_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .filter(|tool| self.session_allows_mcp(tool.as_ref()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut counts = std::collections::HashMap::<String, usize>::new();
+        for tool in &tools {
+            *counts.entry(tool.name().to_owned()).or_default() += 1;
+        }
+        tools.retain(|tool| counts.get(tool.name()) == Some(&1));
+        tools
     }
 
     fn session_allows(&self, name: &str) -> bool {
@@ -514,17 +551,7 @@ impl ToolRegistry {
 
         // Dynamic partition: MCP + Mod + LSP + plugin, locale-sorted by name.
         let mut dynamic: Vec<Arc<dyn Tool>> = Vec::new();
-        let mcp_tools = self
-            .mcp_tools
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (_id, ts) in mcp_tools.iter() {
-            dynamic.extend(
-                ts.iter()
-                    .filter(|tool| self.session_allows_mcp(tool.as_ref()))
-                    .cloned(),
-            );
-        }
+        dynamic.extend(self.unambiguous_mcp_tools());
         for (_plugin, ts) in self
             .mod_tools
             .read()
@@ -639,7 +666,7 @@ impl ToolRegistry {
                         && (t.name() == name || t.aliases().contains(&name))
                 });
             if let Some(tool) = matching.next() {
-                if self.session_tool_lease.is_some() && matching.next().is_some() {
+                if matching.next().is_some() {
                     return None;
                 }
                 return Some(tool.clone());
@@ -817,13 +844,9 @@ impl ToolRegistry {
             .map(|t| t.name().to_string())
             .collect::<Vec<_>>();
         names.extend(
-            self.mcp_tools
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            self.unambiguous_mcp_tools()
                 .iter()
-                .flat_map(|(_id, tools)| tools.iter())
-                .filter(|tool| self.session_allows_mcp(tool.as_ref()))
-                .map(|t| t.name().to_string()),
+                .map(|tool| tool.name().to_owned()),
         );
         names.extend(
             self.mod_tools
@@ -1240,6 +1263,52 @@ mod tests {
             .is_empty());
         assert!(registry.find_by_name("mcp__srv__read_a").is_none());
         assert!(registry.all_names().is_empty());
+    }
+
+    #[test]
+    fn ordinary_mcp_name_collisions_are_unadvertised_undispatchable_and_recover_on_refresh() {
+        let mut registry = ToolRegistry::new();
+        let id = McpConnectionId::new();
+        let first: Arc<dyn Tool> = Arc::new(ProvenanceTool {
+            name: "mcp__srv__a_b",
+            identity: crate::McpToolIdentity {
+                server_config_id: "slot".into(),
+                config_revision: "v1".into(),
+                raw_tool_name: "a.b".into(),
+                definition_fingerprint: "first".into(),
+            },
+        });
+        let second: Arc<dyn Tool> = Arc::new(ProvenanceTool {
+            name: "mcp__srv__a_b",
+            identity: crate::McpToolIdentity {
+                server_config_id: "slot".into(),
+                config_revision: "v1".into(),
+                raw_tool_name: "a_b".into(),
+                definition_fingerprint: "second".into(),
+            },
+        });
+        registry.register_mcp_tools(id, vec![first.clone(), second.clone()]);
+        assert!(registry
+            .available_tools(&ToolStaticContext::default())
+            .is_empty());
+        assert!(registry.find_by_name("mcp__srv__a_b").is_none());
+        assert!(registry.all_names().is_empty());
+        for tool in [&first, &second] {
+            assert!(registry.check_session_tool_access(tool.as_ref()).is_err());
+        }
+        registry.register_mcp_tools(id, vec![first.clone()]);
+        assert_eq!(registry.all_names(), vec!["mcp__srv__a_b"]);
+        assert_eq!(
+            registry
+                .available_tools(&ToolStaticContext::default())
+                .len(),
+            1
+        );
+        assert!(Arc::ptr_eq(
+            &registry.find_by_name("mcp__srv__a_b").unwrap(),
+            &first
+        ));
+        assert!(registry.check_session_tool_access(first.as_ref()).is_ok());
     }
 
     #[test]

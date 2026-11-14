@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 autotests = false
 
+[[test]]
+name = "credential_storage_boundaries_test"
+path = "tests/credential_storage_boundaries_test.rs"
+required-features = ["desktop"]
+
 [features]
 realtime-websocket = ["llm-runtime/realtime-websocket"]
 test-support = []

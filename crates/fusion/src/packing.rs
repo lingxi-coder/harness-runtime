@@ -1196,6 +1196,115 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn session_preflight_ignores_only_schema_that_the_selected_route_suppresses() {
+        struct NoSend;
+        #[async_trait::async_trait]
+        impl llm_runtime::Transport for NoSend {
+            async fn send(
+                &self,
+                _: llm_runtime::services::sdk::HttpRequest,
+            ) -> Result<
+                llm_runtime::services::sdk::StreamResponse,
+                llm_runtime::services::sdk::protocol::LlmError,
+            > {
+                panic!("preflight must never dispatch");
+            }
+        }
+        for supports_schema in [false, true] {
+            let mut provider = llm_runtime::builtin_presets()
+                .providers
+                .into_iter()
+                .find(|p| p.profile_name == "anthropic")
+                .unwrap();
+            provider.profile_name = "preflight".into();
+            provider.provider_id = llm_runtime::ProviderId::Custom {
+                name: "preflight".into(),
+            };
+            provider.base_url = "https://preflight.invalid".into();
+            provider.auth = llm_runtime::AuthStrategy::None;
+            provider.credential = llm_runtime::CredentialConfig::None;
+            provider.wire_profile = None;
+            provider.models.truncate(1);
+            let model = &mut provider.models[0];
+            model.display_model = "claude-sonnet-4-6".into();
+            model.request_model = "claude-sonnet-4-6".into();
+            model.billing_model = "claude-sonnet-4-6".into();
+            model.aliases.clear();
+            model.capabilities.structured_output = supports_schema;
+            let service = llm_runtime::ApiService::new(
+                std::sync::Arc::new(
+                    llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+                        providers: vec![provider],
+                    })
+                    .unwrap(),
+                ),
+                std::sync::Arc::new(NoSend),
+                Default::default(),
+                llm_runtime::model::user_agent::UserAgentEnv::default(),
+                "test",
+                None,
+                None,
+            );
+            let client =
+                sidequery::ProviderSideQueryClient::from_service(std::sync::Arc::new(service));
+            let request = request();
+            let analyst = ResolvedPanel {
+                profile: "preflight".into(),
+                model: "claude-sonnet-4-6".into(),
+            };
+            let schema = json!({"type":"object","properties":{},"additionalProperties":false});
+            let cap = client
+                .estimate_request(CanonicalSideQueryRequest::Strict(strict_request(
+                    &analyst,
+                    analyst_user_message(&request, &[], None),
+                    schema.clone(),
+                    128,
+                    "judge",
+                )))
+                .unwrap()
+                .input_tokens;
+            let limits = ModelLimits {
+                context_window_tokens: None,
+                max_input_tokens: Some(cap + 1),
+                max_output_tokens: Some(128),
+            };
+            preflight_analyst_request(
+                &client,
+                &request,
+                &analyst,
+                &[],
+                schema.clone(),
+                "judge".into(),
+                false,
+                128,
+                limits,
+            )
+            .unwrap();
+            let mut large = schema;
+            large["description"] = json!("X".repeat(15_000));
+            let result = preflight_analyst_request(
+                &client,
+                &request,
+                &analyst,
+                &[],
+                large,
+                "judge".into(),
+                false,
+                128,
+                limits,
+            );
+            if supports_schema {
+                assert!(matches!(
+                    result,
+                    Err(PackingError::MandatoryTooLarge { .. })
+                ));
+            } else {
+                result.expect("suppressed schema cannot reject otherwise identical provider input");
+            }
+        }
+    }
+
     #[test]
     fn eight_panels_and_twelve_dimensions_pack_to_the_exact_final_cap() {
         let mut request = request();
