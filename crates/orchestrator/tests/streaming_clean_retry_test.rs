@@ -83,7 +83,8 @@ async fn retry_request_omits_malformed_and_thinking_only_attempts() {
 #[tokio::test]
 async fn terminal_streaming_errors_persist_api_error_envelopes() {
     for (stop, attempts, expected_error, inner_stop) in [
-        ("tool_use", 2, None, "stop_sequence"),
+        // Native 2.1.319 retries a malformed tool use twice (2bbcef32).
+        ("tool_use", 3, None, "stop_sequence"),
         ("max_tokens", 4, Some("max_output_tokens"), "stop_sequence"),
         (
             "model_context_window_exceeded",

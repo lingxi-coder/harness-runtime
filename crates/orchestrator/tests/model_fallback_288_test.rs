@@ -280,6 +280,26 @@ fn make(
         Arc::new(PosixFileSystem::new(path.parent().unwrap().to_path_buf())),
     )))
 }
+/// Request messages without the per-model identity row and cache markers.
+fn step_context(messages: &serde_json::Value) -> serde_json::Value {
+    let mut messages = messages.clone();
+    for message in messages.as_array_mut().into_iter().flatten() {
+        if let Some(blocks) = message["content"].as_array_mut() {
+            blocks.retain(|block| {
+                !block["text"].as_str().is_some_and(|text| {
+                    text.starts_with("<system-reminder>\nYou are powered by the model")
+                })
+            });
+            for block in blocks {
+                if let Some(block) = block.as_object_mut() {
+                    block.remove("cache_control");
+                }
+            }
+        }
+    }
+    messages
+}
+
 #[tokio::test(start_paused = true)]
 async fn current_configured_fallback_budget_route_notice_and_resume_lifecycle() {
     variable(branding::MAX_RETRIES_ENV, None);
@@ -865,9 +885,13 @@ async fn current_configured_fallback_budget_route_notice_and_resume_lifecycle() 
                 "server" | "timeout" | "fresh-budget" | "ordered-chain"
             )
         {
+            // Since acf3c6ba a hop to another model also carries that model's
+            // identity row (and the cache marker moves onto it); everything
+            // else from the original step must be unchanged.
             for (_, body) in &requests {
                 assert_eq!(
-                    body["messages"], requests[0].1["messages"],
+                    step_context(&body["messages"]),
+                    step_context(&requests[0].1["messages"]),
                     "{name}: preserve the original step context across model hops"
                 );
             }
