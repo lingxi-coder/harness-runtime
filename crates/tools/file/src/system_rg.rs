@@ -264,9 +264,10 @@ mod tests {
 
     fn system_rg() -> Option<PathBuf> {
         let found = crate::ripgrep_mode::find_rg_on_path();
-        if found.is_none() && std::env::var_os("LINGXI_REQUIRE_SYSTEM_RG_TESTS").is_some() {
-            panic!("system-rg validation requested but no executable rg is installed");
-        }
+        assert!(
+            found.is_some() || std::env::var_os("LINGXI_REQUIRE_SYSTEM_RG_TESTS").is_none(),
+            "system-rg validation requested but no executable rg is installed"
+        );
         if found.is_none() {
             eprintln!("system-rg runtime test skipped: rg not installed");
         }

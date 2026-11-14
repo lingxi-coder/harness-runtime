@@ -1315,7 +1315,7 @@ pub fn start_only_write_guard(
                 .get(path)
                 .or_else(|| state.map.get(&normalized_fence_path(path)))
                 .filter(|_| state.has_full_model_view(path))
-                .and_then(|node| node.model_file_identity.clone())
+                .and_then(|node| node.model_file_identity)
         };
         let observed = normalized_fence_path(observed_path);
         let io = normalized_fence_path(io_path);

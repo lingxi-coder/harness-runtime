@@ -1,3 +1,4 @@
+//! MCP connector alias rules checked against the 2.1.322 permission contract.
 use lingxi_core::host::permission_gate::{ModToolCheckDecision, PermissionCheckContext};
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 use permission::{

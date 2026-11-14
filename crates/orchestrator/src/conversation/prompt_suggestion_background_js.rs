@@ -110,6 +110,8 @@ pub(super) fn prepare_assembled(
 }
 
 #[cfg(test)]
+// Called by tests/prompt_suggestion_background.rs, which includes this file.
+#[allow(dead_code)]
 pub(super) fn evaluate(operation: &str, input: Value) -> Option<Utf16JsonProjection> {
     evaluate_result(operation, input).ok()
 }
@@ -139,6 +141,8 @@ pub(super) fn evaluate_projection_result(
 }
 
 #[cfg(test)]
+// Called by tests/prompt_suggestion_background.rs, which includes this file.
+#[allow(dead_code)]
 pub(super) fn evaluate_result(
     operation: &str,
     mut input: Value,

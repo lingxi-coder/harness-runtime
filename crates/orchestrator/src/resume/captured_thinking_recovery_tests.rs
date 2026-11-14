@@ -59,10 +59,7 @@ impl crate::conversation::StreamingApiClient for RecoveryApi {
     }
 }
 
-fn signed_thinking<'a>(
-    history: &'a [ConversationMessage],
-    id: MessageId,
-) -> Vec<(&'a str, Option<&'a str>)> {
+fn signed_thinking(history: &[ConversationMessage], id: MessageId) -> Vec<(&str, Option<&str>)> {
     let ConversationMessage::Assistant { content, .. } =
         history.iter().find(|message| message.id() == id).unwrap()
     else {

@@ -2708,7 +2708,7 @@ impl Tool for FileReadTool {
             }
         })
         .await?;
-        let mut stream_source = None;
+        let mut stream_source;
         let read_identity;
         let snapshot = match loaded {
             Ok(loaded) => {

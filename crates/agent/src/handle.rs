@@ -607,13 +607,11 @@ impl PoolSubagentSpawner {
     }
 
     fn should_forward_subagent_text(&self) -> bool {
-        self.forward_subagent_output
-            .as_ref()
-            .map_or(true, |output| {
-                output
-                    .upgrade()
-                    .is_some_and(|sink| sink.wants_forwarded_subagent_messages())
-            })
+        self.forward_subagent_output.as_ref().is_none_or(|output| {
+            output
+                .upgrade()
+                .is_some_and(|sink| sink.wants_forwarded_subagent_messages())
+        })
     }
 
     /// Attach the parent session mode so independently spawned child runners

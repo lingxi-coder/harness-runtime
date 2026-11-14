@@ -3774,18 +3774,17 @@ async fn revoke_at_endpoint(
     if auth_method == "client_secret_basic"
         && client_id.is_some_and(|value| !value.is_empty())
         && client_secret.is_some_and(|value| !value.is_empty())
-    {
-        if registration.as_ref().is_some_and(|value| {
+        && registration.as_ref().is_some_and(|value| {
             ["/client_id", "/client_secret"].iter().any(|path| {
                 value
                     .string_units(path)
                     .is_some_and(|units| char::decode_utf16(units).any(|unit| unit.is_err()))
             })
-        }) {
-            return Err(OAuthError::Token(
-                "String contained an illegal UTF-16 sequence.".into(),
-            ));
-        }
+        })
+    {
+        return Err(OAuthError::Token(
+            "String contained an illegal UTF-16 sequence.".into(),
+        ));
     }
     let access_token = (!stored.access_token.is_empty()).then_some(stored.access_token.as_str());
 

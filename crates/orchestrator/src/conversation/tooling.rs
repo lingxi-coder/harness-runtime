@@ -651,6 +651,7 @@ impl ConversationOrchestrator {
     /// A conditional rule is NOT in the eager block, so the eager site would
     /// seed it `seeded_from_context:false` — and the dedup stub would never
     /// fire for exactly the files this reminder just put in the context.
+    #[cfg(test)]
     pub(super) async fn seed_nested_memory_read_state(
         &self,
         f: &crate::prompt::MemoryFile,

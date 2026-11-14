@@ -689,7 +689,6 @@ async fn run(
     Ok(match outcome {
         crate::ConversationOutcome::EndTurn { .. } => RunOutcome::End,
         crate::ConversationOutcome::StopHookPrevented { .. } => RunOutcome::Blocked,
-        other => panic!("unexpected lifecycle outcome: {other:?}"),
     })
 }
 

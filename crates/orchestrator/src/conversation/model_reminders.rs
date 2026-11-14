@@ -696,6 +696,7 @@ impl ConversationOrchestrator {
         native_mcp_dropped_tools_attachment(&snapshots, &deny_context, &prior_entries)
     }
 
+    #[cfg(test)]
     pub(crate) async fn mcp_instructions_reminder_message(&self) -> Option<ConversationMessage> {
         let row = self.mcp_instructions_prompt_ingress_attachment().await?;
         Some(self.persist_model_reminder(row.message, row.payload).await)

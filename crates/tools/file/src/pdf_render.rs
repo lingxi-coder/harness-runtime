@@ -443,6 +443,9 @@ mod tests {
         }
         let ready = std::env::var_os("LINGXI_PDF_SUPERVISOR_TEST_READY").unwrap();
         if mode.as_deref() == Some(std::ffi::OsStr::new("pipe-parent")) {
+            // The descendant deliberately outlives this helper: it holds the
+            // inherited pipe open after its parent exits.
+            #[allow(clippy::zombie_processes)]
             let _descendant = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",

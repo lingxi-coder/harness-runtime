@@ -2451,13 +2451,11 @@ pub fn parse_response_projection(
             }
         }
 
-        if matches!(expected_event, "UserPromptSubmit" | "SessionStart") {
-            if hs.get_property("sessionTitle").is_some() {
-                resp.session_title = ExactHookText::from_json_projection(
-                    projection,
-                    "/hookSpecificOutput/sessionTitle",
-                );
-            }
+        if matches!(expected_event, "UserPromptSubmit" | "SessionStart")
+            && hs.get_property("sessionTitle").is_some()
+        {
+            resp.session_title =
+                ExactHookText::from_json_projection(projection, "/hookSpecificOutput/sessionTitle");
         }
         if matches!(expected_event, "UserPromptSubmit" | "UserPromptExpansion") {
             if let Some(suppress) = hs

@@ -407,32 +407,6 @@ fn validate_mod_prompt_compose_facts(
     Ok(())
 }
 
-/// Match the existing static-body split without recapturing instruction files
-/// or replacing Mod-owned context keys. Template providers keep their complete
-/// memory protocol in the body; only ClaudeNative has an excluded dynamic row.
-fn excluded_memory_section_for_policy(
-    directory: &std::path::Path,
-    policy: &lingxi_core::host::prompt_policy::ResolvedPromptPolicy,
-) -> Option<String> {
-    if !matches!(
-        policy.memory,
-        lingxi_core::host::prompt_policy::MemoryPromptBinding::ClaudeNative
-    ) {
-        return None;
-    }
-    let model = &policy.target.canonical_model;
-    Some(
-        if lingxi_core::host::model_capabilities::claude_lean_prompt_for(model) {
-            crate::prompt::memory_section::render_with_hygiene(
-                &directory.to_string_lossy(),
-                lingxi_core::host::model_capabilities::lean_rewrite_for(model),
-            )
-        } else {
-            crate::prompt::memory_section::render_auto_directory(&directory.to_string_lossy())
-        },
-    )
-}
-
 impl ConversationOrchestrator {
     pub(crate) fn mod_prompt_surfaces(&self, interactive: bool) -> Vec<&'static str> {
         let mut surfaces = if self.mobile_runtime_environment.is_some() {

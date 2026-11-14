@@ -330,7 +330,8 @@ pub fn is_narration_signature(signature: &str) -> bool {
         .rev()
         .take_while(|byte| *byte == b'=')
         .count();
-    if compact.len() % 4 == 1 || (padding != 0 && (compact.len() % 4 != 0 || padding > 2)) {
+    if compact.len() % 4 == 1 || (padding != 0 && (!compact.len().is_multiple_of(4) || padding > 2))
+    {
         return false;
     }
     let engine = general_purpose::GeneralPurpose::new(

@@ -101,7 +101,7 @@ fn unsigned(value: JsonValueView<'_>) -> Option<u64> {
     // JavaScript file/line indices cannot supply exact evidence beyond the
     // safe-integer range. Reject fractional, negative and nonfinite counts.
     (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= 9_007_199_254_740_991.0)
-        .then(|| value as u64)
+        .then_some(value as u64)
 }
 
 fn is_ascii(value: JsonValueView<'_>, expected: &str) -> bool {

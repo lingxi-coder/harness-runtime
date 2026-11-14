@@ -666,7 +666,7 @@ mod tests {
         .unwrap();
         let active = Arc::new(AtomicBool::new(true));
         let mut pin = MemoryMutationRoot::capture(&root).unwrap();
-        pin.admit_targets(&[target.clone()]).unwrap();
+        pin.admit_targets(std::slice::from_ref(&target)).unwrap();
         assert!(memory_file_mutation("Write", &input).unwrap().is_none());
         with_memory_tool_scope_and_removals(
             "Write".into(),

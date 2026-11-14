@@ -2685,8 +2685,7 @@ async fn provider_change_rejects_retained_cross_protocol_continuations_without_r
             }
             let error = prepare_projection(&fixture.orch, MODEL, None, &catalog)
                 .await
-                .err()
-                .expect("retained continuation must reject a different protocol");
+                .expect_err("retained continuation must reject a different protocol");
             assert!(
                 error
                     .to_string()

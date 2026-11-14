@@ -799,9 +799,11 @@ impl ConversationOrchestrator {
         if let Some(memory) = dynamic_memory {
             self.prepend_transient_leading_context(&mut prefix, memory);
         }
-        let model = (!params.tool_use_options.main_loop_model.is_empty())
-            .then(|| params.tool_use_options.main_loop_model.clone())
-            .unwrap_or(model);
+        let model = if !params.tool_use_options.main_loop_model.is_empty() {
+            params.tool_use_options.main_loop_model.clone()
+        } else {
+            model
+        };
         let profile = if params.tool_use_options.main_loop_model.is_empty() {
             profile
         } else {

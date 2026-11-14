@@ -4631,12 +4631,12 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
         if let Some(last) = loaded
             .last_transcript_uuid
             .as_deref()
-            .filter(|id| by_uuid.contains_key(*id))
+            .filter(|id| by_uuid.contains_key(id))
         {
             let checkpoint = loaded
                 .last_prompt_leaf_uuid
                 .as_deref()
-                .filter(|id| by_uuid.get(*id).is_some_and(|row| !row.is_sidechain));
+                .filter(|id| by_uuid.get(id).is_some_and(|row| !row.is_sidechain));
             let mut selected = checkpoint.unwrap_or(last);
             if !loaded.last_prompt_explicit
                 && selected != last
@@ -5371,7 +5371,7 @@ fn preserved_tail_state(
             }
             let logical_ids = ids
                 .iter()
-                .filter_map(|id| loaded.message(*id))
+                .filter_map(|id| loaded.message(id))
                 .filter_map(|message| message.extra.string_at("/logicalMessageId"))
                 .collect::<Vec<_>>();
             ids.extend(logical_ids);

@@ -126,7 +126,7 @@ mod output_schema_cache {
         let client = McpClient::new("fixture", PathBuf::from("/tmp"), connection).await;
         let advertised = tool();
         client
-            .install_output_schemas(&[advertised.clone()])
+            .install_output_schemas(std::slice::from_ref(&advertised))
             .await
             .unwrap();
         assert!(!client.output_schema_plans.read().await.initialized);

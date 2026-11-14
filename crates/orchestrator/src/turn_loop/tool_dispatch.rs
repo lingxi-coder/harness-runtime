@@ -8956,8 +8956,8 @@ mod final_input_validation_tests {
             for interactive_permissions in [false, true] {
                 let orch = ConversationOrchestrator::new(
                     crate::OrchestratorConfig {
-                        interactive_session,
                         interactive_permissions,
+                        interactive_session,
                         ..Default::default()
                     },
                     Arc::new(MockApiClient::new(vec![])),

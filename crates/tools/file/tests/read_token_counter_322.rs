@@ -92,7 +92,7 @@ async fn exact_counts_override_estimates_and_failed_counts_use_the_native_fallba
             .unwrap();
         assert_eq!(
             counter.observed.lock().unwrap().as_slice(),
-            &[units.clone()]
+            std::slice::from_ref(&units)
         );
         assert_eq!(
             result
@@ -141,7 +141,7 @@ async fn counter_only_reads_count_exact_source_without_large_allowance_or_claims
             .unwrap();
         assert_eq!(
             counter.observed.lock().unwrap().as_slice(),
-            &[units.clone()]
+            std::slice::from_ref(&units)
         );
         assert_eq!(result.data.string_units("/file/content"), Some(units));
         assert!(!room.has_context_room());

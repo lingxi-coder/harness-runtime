@@ -186,8 +186,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
             continue;
         }
         let (name, raw) = record
-            .iter()
-            .next()
+            .first()
             .expect("record.len() == 1 guarantees one entry");
         if mcp::normalization::is_reserved_mcp_server_name(name.as_str()) {
             tracing::warn!(

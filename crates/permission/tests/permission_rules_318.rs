@@ -488,7 +488,7 @@ fn env_values_and_later_compound_prefixes_keep_read_block_checks() {
                 command,
                 &roots,
                 &[],
-                Some(&[roots.cwd.clone()])
+                Some(std::slice::from_ref(&roots.cwd))
             )
             .is_some(),
             "{command}"

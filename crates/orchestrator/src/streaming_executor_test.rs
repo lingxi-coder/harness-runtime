@@ -503,7 +503,7 @@ mod tests {
             assert!(orch.transcript.tool_denial_kinds.lock().await.is_empty());
             assert!(orch.permission_denials().await.is_empty());
             assert!(orch
-                .take_pending_tool_result_turn_ends(&[id.clone()])
+                .take_pending_tool_result_turn_ends(std::slice::from_ref(&id))
                 .await
                 .is_none());
             let frames = sink

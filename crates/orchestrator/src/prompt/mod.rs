@@ -766,11 +766,6 @@ fn output_style_section(style: ActiveOutputStyle<'_>) -> String {
     format!("# Output Style: {}\n{}", style.name, style.prompt)
 }
 
-/// Append the literal upstream section separator, preserving section whitespace.
-fn push_section_separator(s: &mut String) {
-    s.push_str(SECTION_SEP);
-}
-
 /// Runtime context required to assemble a system prompt.
 ///
 /// Constructed by `ConversationOrchestrator::run_turn` once per turn

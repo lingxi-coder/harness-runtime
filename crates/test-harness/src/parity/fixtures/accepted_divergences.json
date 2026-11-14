@@ -130,19 +130,10 @@
       "reason": "ProposeGoal is dormant twice over upstream: its flag defaults false and its isEnabled also bails on non-interactive or remote, which is this engine's shape. It also needs an interactive dialog and a message-queue enqueue there is no seat for. Ultraplan is plan mode running in Claude Code on the web, with cloud session URLs and PR delivery \u2014 no substrate here. The name still appears in the ported upstream tool-name tables; what is absent is any implementation.",
       "decided_on": "2026-09-08",
       "decided_by": "user",
-      "status": "active",
-      "anchors": [
-        {
-          "kind": "absent",
-          "path": "crates/tools",
-          "text": "ProposeGoal"
-        },
-        {
-          "kind": "absent",
-          "path": "crates/command-api",
-          "text": "ProposeGoal"
-        }
-      ]
+      "status": "retired",
+      "retired_on": "2026-11-14",
+      "retired_because": "f8487b6d (goal alignment with Claude Code 2.1.322) built the ProposeGoal tool in crates/tools/ui, so the absence anchor is false. Retirement does not claim that the cloud ultraplan mode is implemented; it remains out of scope.",
+      "anchors": []
     },
     {
       "id": "subagent-handback",
