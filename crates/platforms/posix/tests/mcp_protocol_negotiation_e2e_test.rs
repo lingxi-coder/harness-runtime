@@ -279,7 +279,8 @@ async fn modern_success_injects_meta_and_strips_complete_result_type() {
         .find(|r| r["method"] == "tools/list")
         .unwrap();
     assert_eq!(list["params"]["_meta"].as_object().unwrap().len(), 3);
-    assert_eq!(list["id"], 1, "probe must not advance live request IDs");
+    // SDK-compatible live ids start at 0 (b622f461).
+    assert_eq!(list["id"], 0, "probe must not advance live request IDs");
     transport
         .disconnect(result.connection.connection_id)
         .await
