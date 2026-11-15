@@ -3950,6 +3950,10 @@ impl RefusalToolCallBoundary {
     pub(crate) fn was_started(&self) -> bool {
         self.0.load(Ordering::Acquire) & Self::STARTED != 0
     }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.load(Ordering::Acquire) & Self::CLOSED != 0
+    }
 }
 
 #[cfg(test)]
@@ -3959,7 +3963,9 @@ mod refusal_tool_call_boundary_tests {
     #[test]
     fn refusal_before_start_permanently_rejects_core_retries() {
         let boundary = RefusalToolCallBoundary::default();
+        assert!(!boundary.is_closed());
         assert!(!boundary.close_for_refusal());
+        assert!(boundary.is_closed());
         assert!(!boundary.mark_started());
         assert!(!boundary.mark_started());
         assert!(!boundary.close_for_refusal());
@@ -3971,7 +3977,9 @@ mod refusal_tool_call_boundary_tests {
         let boundary = RefusalToolCallBoundary::default();
         assert!(boundary.mark_started());
         assert!(boundary.mark_started());
+        assert!(!boundary.is_closed());
         assert!(boundary.close_for_refusal());
+        assert!(boundary.is_closed());
         assert!(!boundary.mark_started());
         assert!(boundary.close_for_refusal());
         assert!(!boundary.mark_started());
@@ -7917,10 +7925,22 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         Ok(result) if !result.is_error => "success",
                         _ => "error",
                     });
-                    if refusal_suppressed.load(Ordering::Acquire) {
-                        // Refusal won inside the admitted first poll. Close the
-                        // native record and event producers without inventing
-                        // tool results or post-tool hooks for a call never run.
+                    // Refusal can also win before the first poll: a cancel-on-
+                    // interrupt call (e.g. a resumed permission waiter) then
+                    // returns Aborted without reaching the boundary check. The
+                    // refusal settlement already published its Not-run result.
+                    let refusal_closed_before_start =
+                        matches!(outcome, Err(tool_api::ToolError::Aborted))
+                            && tool_dispatch_facts
+                                .as_ref()
+                                .and_then(|facts| facts.refusal_call_boundary.as_ref())
+                                .is_some_and(|boundary| {
+                                    boundary.is_closed() && !boundary.was_started()
+                                });
+                    if refusal_suppressed.load(Ordering::Acquire) || refusal_closed_before_start {
+                        // Refusal won the call boundary. Close the native record
+                        // and event producers without inventing tool results or
+                        // post-tool hooks for a call never run.
                         Box::pin(crate::native_computer::after_execution(
                             orch, record, &outcome,
                         ))
