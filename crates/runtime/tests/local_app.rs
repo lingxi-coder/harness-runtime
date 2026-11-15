@@ -53,120 +53,66 @@ fn canonical_body(shell_tool: Option<&str>) -> String {
         .expect("canonical Local App skill has frontmatter")
 }
 
-async fn assert_assembled_tool_saves_current_visualization(
-    orchestrator: &orchestrator::ConversationOrchestrator,
-    fs: Arc<dyn FileSystem>,
-    config_home: &Path,
-    desktop: bool,
-) {
-    let session = orchestrator.current_session_id().await;
-    let visualizations =
-        harness_runtime::inline_visualization::shared_store(fs.clone(), config_home);
-    let reference = visualizations
-        .publish(
-            &visualization::Publisher {
-                root_session: session.as_uuid(),
-                agent_id: None,
-            },
-            None,
-            "Assembled visualization",
-            VISUALIZATION_FRAGMENT,
-            0,
-        )
-        .await
-        .expect("publish visualization into the host's shared store")
-        .reference;
-    let input = Utf16JsonProjection::object(vec![(
-        "visualization_id".to_owned(),
-        Utf16JsonProjection::from(reference.id.as_str()),
-    )])
-    .expect("visualization reference is valid LocalApp input");
-
-    let desktop_request = if desktop {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let token = "a".repeat(64);
-        std::fs::write(
-            config_home.join("desktop-local-app-host.json"),
-            serde_json::json!({"port":port,"token":token}).to_string(),
-        )
-        .unwrap();
-        Some(tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buffer = Vec::new();
-            let (header_end, length) = loop {
-                let mut chunk = [0u8; 4096];
-                let n = stream.read(&mut chunk).await.unwrap();
-                assert!(n > 0);
-                buffer.extend_from_slice(&chunk[..n]);
-                if let Some(end) = buffer.windows(4).position(|v| v == b"\r\n\r\n") {
-                    let header = String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
-                    assert!(header.starts_with("post /local-app "));
-                    assert!(header.contains(&format!("authorization: bearer {token}")));
-                    let length = header
-                        .lines()
-                        .find_map(|line| {
-                            line.strip_prefix("content-length:")
-                                .map(|v| v.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap();
-                    break (end + 4, length);
-                }
-            };
-            while buffer.len() < header_end + length {
-                let mut chunk = [0u8; 4096];
-                let n = stream.read(&mut chunk).await.unwrap();
-                assert!(n > 0);
-                buffer.extend_from_slice(&chunk[..n]);
-            }
-            let input: serde_json::Value =
-                serde_json::from_slice(&buffer[header_end..header_end + length]).unwrap();
-            let body = r#"{"action":"publish","id":"a00000000000000000000000000000000","revision":1,"name":"Assembled visualization"}"#;
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-            input
-        }))
-    } else {
-        None
+/// Two scripted model turns: one `LocalApp` tool use saving `visualization_id`,
+/// then the reply after its result. Since 46fb13b3 a publication must
+/// originate from a durable assistant tool use, so the model, not the host,
+/// calls the assembled tool.
+fn local_app_turns(visualization_id: &str) -> [Vec<llm_runtime::HistoryEvent>; 2] {
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_start_tool_use, content_block_stop,
+        input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
     };
+    let input = serde_json::json!({ "visualization_id": visualization_id }).to_string();
+    [
+        vec![
+            message_start("msg_local_app", "claude-sonnet-4-20250514"),
+            content_block_start_tool_use(0, ToolUseId::from("toolu_local_app"), "LocalApp"),
+            input_json_delta(0, &input),
+            content_block_stop(0),
+            message_delta_stop("tool_use"),
+            message_stop(),
+        ],
+        vec![
+            message_start("msg_local_app_done", "claude-sonnet-4-20250514"),
+            content_block_start_text(0),
+            text_delta(0, "saved"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ],
+    ]
+}
 
-    // Exercise the assembled tool through the same dispatcher path as a host
-    // tool request, including the real schema, validation, and permission gates.
-    let result = orchestrator
-        .call_tool_from_host(ToolUseId::new(), "LocalApp".to_owned(), input, None)
-        .await
-        .expect("dispatch LocalApp through the assembled orchestrator")
-        .expect("the local-app tool is registered by this host");
-    match result {
-        ContentBlock::ToolResult {
-            is_error, content, ..
-        } => assert_ne!(
-            is_error,
-            Some(true),
-            "saving the current visualization should succeed; full tool-result content: {}",
-            content
-                .to_json_string()
-                .unwrap_or_else(|error| format!("<projection serialization failed: {error}>"))
-        ),
-        _ => panic!("LocalApp dispatch should return a tool result"),
-    }
-
-    if let Some(request) = desktop_request {
-        let request = tokio::time::timeout(std::time::Duration::from_secs(10), request)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(request["action"], "publish");
-        assert_eq!(request["name"], "Assembled visualization");
-        assert!(request["html"]
-            .as_str()
-            .unwrap()
-            .contains(VISUALIZATION_FRAGMENT));
-        assert!(request["source_session"]["sessionId"].is_string());
-        return;
-    }
-
-    assert_mobile_library_has_published_app(config_home).await;
+/// The tool result the model received after its `LocalApp` call succeeded.
+async fn assert_local_app_result_succeeded(
+    streaming: &orchestrator::test_support_stream::MockStreamingApiClient,
+) {
+    let calls = streaming.captured_calls().await;
+    assert_eq!(calls.len(), 2, "the tool result returns to the model once");
+    let (is_error, content) = calls[1]
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                content.iter().find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        is_error, content, ..
+                    } => Some((*is_error, content.clone())),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("the LocalApp tool result reaches the model");
+    assert_ne!(
+        is_error,
+        Some(true),
+        "saving the current visualization should succeed; full tool-result content: {}",
+        content
+            .to_json_string()
+            .unwrap_or_else(|error| format!("<projection serialization failed: {error}>"))
+    );
 }
 
 /// The native app service reads the same durable library without borrowing
@@ -261,14 +207,17 @@ async fn desktop_assembly_passes_shared_visualizations_to_local_app() {
     let cwd = home.path().canonicalize().unwrap();
     let config_home = cwd.join(".lingxi");
     configure_local_app_test_permission(&config_home);
+    let streaming = Arc::new(orchestrator::test_support_stream::MockStreamingApiClient::empty());
     let mut cfg = harness_runtime::desktop::DesktopConfig::default();
     cfg.cwd = cwd.clone();
     cfg.lingxi_home = config_home.clone();
     cfg.local_apps = true;
     cfg.inline_visualization = true;
     cfg.isolated_credential_storage = true;
-    cfg.session_persistence = false;
+    // The publication origin is read back from the durable transcript.
+    cfg.session_persistence = true;
     cfg.use_noop_permission_gate = true;
+    cfg.streaming_override = Some(streaming.clone());
 
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
@@ -286,13 +235,88 @@ async fn desktop_assembly_passes_shared_visualizations_to_local_app() {
         .any(|name| name == "LocalApp"));
 
     let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
-    assert_assembled_tool_saves_current_visualization(
-        &runtime.orchestrator,
-        fs,
-        &config_home,
-        true,
-    )
-    .await;
+    let session = runtime.orchestrator.current_session_id().await;
+    let reference = harness_runtime::inline_visualization::shared_store(fs, &config_home)
+        .publish(
+            &visualization::Publisher {
+                root_session: session.as_uuid(),
+                agent_id: None,
+            },
+            None,
+            "Assembled visualization",
+            VISUALIZATION_FRAGMENT,
+            0,
+        )
+        .await
+        .expect("publish visualization into the host's shared store")
+        .reference;
+
+    let desktop_request = {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "a".repeat(64);
+        std::fs::write(
+            config_home.join("desktop-local-app-host.json"),
+            serde_json::json!({"port":port,"token":token}).to_string(),
+        )
+        .unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            let (header_end, length) = loop {
+                let mut chunk = [0u8; 4096];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(end) = buffer.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
+                    assert!(header.starts_with("post /local-app "));
+                    assert!(header.contains(&format!("authorization: bearer {token}")));
+                    let length = header
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (end + 4, length);
+                }
+            };
+            while buffer.len() < header_end + length {
+                let mut chunk = [0u8; 4096];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            let input: serde_json::Value =
+                serde_json::from_slice(&buffer[header_end..header_end + length]).unwrap();
+            let body = r#"{"action":"publish","id":"a00000000000000000000000000000000","revision":1,"name":"Assembled visualization"}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            input
+        })
+    };
+    for turn in local_app_turns(reference.id.as_str()) {
+        streaming.push_turn(turn).await;
+    }
+    runtime
+        .orchestrator
+        .run_turn_streaming("save this visualization as an app")
+        .await
+        .expect("the LocalApp turn completes");
+    assert_local_app_result_succeeded(&streaming).await;
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(10), desktop_request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request["action"], "publish");
+    assert_eq!(request["name"], "Assembled visualization");
+    assert!(request["html"]
+        .as_str()
+        .unwrap()
+        .contains(VISUALIZATION_FRAGMENT));
+    assert!(request["source_session"]["sessionId"].is_string());
 }
 
 #[test]
@@ -300,11 +324,7 @@ fn mobile_assembly_passes_shared_visualizations_to_local_app() {
     use client::protocol::commands::ClientCommand;
     use client::protocol::events::ClientEvent;
     use client::protocol::text::ClientTextDto;
-    use orchestrator::test_support_stream::{
-        content_block_start_text, content_block_start_tool_use, content_block_stop,
-        input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
-        MockStreamingApiClient,
-    };
+    use orchestrator::test_support_stream::MockStreamingApiClient;
 
     let home = tempfile::tempdir().unwrap();
     // Mobile config lives under a brand user's Linux home. A random .tmp*
@@ -367,29 +387,9 @@ fn mobile_assembly_passes_shared_visualizations_to_local_app() {
             .expect("publish visualization into the host's shared store")
             .reference;
 
-        // Since 46fb13b3 a publication must originate from a durable assistant
-        // tool use, so the model, not the host, calls the assembled tool.
-        let input = serde_json::json!({ "visualization_id": reference.id.as_str() }).to_string();
-        streaming
-            .push_turn(vec![
-                message_start("msg_local_app", "claude-sonnet-4-20250514"),
-                content_block_start_tool_use(0, ToolUseId::from("toolu_local_app"), "LocalApp"),
-                input_json_delta(0, &input),
-                content_block_stop(0),
-                message_delta_stop("tool_use"),
-                message_stop(),
-            ])
-            .await;
-        streaming
-            .push_turn(vec![
-                message_start("msg_local_app_done", "claude-sonnet-4-20250514"),
-                content_block_start_text(0),
-                text_delta(0, "saved"),
-                content_block_stop(0),
-                message_delta_stop("end_turn"),
-                message_stop(),
-            ])
-            .await;
+        for turn in local_app_turns(reference.id.as_str()) {
+            streaming.push_turn(turn).await;
+        }
         handle
             .submit(ClientCommand::SendPrompt {
                 text: ClientTextDto::from_utf8("save this visualization as an app"),
@@ -415,33 +415,7 @@ fn mobile_assembly_passes_shared_visualizations_to_local_app() {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
 
-        let calls = streaming.captured_calls().await;
-        assert_eq!(calls.len(), 2, "the tool result returns to the model once");
-        let result = calls[1]
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                lingxi_core::types::ConversationMessage::User { content, .. } => {
-                    content.iter().find_map(|block| match block {
-                        ContentBlock::ToolResult {
-                            is_error, content, ..
-                        } => Some((*is_error, content.clone())),
-                        _ => None,
-                    })
-                }
-                _ => None,
-            })
-            .expect("the LocalApp tool result reaches the model");
-        assert_ne!(
-            result.0,
-            Some(true),
-            "saving the current visualization should succeed; full tool-result content: {}",
-            result
-                .1
-                .to_json_string()
-                .unwrap_or_else(|error| format!("<projection serialization failed: {error}>"))
-        );
+        assert_local_app_result_succeeded(&streaming).await;
         assert_mobile_library_has_published_app(&config_home).await;
     });
 }

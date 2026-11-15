@@ -1933,7 +1933,10 @@ pub async fn build_with_credential_stack(
     // and conversation.rs documents `self.api == self.streaming_api` in production.
     // Without this the orchestrator falls back to `NoStreamingApiClient` and every
     // streaming turn fails with "no streaming client configured".
-    let streaming_api: Arc<dyn orchestrator::StreamingApiClient> = provider_adapter.clone();
+    let streaming_api: Arc<dyn orchestrator::StreamingApiClient> = cfg
+        .streaming_override
+        .clone()
+        .unwrap_or_else(|| provider_adapter.clone());
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter.clone();
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).

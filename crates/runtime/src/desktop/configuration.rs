@@ -849,6 +849,10 @@ pub struct DesktopConfig {
     /// Queue created by the host before its output adapter so an ordinary
     /// terminal can be held until same-turn media realtime completes.
     pub media_agent_handoffs: Option<Arc<super::DesktopMediaAgentHandoffQueue>>,
+    /// Test seam: replace the streaming model client (the provider adapter's
+    /// SSE side) with a scripted one, as the mobile builder's
+    /// `streaming_override` does. Production hosts leave it `None`.
+    pub streaming_override: Option<Arc<dyn orchestrator::StreamingApiClient>>,
 }
 
 /// Desktop session composition, independent from the permission-gate transport.
@@ -1223,6 +1227,10 @@ impl std::fmt::Debug for DesktopConfig {
                 "media_agent_handoffs",
                 &self.media_agent_handoffs.as_ref().map(|_| "<configured>"),
             )
+            .field(
+                "streaming_override",
+                &self.streaming_override.as_ref().map(|_| "<configured>"),
+            )
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field("strict_mcp_config", &self.strict_mcp_config)
@@ -1394,6 +1402,7 @@ impl Default for DesktopConfig {
             media_service: None,
             media_conversation_attachment: None,
             media_agent_handoffs: None,
+            streaming_override: None,
         }
     }
 }
