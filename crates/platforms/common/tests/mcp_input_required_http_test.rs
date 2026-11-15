@@ -210,7 +210,7 @@ async fn retry_timeout_aborts_actual_http_socket_and_keeps_connection_usable() {
         )
         .await;
         let retry = read_http_request(&mut socket).await;
-        requests.lock().unwrap().push(retry);
+        requests.lock().unwrap().push(retry.clone());
         let mut byte = [0];
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
@@ -220,6 +220,23 @@ async fn retry_timeout_aborts_actual_http_socket_and_keeps_connection_usable() {
             0,
             "cancel must disconnect this POST before response headers"
         );
+        // 0128ba5a (Claude Code 2.1.322): a timed-out request is also
+        // cancelled on the wire with its own notification POST.
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let cancelled = read_http_request(&mut socket).await;
+        assert_eq!(cancelled["method"], "notifications/cancelled");
+        assert_eq!(cancelled["params"]["requestId"], retry["id"]);
+        requests.lock().unwrap().push(cancelled);
+        {
+            use tokio::io::AsyncWriteExt;
+            socket
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        }
+        drop(socket);
         let (mut socket, _) = listener.accept().await.unwrap();
         let followup = read_http_request(&mut socket).await;
         requests.lock().unwrap().push(followup.clone());
@@ -277,8 +294,16 @@ async fn retry_timeout_aborts_actual_http_socket_and_keeps_connection_usable() {
 
     server.await.unwrap();
     let requests = captured.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(requests.iter().all(|r| r["method"] == "tools/call"));
+    let methods: Vec<_> = requests.iter().map(|r| r["method"].clone()).collect();
+    assert_eq!(
+        methods,
+        [
+            "tools/call",
+            "tools/call",
+            "notifications/cancelled",
+            "tools/call"
+        ]
+    );
 }
 #[tokio::test]
 async fn cancelled_queued_post_never_reaches_http_server() {
