@@ -293,6 +293,17 @@ fn step_context(messages: &serde_json::Value) -> serde_json::Value {
             for block in blocks {
                 if let Some(block) = block.as_object_mut() {
                     block.remove("cache_control");
+                    // The Claude bundle's context seed (acf3c6ba,
+                    // `prompt_policy.rs`) ends its last reminder with "\n", as
+                    // Native's prependUserContext does; other bundles do not.
+                    if let Some(text) = block
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|text| text.strip_suffix("</system-reminder>\n"))
+                        .map(|text| format!("{text}</system-reminder>"))
+                    {
+                        block.insert("text".into(), serde_json::Value::String(text));
+                    }
                 }
             }
         }
