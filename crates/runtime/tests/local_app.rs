@@ -166,8 +166,12 @@ async fn assert_assembled_tool_saves_current_visualization(
         return;
     }
 
-    // The native app service reads the same durable library without borrowing
-    // an engine runtime or requiring Linux for this static release.
+    assert_mobile_library_has_published_app(config_home).await;
+}
+
+/// The native app service reads the same durable library without borrowing
+/// an engine runtime or requiring Linux for this static release.
+async fn assert_mobile_library_has_published_app(config_home: &Path) {
     let service =
         MobileLocalAppServiceHandle::new(config_home.into(), None, "android".into()).unwrap();
     let apps = service.request_value(json!({"op":"list"})).await.unwrap();
@@ -291,8 +295,17 @@ async fn desktop_assembly_passes_shared_visualizations_to_local_app() {
     .await;
 }
 
-#[tokio::test]
-async fn mobile_assembly_passes_shared_visualizations_to_local_app() {
+#[test]
+fn mobile_assembly_passes_shared_visualizations_to_local_app() {
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::events::ClientEvent;
+    use client::protocol::text::ClientTextDto;
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_start_tool_use, content_block_stop,
+        input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
+        MockStreamingApiClient,
+    };
+
     let home = tempfile::tempdir().unwrap();
     // Mobile config lives under a brand user's Linux home. A random .tmp*
     // directory is not a valid Linux username.
@@ -306,20 +319,129 @@ async fn mobile_assembly_passes_shared_visualizations_to_local_app() {
     assert_eq!(cfg.lingxi_home, config_home);
     let platform = Arc::new(harness_runtime::mobile::test_support::HostFakePlatform::new(cwd));
     let fs = platform.filesystem();
-    let runtime = harness_runtime::mobile::build_mobile(
+    let streaming = Arc::new(MockStreamingApiClient::empty());
+    let listener = Arc::new(harness_runtime::mobile::test_support::FakeListener::default());
+    let handle = harness_runtime::mobile::test_support::new_engine_with_streaming(
         cfg,
         platform,
-        Arc::new(harness_runtime::mobile::test_support::FakeListener::default()),
+        listener.clone(),
         Arc::new(harness_runtime::mobile::test_support::CollectingPermissionSink::default()),
+        Some(streaming.clone()),
     )
-    .await
     .expect("mobile runtime should assemble with local apps and visualizations");
 
-    assert_assembled_tool_saves_current_visualization(
-        &runtime.orchestrator,
-        fs,
-        &config_home,
-        false,
-    )
-    .await;
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::NewSession {
+                mode: client::protocol::listings::SessionModeDto::Code,
+                cwd: None,
+                model: None,
+            })
+            .await
+            .expect("start a Code session");
+        let session_id = listener
+            .received
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .expect("SessionStarted carries the durable id");
+        let visualizations =
+            harness_runtime::inline_visualization::shared_store(fs.clone(), &config_home);
+        let reference = visualizations
+            .publish(
+                &visualization::Publisher {
+                    root_session: uuid::Uuid::parse_str(&session_id).unwrap(),
+                    agent_id: None,
+                },
+                None,
+                "Assembled visualization",
+                VISUALIZATION_FRAGMENT,
+                0,
+            )
+            .await
+            .expect("publish visualization into the host's shared store")
+            .reference;
+
+        // Since 46fb13b3 a publication must originate from a durable assistant
+        // tool use, so the model, not the host, calls the assembled tool.
+        let input = serde_json::json!({ "visualization_id": reference.id.as_str() }).to_string();
+        streaming
+            .push_turn(vec![
+                message_start("msg_local_app", "claude-sonnet-4-20250514"),
+                content_block_start_tool_use(0, ToolUseId::from("toolu_local_app"), "LocalApp"),
+                input_json_delta(0, &input),
+                content_block_stop(0),
+                message_delta_stop("tool_use"),
+                message_stop(),
+            ])
+            .await;
+        streaming
+            .push_turn(vec![
+                message_start("msg_local_app_done", "claude-sonnet-4-20250514"),
+                content_block_start_text(0),
+                text_delta(0, "saved"),
+                content_block_stop(0),
+                message_delta_stop("end_turn"),
+                message_stop(),
+            ])
+            .await;
+        handle
+            .submit(ClientCommand::SendPrompt {
+                text: ClientTextDto::from_utf8("save this visualization as an app"),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(1),
+                visualization_context: None,
+            })
+            .await
+            .expect("send prompt");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !listener
+            .received
+            .lock()
+            .await
+            .iter()
+            .any(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the LocalApp turn ended"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let calls = streaming.captured_calls().await;
+        assert_eq!(calls.len(), 2, "the tool result returns to the model once");
+        let result = calls[1]
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                lingxi_core::types::ConversationMessage::User { content, .. } => {
+                    content.iter().find_map(|block| match block {
+                        ContentBlock::ToolResult {
+                            is_error, content, ..
+                        } => Some((*is_error, content.clone())),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("the LocalApp tool result reaches the model");
+        assert_ne!(
+            result.0,
+            Some(true),
+            "saving the current visualization should succeed; full tool-result content: {}",
+            result
+                .1
+                .to_json_string()
+                .unwrap_or_else(|error| format!("<projection serialization failed: {error}>"))
+        );
+        assert_mobile_library_has_published_app(&config_home).await;
+    });
 }

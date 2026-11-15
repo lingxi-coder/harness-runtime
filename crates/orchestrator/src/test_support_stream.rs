@@ -108,6 +108,15 @@ impl MockStreamingApiClient {
         me
     }
 
+    /// Append one scripted turn after construction, for a script that depends
+    /// on state the host creates at runtime (a session or a stored id).
+    pub async fn push_turn(&self, turn: Vec<HistoryEvent>) {
+        self.turns
+            .lock()
+            .await
+            .push_back(turn.into_iter().map(Ok).collect());
+    }
+
     /// Snapshot the captured `stream` call args (one entry per call).
     pub async fn captured_calls(&self) -> Vec<CapturedStreamCall> {
         self.captured.lock().await.clone()
