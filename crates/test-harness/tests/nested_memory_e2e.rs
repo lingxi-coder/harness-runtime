@@ -1,4 +1,4 @@
-//! END-TO-END proof that nested memory reaches the model and then dedups.
+//! END-TO-END proof that nested memory reaches the model and seeds read state.
 //!
 //! `orchestrator` does not depend on `tool-file`, so neither crate can host
 //! this alone. `test-harness` sees both, so it can wire the real seam:
@@ -191,6 +191,13 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
     // routes: passing the original `/var/...` spelling here would correctly
     // miss that seed and return the full text, even though both names reach the
     // same inode.
+    // Since c5670e2c a Read always performs fresh I/O, so the seed is checked
+    // in the shared read state under the path shown to the model.
+    assert!(
+        tool_api::read_file_state::get(&shared, &canonical_mem)
+            .is_some_and(|entry| entry.seeded_from_context),
+        "the path shown to the model must be the key the nested-memory seed uses"
+    );
     let after = read_tool
         .call(
             generated_input(json!({ "file_path": canonical_mem.to_str().unwrap() })),
@@ -199,12 +206,7 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        after.data.string_at("/type"),
-        Some("file_unchanged"),
-        "the path shown to the model must hit the same nested-memory seed"
-    );
-    assert_eq!(after.data.string_at("/source"), Some("seeded"));
+    assert_eq!(after.data.string_at("/type"), Some("text"));
 
     // The oracle's `k$o` returns RECORDS; the reminder is one rendering of them
     // and the UI attachment line is the other. The port originally emitted only

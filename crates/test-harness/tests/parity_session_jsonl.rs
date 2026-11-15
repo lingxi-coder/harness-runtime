@@ -419,6 +419,17 @@ async fn assert_native_single_turn_rows(
                 "date" => payload["date"] = serde_json::json!(date),
                 "prompt_snapshot" => {
                     payload["systemPrompt"] = snapshot_system.clone();
+                    // acf3c6ba records the LingXi prompt policy on the snapshot,
+                    // beyond the Native payload; its fingerprint tracks the
+                    // bundle text, so only its identity is pinned here.
+                    let policy = &snapshot_payload["promptPolicy"];
+                    assert_eq!(policy["schema_version"], 1);
+                    assert_eq!(policy["bundle_id"], "claude-code");
+                    assert_eq!(policy["target"]["mode"], "code");
+                    assert!(policy["fingerprint"]
+                        .as_str()
+                        .is_some_and(|f| f.len() == 64));
+                    payload["promptPolicy"] = policy.clone();
                 }
                 _ => {}
             }

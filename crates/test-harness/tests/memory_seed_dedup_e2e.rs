@@ -187,7 +187,16 @@ async fn seeded_memory_file_dedups_on_a_real_read_tool_call() {
     // ── THE PRODUCTION SEAM ────────────────────────────────────────────────
     orch.fire_instructions_loaded().await;
 
-    // Rendered file -> seeded stub, byte-exact.
+    // The seam seeds the rendered file into the shared read state. Since
+    // c5670e2c a Read always performs fresh I/O (Native no longer returns a
+    // seeded `file_unchanged` stub), so the seed is checked where it lives.
+    let seeded = tool_api::read_file_state::get(&shared, &plain)
+        .expect("the rendered memory file must be seeded");
+    assert!(
+        seeded.seeded_from_context,
+        "the seed is marked as model context"
+    );
+    assert!(!seeded.from_read);
     let after = read_tool
         .call(
             generated_input(json!({ "file_path": plain.to_str().unwrap() })),
@@ -196,19 +205,11 @@ async fn seeded_memory_file_dedups_on_a_real_read_tool_call() {
         )
         .await
         .unwrap();
+    assert_eq!(after.data.string_at("/type"), Some("text"));
     assert_eq!(
-        after.data.string_at("/type"),
-        Some("file_unchanged"),
-        "the seeded memory file must dedup"
-    );
-    assert_eq!(after.data.string_at("/source"), Some("seeded"));
-    let seeded_model_content = tool_file::read::format_file_unchanged_seeded(&plain);
-    assert_eq!(
-        after
-            .model_content
-            .as_ref()
-            .and_then(|content| content.string_at("")),
-        Some(seeded_model_content.as_str())
+        after.data.string_at("/file/content"),
+        Some("# repo rules\nbe careful\n"),
+        "a Read of seeded context returns fresh content"
     );
 
     // Conditional rule -> `seededFromContext: false` -> FULL content.
