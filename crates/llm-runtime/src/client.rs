@@ -2126,12 +2126,21 @@ impl ModelRuntime {
             && self.account_pool.is_none()
         {
             if let Some(credential) = authenticator.captured_credential().await? {
-                owned
-                    .get_or_insert_with(|| request.clone())
-                    .execution
-                    .account_scope = Some(crate::computer::credential_account_scope(Some(
-                    &credential,
-                ))?);
+                // An empty captured credential has no account identity. The
+                // implicit scope is optional for a request without its own
+                // continuation, so it goes out unscoped and the provider decides
+                // on the credential; a request carrying a continuation still
+                // requires an identity.
+                match crate::computer::credential_account_scope(Some(&credential)) {
+                    Ok(account_scope) => {
+                        owned
+                            .get_or_insert_with(|| request.clone())
+                            .execution
+                            .account_scope = Some(account_scope);
+                    }
+                    Err(_) if request.input.continuation.is_none() => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
 
