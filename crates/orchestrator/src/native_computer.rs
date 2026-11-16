@@ -226,12 +226,80 @@ pub(crate) async fn uses_buffered_protocol(orch: &ConversationOrchestrator) -> b
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|p| p.model == model && p.profile == profile);
-    verified
-        && orch
-            .filtered_available_tools()
-            .await
-            .iter()
-            .any(|t| !t.is_mcp() && t.native_computer_capabilities().is_some())
+    verified && visible_native_owner(&orch.filtered_available_tools().await, None).is_some()
+}
+
+const PROTOCOL_NATIVE_REQUIRED: &[&str] = &[
+    "screenshot",
+    "zoom",
+    "left_click",
+    "double_click",
+    "triple_click",
+    "right_click",
+    "middle_click",
+    "mouse_move",
+    "left_click_drag",
+    "scroll",
+    "type",
+    "key",
+    "wait",
+    "cursor_position",
+    "hold_key",
+    "left_mouse_down",
+    "left_mouse_up",
+];
+
+/// Resolve only from already-authorized visible tools. A single read-only MCP
+/// member must never implicitly grant the hidden owner's complete input API.
+fn visible_native_owner(
+    available: &[Arc<dyn Tool>],
+    prepared: Option<&[lingxi_core::host::SourceToolWireDefinition]>,
+) -> Option<Arc<dyn Tool>> {
+    let loaded = |tool: &Arc<dyn Tool>| {
+        prepared.is_none_or(|prepared| {
+            prepared
+                .iter()
+                .any(|wire| wire.name == tool.name() && !wire.defer_loading)
+        })
+    };
+    if let Some(tool) = available.iter().find(|tool| {
+        tool.name() == "computer"
+            && !tool.is_mcp()
+            && tool.native_computer_capabilities().is_some()
+            && loaded(tool)
+    }) {
+        return Some(tool.clone());
+    }
+    for candidate in available.iter().filter(|tool| loaded(tool)) {
+        let Some(owner) = candidate
+            .computer_control_owner()
+            .filter(|owner| !owner.is_mcp() && owner.native_computer_capabilities().is_some())
+        else {
+            continue;
+        };
+        if PROTOCOL_NATIVE_REQUIRED.iter().all(|required| {
+            available.iter().any(|tool| {
+                loaded(tool)
+                    && tool
+                        .mcp_tool_identity()
+                        .is_some_and(|identity| identity.raw_tool_name == *required)
+                    && tool
+                        .computer_control_owner()
+                        .is_some_and(|other| Arc::ptr_eq(&owner, &other))
+            })
+        }) {
+            return Some(owner);
+        }
+    }
+    None
+}
+
+fn execution_owner(tool: &Arc<dyn Tool>) -> Option<Arc<dyn Tool>> {
+    tool.computer_control_owner()
+        .or_else(|| {
+            (!tool.is_mcp() && tool.native_computer_capabilities().is_some()).then(|| tool.clone())
+        })
+        .filter(|owner| !owner.is_mcp() && owner.native_computer_capabilities().is_some())
 }
 
 pub(crate) async fn cancel_before_effects<F: Future<Output = Result<T, OrchestratorError>>, T>(
@@ -497,16 +565,8 @@ pub(crate) async fn prepare_projection(
     tools: &[lingxi_core::host::SourceToolWireDefinition],
 ) -> Result<Option<llm_runtime::computer::ComputerRequestProjection>, OrchestratorError> {
     let active_epoch = orch.profile_epoch().await;
-    let available = tools
-        .iter()
-        .any(|tool| tool.name == "computer" && !tool.defer_loading);
-    let tool = if available {
-        orch.filtered_available_tools().await.into_iter().find(|t| {
-            t.name() == "computer" && !t.is_mcp() && t.native_computer_capabilities().is_some()
-        })
-    } else {
-        None
-    };
+    let tool = visible_native_owner(&orch.filtered_available_tools().await, Some(tools));
+    let available = tool.is_some();
     let provider = orch.api.native_computer_provider(model, profile);
     let retained_markers = orch
         .session
@@ -733,9 +793,9 @@ pub(crate) async fn note_computer_result(
     ctx: &ToolUseContext,
     success: bool,
 ) {
-    if tool.is_mcp() || tool.native_computer_capabilities().is_none() {
+    let Some(tool) = execution_owner(tool) else {
         return;
-    }
+    };
     // Readiness is supplied by the tool's actual action outcome, grants and frame.
     let ready = success
         && tool
@@ -1373,12 +1433,12 @@ pub(crate) async fn final_model_result(
                         .filtered_available_tools()
                         .await
                         .into_iter()
-                        .find(|t| t.name() == name && !t.is_mcp()),
+                        .find(|t| t.name() == name),
                     None => None,
                 }
             }
         };
-        let Some(tool) = tool.filter(|t| t.native_computer_capabilities().is_some()) else {
+        let Some(tool) = tool.as_ref().and_then(execution_owner) else {
             continue;
         };
         let mut ctx = crate::turn_loop::streaming_tool_context_base(orch, Vec::new()).await;

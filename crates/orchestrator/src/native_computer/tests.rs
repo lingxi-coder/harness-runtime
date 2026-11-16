@@ -4529,3 +4529,124 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
         }
     }
 }
+
+struct SplitComputerMember {
+    name: String,
+    owner: Arc<dyn Tool>,
+    identity: tool_api::McpToolIdentity,
+}
+#[async_trait]
+impl Tool for SplitComputerMember {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        self.owner.input_schema()
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        self.owner.input_repair_metadata()
+    }
+    fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+        true
+    }
+    fn is_mcp(&self) -> bool {
+        true
+    }
+    fn computer_control_owner(&self) -> Option<Arc<dyn Tool>> {
+        Some(self.owner.clone())
+    }
+    fn mcp_tool_identity(&self) -> Option<&tool_api::McpToolIdentity> {
+        Some(&self.identity)
+    }
+    fn max_result_size_chars(&self) -> usize {
+        4096
+    }
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
+        false
+    }
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
+        false
+    }
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        ctx: &ToolUseContext,
+    ) -> permission::PermissionResult {
+        self.owner.check_permissions(input, ctx).await
+    }
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+        String::new()
+    }
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+        "".into()
+    }
+    async fn call(
+        &self,
+        _: Utf16JsonProjection,
+        _: ToolUseContext,
+        _: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        unreachable!("catalog-only fixture")
+    }
+}
+fn split_member(owner: Arc<dyn Tool>, action: &str) -> Arc<dyn Tool> {
+    Arc::new(SplitComputerMember {
+        name: format!("mcp__computer-use__{action}"),
+        owner,
+        identity: tool_api::McpToolIdentity {
+            server_config_id: "host-computer".into(),
+            config_revision: "revision".into(),
+            raw_tool_name: action.into(),
+            definition_fingerprint: action.into(),
+        },
+    })
+}
+#[test]
+fn native_owner_requires_complete_authorized_same_owner_protocol_family() {
+    let owner: Arc<dyn Tool> = Arc::new(Computer::new(false, Arc::new(SyncMutex::new(Vec::new()))));
+    let other: Arc<dyn Tool> = Arc::new(Computer::new(false, Arc::new(SyncMutex::new(Vec::new()))));
+    let mut tools = PROTOCOL_NATIVE_REQUIRED
+        .iter()
+        .map(|name| split_member(owner.clone(), name))
+        .collect::<Vec<_>>();
+    let resolved = visible_native_owner(&tools, None).expect("complete authorized family");
+    assert!(Arc::ptr_eq(&resolved, &owner));
+    tools.pop();
+    assert!(
+        visible_native_owner(&tools, None).is_none(),
+        "missing primitive must not broaden access"
+    );
+    tools.push(split_member(
+        other,
+        PROTOCOL_NATIVE_REQUIRED.last().unwrap(),
+    ));
+    assert!(
+        visible_native_owner(&tools, None).is_none(),
+        "separate owners cannot combine authority"
+    );
+    assert!(visible_native_owner(&[split_member(owner, "screenshot")], None).is_none());
+}
+#[test]
+fn native_owner_does_not_use_deferred_or_absent_wire_members() {
+    let owner: Arc<dyn Tool> = Arc::new(Computer::new(false, Arc::new(SyncMutex::new(Vec::new()))));
+    let tools = PROTOCOL_NATIVE_REQUIRED
+        .iter()
+        .map(|name| split_member(owner.clone(), name))
+        .collect::<Vec<_>>();
+    let mut wire = tools
+        .iter()
+        .map(|tool| lingxi_core::host::SourceToolWireDefinition {
+            name: tool.name().to_owned(),
+            description: "".into(),
+            input_schema: tool.input_schema().clone(),
+            strict: false,
+            defer_loading: false,
+        })
+        .collect::<Vec<_>>();
+    assert!(visible_native_owner(&tools, Some(&wire)).is_some());
+    wire[0].defer_loading = true;
+    assert!(visible_native_owner(&tools, Some(&wire)).is_none());
+    wire.remove(0);
+    assert!(visible_native_owner(&tools, Some(&wire)).is_none());
+    assert!(Arc::ptr_eq(&execution_owner(&tools[0]).unwrap(), &owner));
+}

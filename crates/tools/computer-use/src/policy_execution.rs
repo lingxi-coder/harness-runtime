@@ -7,6 +7,7 @@ impl ComputerTool {
     ) -> Result<(), ToolError> {
         self.os_permissions_revoked
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.reset_protocol_grants()?;
         self.state
             .lock()
             .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
@@ -327,6 +328,7 @@ impl ComputerTool {
         let snapshot = match self.policy_snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
+                self.reset_protocol_grants()?;
                 {
                     let mut state = self
                         .state
@@ -373,6 +375,7 @@ impl ComputerTool {
             changed
         };
         if changed {
+            self.reset_protocol_grants()?;
             {
                 let mut runtime = self
                     .runtime

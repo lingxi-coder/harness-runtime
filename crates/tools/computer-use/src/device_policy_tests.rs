@@ -94,6 +94,76 @@ async fn grant(tool: &ComputerTool) -> Result<ToolCallResult, ToolError> {
     .await
 }
 
+#[test]
+fn external_mcp_refresh_preserves_disabled_computer_tools_for_live_reenable() {
+    use tool_api::{DeferralState, ToolRegistry, ToolRegistryView, ToolSearchMode};
+    const REQUEST: &str = "mcp__computer-use__request_access";
+    let file = PolicyFile::new(policy("disabled", false, json!([])));
+    let mut computer =
+        make_tool(Arc::new(RecordingBackend::default())).with_device_policy_path(file.0.clone());
+    computer.advertise_combined = false;
+    let owner = Arc::new(computer);
+    let mut registry = ToolRegistry::new();
+    registry.set_deferral(Arc::new(DeferralState::new(ToolSearchMode::Enabled, false)));
+    registry.register_builtin(owner.clone());
+    protocol_tools::register(&mut registry, owner.clone());
+    let wrapper = registry
+        .find_registered(REQUEST)
+        .expect("hosted tool is registered while disabled");
+    assert!(registry.find_by_name(REQUEST).is_none());
+    assert!(registry
+        .tool_search_view()
+        .entries()
+        .iter()
+        .all(|entry| entry.name != REQUEST));
+
+    // Desktop startup and settings/MCP reconnect refreshes contain only
+    // external server tools, including an empty list when none are configured.
+    registry.replace_mcp_tools(vec![]);
+    assert!(Arc::ptr_eq(
+        &wrapper,
+        &registry.find_registered(REQUEST).unwrap()
+    ));
+    assert!(registry.find_by_name(REQUEST).is_none());
+
+    file.replace(policy("enabled", true, json!([])));
+    registry.refresh_tool_search_view();
+    assert!(Arc::ptr_eq(
+        &wrapper,
+        &registry.find_by_name(REQUEST).unwrap()
+    ));
+    assert!(registry
+        .tool_search_view()
+        .entries()
+        .iter()
+        .any(|entry| entry.name == REQUEST));
+
+    // Repeated external refreshes preserve the exact wrapper/owner and do not
+    // duplicate descriptors. Disabling again still withdraws discoverability.
+    registry.replace_mcp_tools(vec![]);
+    registry.replace_mcp_tools(vec![]);
+    assert_eq!(
+        registry
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .filter(|tool| tool.name() == REQUEST)
+            .count(),
+        1
+    );
+    let restored = registry.find_registered(REQUEST).unwrap();
+    let restored_owner = restored.computer_control_owner().unwrap();
+    let expected_owner: Arc<dyn Tool> = owner;
+    assert!(Arc::ptr_eq(&restored_owner, &expected_owner));
+    file.replace(policy("disabled-again", false, json!([])));
+    registry.refresh_tool_search_view();
+    assert!(registry.find_by_name(REQUEST).is_none());
+    assert!(registry
+        .tool_search_view()
+        .entries()
+        .iter()
+        .all(|entry| entry.name != REQUEST));
+}
+
 #[tokio::test]
 async fn device_policy_disable_and_reenable_does_not_revive_session_grants() {
     let file = PolicyFile::new(policy("initial", true, json!([])));
@@ -208,6 +278,8 @@ async fn resolver_cannot_grant_unrequested_apps_or_capabilities() {
                 clipboard_read: true,
                 clipboard_write: true,
                 system_key_combos: true,
+                interaction_action: None,
+                preferred_mode: None,
             })
             .unwrap();
     };
@@ -396,6 +468,8 @@ async fn tcc_setup_never_commits_app_grants_from_the_setup_panel() {
     let file = PolicyFile::new(policy("initial", true, json!([])));
     let backend = Arc::new(RecordingBackend::default());
     backend.set_os_permissions(Some((false, true)));
+    // A target-specific AX failure must not suppress system permission setup.
+    backend.set_os_query_error(true);
     let mut tool = make_tool(backend.clone()).with_device_policy_path(file.0.clone());
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     tool.access_resolver = Arc::new(TuiBridgeResolver::new(sender));
@@ -412,6 +486,8 @@ async fn tcc_setup_never_commits_app_grants_from_the_setup_panel() {
                 clipboard_read: true,
                 clipboard_write: true,
                 system_key_combos: true,
+                interaction_action: None,
+                preferred_mode: None,
             })
             .unwrap();
     };
@@ -427,6 +503,73 @@ async fn tcc_setup_never_commits_app_grants_from_the_setup_panel() {
     assert!(!state.grant_flags.clipboard_write);
     assert!(!state.grant_flags.system_key_combos);
     assert!(backend.events().is_empty());
+}
+
+#[tokio::test]
+async fn tcc_setup_model_bytes_and_dialog_state_match_native_325() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../fixtures/tcc-2.1.325.json")).unwrap();
+    for case in fixture["setupTransitions"].as_array().unwrap() {
+        let pair = |field: &str| {
+            let values = case["input"][field].as_array().unwrap();
+            (values[0].as_bool().unwrap(), values[1].as_bool().unwrap())
+        };
+        let before = pair("before");
+        let after = pair("after");
+        let file = PolicyFile::new(policy("initial", true, json!([])));
+        let backend = Arc::new(RecordingBackend::default());
+        backend.set_os_permissions(Some(before));
+        let mut tool = make_tool(backend.clone()).with_device_policy_path(file.0.clone());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        tool.access_resolver = Arc::new(TuiBridgeResolver::new(sender));
+        let response = async {
+            let exchange = receiver.recv().await.unwrap();
+            let tcc = exchange.request.tcc_state.as_ref().unwrap();
+            assert_eq!((tcc.accessibility, tcc.screen_recording), before);
+            assert!(exchange.request.apps.is_empty());
+            backend.set_os_permissions(Some(after));
+            // A setup panel can never authorize application or clipboard use.
+            exchange
+                .resp_tx
+                .send(permission::computer_access::ComputerAccessResponse {
+                    granted_apps: vec!["test.app".into()],
+                    clipboard_read: true,
+                    clipboard_write: true,
+                    system_key_combos: true,
+                    interaction_action: None,
+                    preferred_mode: None,
+                })
+                .unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(grant(&tool), response)
+        })
+        .await
+        .unwrap();
+        let result = result.unwrap();
+        assert_eq!(
+            result.is_error,
+            case["expected"]["isError"].as_bool().unwrap()
+        );
+        let message = test_model_text(result.model_content.as_ref()).unwrap();
+        assert_eq!(
+            serde_json::to_string(message).unwrap(),
+            case["expectedModelTextJson"].as_str().unwrap()
+        );
+        let expected = case["expected"].clone();
+        let mut data = test_data(&result.data);
+        data["content"][0]["text"] =
+            Value::String(message.replace("LingXi desktop app", "Claude desktop app"));
+        assert_eq!(data, expected);
+        let state = tool.state.lock().unwrap();
+        assert!(state.allowed_apps.is_empty());
+        assert!(
+            !state.grant_flags.clipboard_read
+                && !state.grant_flags.clipboard_write
+                && !state.grant_flags.system_key_combos
+        );
+        assert!(backend.events().is_empty());
+    }
 }
 
 #[tokio::test]
@@ -1381,17 +1524,45 @@ async fn unavailable_os_query_blocks_this_operation_without_latching_a_false_rev
 }
 
 #[tokio::test]
-async fn unavailable_os_query_does_not_open_a_misleading_tcc_or_application_approval_panel() {
+async fn unavailable_ax_target_does_not_block_explicit_app_approval_or_allow_effects() {
+    let file = PolicyFile::new(policy("initial", true, json!([])));
     let backend = Arc::new(RecordingBackend::default());
     backend.set_os_permissions(Some((true, true)));
     backend.set_os_query_error(true);
-    let mut tool = make_tool(backend);
+    let mut tool = make_tool(backend.clone()).with_device_policy_path(file.0.clone());
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     tool.access_resolver = Arc::new(TuiBridgeResolver::new(sender));
-    let error = grant(&tool).await.unwrap_err();
+    let response = async {
+        let exchange = receiver.recv().await.unwrap();
+        assert!(exchange.request.tcc_state.is_none());
+        exchange
+            .resp_tx
+            .send(permission::computer_access::ComputerAccessResponse {
+                granted_apps: vec!["test.app".into()],
+                clipboard_read: false,
+                clipboard_write: false,
+                system_key_combos: false,
+                interaction_action: None,
+                preferred_mode: None,
+            })
+            .unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(grant(&tool), response)
+    })
+    .await
+    .unwrap();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Could not verify macOS Accessibility"));
+    assert!(tool.state.lock().unwrap().allowed_apps.is_empty());
+    let error = invoke(&tool, json!({"action":"type","text":"blocked"}), ctx())
+        .await
+        .unwrap_err();
     assert!(error
         .to_string()
         .contains("Could not verify macOS Accessibility"));
-    assert!(receiver.try_recv().is_err());
+    assert!(!backend.events().iter().any(|event| event == "type:blocked"));
     assert!(!tool.os_permissions_revoked.load(Ordering::SeqCst));
 }

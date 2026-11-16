@@ -307,20 +307,35 @@ impl ToolRegistry {
     }
 
     fn unambiguous_mcp_tools(&self) -> Vec<Arc<dyn Tool>> {
-        let mut tools = self
+        let registered = self
             .mcp_tools
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hosted_names = registered
             .iter()
             .flat_map(|(_, tools)| tools.iter())
-            .filter(|tool| self.session_allows_mcp(tool.as_ref()))
+            .filter(|tool| tool.computer_control_owner().is_some())
+            .map(|tool| tool.name().to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        let mut tools = registered
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .filter(|tool| {
+                self.session_allows_mcp(tool.as_ref())
+                    && (tool.computer_control_owner().is_some()
+                        || !hosted_names.contains(tool.name()))
+            })
             .cloned()
             .collect::<Vec<_>>();
         let mut counts = std::collections::HashMap::<String, usize>::new();
         for tool in &tools {
-            *counts.entry(tool.name().to_owned()).or_default() += 1;
+            if tool.computer_control_owner().is_none() {
+                *counts.entry(tool.name().to_owned()).or_default() += 1;
+            }
         }
-        tools.retain(|tool| counts.get(tool.name()) == Some(&1));
+        tools.retain(|tool| {
+            tool.computer_control_owner().is_some() || counts.get(tool.name()) == Some(&1)
+        });
         tools
     }
 
@@ -551,7 +566,11 @@ impl ToolRegistry {
 
         // Dynamic partition: MCP + Mod + LSP + plugin, locale-sorted by name.
         let mut dynamic: Vec<Arc<dyn Tool>> = Vec::new();
-        dynamic.extend(self.unambiguous_mcp_tools());
+        dynamic.extend(
+            self.unambiguous_mcp_tools()
+                .into_iter()
+                .filter(|tool| tool.computer_control_owner().is_none() || tool.is_enabled(ctx)),
+        );
         for (_plugin, ts) in self
             .mod_tools
             .read()
@@ -586,6 +605,21 @@ impl ToolRegistry {
             }
             dynamic.retain(|tool| counts.get(tool.name()) == Some(&1));
         }
+        // Host-owned in-process Computer Use entries are builtin services even
+        // though their protocol is MCP. A configured external server cannot
+        // replace that trusted owner merely by choosing the same display FQN.
+        let hosted_names: std::collections::HashSet<String> = self
+            .mcp_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .filter(|tool| tool.computer_control_owner().is_some())
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        dynamic.retain(|tool| {
+            tool.computer_control_owner().is_some() || !hosted_names.contains(tool.name())
+        });
         dynamic.sort_by(|a, b| locale_cmp(a.name(), b.name()));
 
         // Builtin-precedence dedup (uniqBy): drop a dynamic tool whose name
@@ -658,13 +692,41 @@ impl ToolRegistry {
                 .mcp_tools
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut matching = mcp_tools
+            // A disabled host adapter still owns its registered identity.
+            // Never hand its preauthorized FQN to a same-name external server.
+            if let Some(hosted) =
+                mcp_tools
+                    .iter()
+                    .flat_map(|(_, tools)| tools.iter())
+                    .find(|tool| {
+                        tool.computer_control_owner().is_some()
+                            && (tool.name() == name || tool.aliases().contains(&name))
+                    })
+            {
+                return (self.session_allows_mcp(hosted.as_ref())
+                    && hosted
+                        .is_enabled(&self.effective_static_ctx(&ToolStaticContext::default())))
+                .then(|| hosted.clone());
+            }
+            let matching = mcp_tools
                 .iter()
                 .flat_map(|(_id, tools)| tools.iter())
                 .filter(|t| {
                     self.session_allows_mcp(t.as_ref())
+                        && (t.computer_control_owner().is_none()
+                            || t.is_enabled(
+                                &self.effective_static_ctx(&ToolStaticContext::default()),
+                            ))
                         && (t.name() == name || t.aliases().contains(&name))
                 });
+            let mut matching = matching.collect::<Vec<_>>();
+            if let Some(tool) = matching
+                .iter()
+                .find(|tool| tool.computer_control_owner().is_some())
+            {
+                return Some(Arc::clone(tool));
+            }
+            let mut matching = matching.drain(..);
             if let Some(tool) = matching.next() {
                 if matching.next().is_some() {
                     return None;
@@ -727,9 +789,10 @@ impl ToolRegistry {
         self.refresh_tool_search_view();
     }
 
-    /// Atomically replace the entire MCP partition set from a rebuilt shared
-    /// session snapshot, then refresh the deferred-search view against that
-    /// new partition set.
+    /// Atomically replace external MCP connection partitions from a rebuilt
+    /// session snapshot. Host-owned computer tools share the MCP wire protocol
+    /// but are not sourced from those connections; retain their exact owners
+    /// even while device policy temporarily hides them.
     pub fn replace_mcp_tools(&self, tools: Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>) {
         if let Some(lease) = &self.session_tool_lease {
             for (_, tools) in &tools {
@@ -738,10 +801,24 @@ impl ToolRegistry {
                 }
             }
         }
-        *self
+        let mut registered = self
             .mcp_tools
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = tools;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hosted = registered
+            .iter()
+            .filter_map(|(connection, entries)| {
+                let owned: Vec<_> = entries
+                    .iter()
+                    .filter(|tool| tool.computer_control_owner().is_some())
+                    .cloned()
+                    .collect();
+                (!owned.is_empty()).then_some((*connection, owned))
+            })
+            .collect::<Vec<_>>();
+        hosted.extend(tools);
+        *registered = hosted;
+        drop(registered);
         self.refresh_tool_search_view();
     }
 
@@ -1008,6 +1085,96 @@ mod tests {
 
     /// A stub tool with a configurable name (for ordering tests).
     struct NamedTool(&'static str);
+
+    struct HostedTool {
+        owner: Arc<dyn Tool>,
+        enabled: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait]
+    impl Tool for HostedTool {
+        fn name(&self) -> &str {
+            "mcp__computer-use__request_access"
+        }
+        fn input_repair_metadata(&self) -> crate::tool_trait::ToolInputRepairMetadata {
+            self.owner.input_repair_metadata()
+        }
+        fn is_mcp(&self) -> bool {
+            true
+        }
+        fn computer_control_owner(&self) -> Option<Arc<dyn Tool>> {
+            Some(self.owner.clone())
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            self.owner.input_schema()
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            self.enabled.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
+            false
+        }
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
+            false
+        }
+        async fn check_permissions(
+            &self,
+            input: &Utf16JsonProjection,
+            ctx: &ToolUseContext,
+        ) -> PermissionResult {
+            self.owner.check_permissions(input, ctx).await
+        }
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+            "hosted".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+            "hosted".into()
+        }
+        async fn call(
+            &self,
+            input: Utf16JsonProjection,
+            ctx: ToolUseContext,
+            tx: crate::progress::ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.owner.call(input, ctx, tx).await
+        }
+    }
+
+    #[test]
+    fn disabled_hosted_computer_identity_cannot_be_replaced_by_external_name_collision() {
+        const NAME: &str = "mcp__computer-use__request_access";
+        let enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hosted: Arc<dyn Tool> = Arc::new(HostedTool {
+            owner: Arc::new(DummyTool),
+            enabled: enabled.clone(),
+        });
+        let external: Arc<dyn Tool> = Arc::new(NamedTool(NAME));
+        let registry = ToolRegistry::new();
+        registry.register_mcp_tools(McpConnectionId::new(), vec![external.clone()]);
+        registry.register_mcp_tools(McpConnectionId::new(), vec![hosted.clone()]);
+        assert!(registry.find_by_name(NAME).is_none());
+        assert!(registry
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .all(|tool| tool.name() != NAME));
+        enabled.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(Arc::ptr_eq(&registry.find_by_name(NAME).unwrap(), &hosted));
+        let available = registry.available_tools(&ToolStaticContext::default());
+        assert_eq!(
+            available.iter().filter(|tool| tool.name() == NAME).count(),
+            1
+        );
+        assert!(available.iter().any(|tool| Arc::ptr_eq(tool, &hosted)));
+        enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+        registry.replace_mcp_tools(vec![(McpConnectionId::new(), vec![external])]);
+        assert!(registry.find_by_name(NAME).is_none());
+        assert!(registry
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .all(|tool| tool.name() != NAME));
+    }
 
     #[async_trait]
     impl Tool for NamedTool {

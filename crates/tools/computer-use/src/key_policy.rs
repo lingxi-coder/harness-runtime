@@ -1,8 +1,10 @@
-//! Key capability classifier, verified against the 2.1.310 native helper.
+//! Key capability classifier, verified against the 2.1.325 native helper.
 fn parse(chord: &str) -> (Vec<String>, Vec<String>, Vec<(String, bool)>) {
     let mut ordered = Vec::new();
     for part in chord.to_lowercase().split('+') {
-        let mut token = part.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        // Match ECMAScript trim, which excludes Unicode NEXT LINE (U+0085).
+        let mut token =
+            part.trim_matches(|c: char| c.is_whitespace() && c != '\u{85}' || c == '\u{feff}');
         if token.is_empty() {
             if part.len() == 1 {
                 token = part;
@@ -131,7 +133,8 @@ mod tests {
     #[test]
     fn reference_key_cases() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../fixtures/claude-code-2.1.310.json")).unwrap();
+            serde_json::from_str(include_str!("../fixtures/claude-code-2.1.325.json")).unwrap();
+        assert_eq!(fixture["version"], "2.1.325");
         for case in fixture["keys"].as_array().unwrap() {
             let key = case["input"].as_str().unwrap();
             let flags = case["output"]["clipboard"].as_array().unwrap();

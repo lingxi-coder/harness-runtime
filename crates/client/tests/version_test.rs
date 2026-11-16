@@ -37,11 +37,13 @@ fn version_is_semver() {
 /// `ClientEvent::Error.message` to the source-preserving string carrier.
 /// Side Chat additions append after the frozen ordinal prefix.
 /// Major 26 adds context policy and pricing interval fields to model records.
+/// Major 34 grows computer-access UniFFI request/response records for
+/// takeover/teaching interactions; native bindings must ship with the library.
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_thirty_three_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "33.0.0");
+fn version_is_thirty_four_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "34.0.0");
 }

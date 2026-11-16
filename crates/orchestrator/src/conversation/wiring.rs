@@ -1022,7 +1022,10 @@ impl ConversationOrchestrator {
             self.tools
                 .find_registered(parent_name)
                 .is_some_and(|parent| {
-                    parent.is_enabled(&self.tool_static_context())
+                    (parent.is_enabled(&self.tool_static_context())
+                        || tool
+                            .computer_control_owner()
+                            .is_some_and(|owner| std::sync::Arc::ptr_eq(&owner, &parent)))
                         && context.deny_rules.iter().any(|rule| {
                             rule.rule_content.is_none() && rule.tool_name == parent_name
                         })

@@ -265,6 +265,7 @@ fn frame_computer_access_request_round_trips() {
         clipboard_write: false,
         system_key_combos: false,
         tcc_state: None,
+        interaction: None,
     });
     assert_eq!(roundtrip(&f), f);
     let json = serde_json::to_string(&f).unwrap();
@@ -291,6 +292,8 @@ fn approve_and_deny_computer_access_commands_match_exact_wire_shape() {
             clipboard_read: false,
             clipboard_write: false,
             system_key_combos: false,
+            interaction_action: None,
+            preferred_mode: None,
         },
     };
     assert_eq!(roundtrip(&approve), approve);

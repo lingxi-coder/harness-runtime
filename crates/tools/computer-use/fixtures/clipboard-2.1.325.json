@@ -1,0 +1,378 @@
+{
+  "version": "2.1.325",
+  "binarySha256": "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2",
+  "sourceByteRanges": [
+    {
+      "name": "stash",
+      "start": 302157775,
+      "end": 302158121,
+      "sha256": "b5df1ed43192dfe2da8d243fb7464a8666f08fbdfbf81e0292fdc6fd4b4e6e2d"
+    },
+    {
+      "name": "paste",
+      "start": 302096930,
+      "end": 302097294,
+      "sha256": "abe799875709dbffe2ab70589e89479ea7bf97091d8ea23676bf1fb9368766c8"
+    },
+    {
+      "name": "type",
+      "start": 302245875,
+      "end": 302246977,
+      "sha256": "78c7fb745f8dc5de9f295e2e948d9ec4d816bf324a81cefcadf1eb4cea30d36e"
+    }
+  ],
+  "scope": "Exact native CLI Ee and core Ue/zo replay with controlled clipboard, focus and keyboard effects. No OS clipboard, typing, capture or unknown host callback execution claim.",
+  "cases": [
+    {
+      "kind": "paste",
+      "config": {},
+      "error": null,
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          "line1\nline2"
+        ],
+        [
+          "read"
+        ],
+        [
+          "keys",
+          [
+            "command",
+            "v"
+          ]
+        ],
+        [
+          "sleep",
+          100
+        ],
+        [
+          "write",
+          "original"
+        ]
+      ],
+      "clipboard": "original"
+    },
+    {
+      "kind": "paste",
+      "config": {
+        "firstReadFails": true
+      },
+      "error": null,
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          "line1\nline2"
+        ],
+        [
+          "read"
+        ],
+        [
+          "keys",
+          [
+            "command",
+            "v"
+          ]
+        ],
+        [
+          "sleep",
+          100
+        ]
+      ],
+      "clipboard": "line1\nline2"
+    },
+    {
+      "kind": "paste",
+      "config": {
+        "roundtripFails": true
+      },
+      "error": "Clipboard write did not round-trip.",
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          "line1\nline2"
+        ],
+        [
+          "read"
+        ],
+        [
+          "write",
+          "original"
+        ]
+      ],
+      "clipboard": "original"
+    },
+    {
+      "kind": "paste",
+      "config": {
+        "keyFails": true
+      },
+      "error": "key failed",
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          "line1\nline2"
+        ],
+        [
+          "read"
+        ],
+        [
+          "keys",
+          [
+            "command",
+            "v"
+          ]
+        ],
+        [
+          "write",
+          "original"
+        ]
+      ],
+      "clipboard": "original"
+    },
+    {
+      "kind": "paste",
+      "config": {
+        "restoreFails": true
+      },
+      "error": null,
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          "line1\nline2"
+        ],
+        [
+          "read"
+        ],
+        [
+          "keys",
+          [
+            "command",
+            "v"
+          ]
+        ],
+        [
+          "sleep",
+          100
+        ],
+        [
+          "write",
+          "original"
+        ]
+      ],
+      "clipboard": "line1\nline2"
+    },
+    {
+      "kind": "stash",
+      "sequence": [
+        true,
+        true,
+        false
+      ],
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          ""
+        ],
+        [
+          "write",
+          ""
+        ],
+        [
+          "write",
+          "original"
+        ]
+      ],
+      "clipboard": "original",
+      "stash": null
+    },
+    {
+      "kind": "stash",
+      "sequence": [
+        true,
+        false,
+        true,
+        false
+      ],
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          ""
+        ],
+        [
+          "write",
+          "original"
+        ],
+        [
+          "read"
+        ],
+        [
+          "write",
+          ""
+        ],
+        [
+          "write",
+          "original"
+        ]
+      ],
+      "clipboard": "original",
+      "stash": null
+    },
+    {
+      "kind": "stash",
+      "sequence": [
+        false
+      ],
+      "events": [],
+      "clipboard": "original",
+      "stash": null
+    },
+    {
+      "kind": "stash",
+      "sequence": [
+        true
+      ],
+      "events": [
+        [
+          "read"
+        ],
+        [
+          "write",
+          ""
+        ]
+      ],
+      "clipboard": "",
+      "stash": "original"
+    },
+    {
+      "kind": "type",
+      "clipboardWrite": false,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Typed 11 grapheme(s)."
+          }
+        ]
+      },
+      "events": [
+        [
+          "type",
+          "l",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "i",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "n",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "e",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "1",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "key",
+          "return"
+        ],
+        [
+          "type",
+          "l",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "i",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "n",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "e",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "2",
+          {
+            "viaClipboard": false
+          }
+        ]
+      ]
+    },
+    {
+      "kind": "type",
+      "clipboardWrite": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Typed (via clipboard)."
+          }
+        ]
+      },
+      "events": [
+        [
+          "type",
+          "line1\nline2",
+          {
+            "viaClipboard": true
+          }
+        ]
+      ]
+    }
+  ]
+}

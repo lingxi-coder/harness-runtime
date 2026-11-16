@@ -1,0 +1,1867 @@
+{
+  "version": "2.1.325",
+  "nativeSha256": "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2",
+  "sourceByteRanges": [
+    {
+      "name": "policy",
+      "start": 302139122,
+      "end": 302148136,
+      "sha256": "a0c179432fef302deba930afe845d37f5a169dca6404b113d839a0be119c8f76"
+    },
+    {
+      "name": "Zn",
+      "start": 302154303,
+      "end": 302154464,
+      "sha256": "08ff1256d095b4a08592924e65c743ef49ccc0fe974c3937f956e09398d831f7"
+    },
+    {
+      "name": "eo",
+      "start": 302154464,
+      "end": 302154556,
+      "sha256": "59b99ed1ed887220e2e98864343a44f501a85137cae9c723eb76107c099f9f4b"
+    },
+    {
+      "name": "M",
+      "start": 302154556,
+      "end": 302154644,
+      "sha256": "c98a08a79163430593e98371c3833ef15b8c838b1d2b1bc084f02797a6e61eb4"
+    },
+    {
+      "name": "to",
+      "start": 302154644,
+      "end": 302154969,
+      "sha256": "16d29d165ca3d937814cce162ad5b9ea2c3ea0c1fe955feea11ca151c06f6cad"
+    },
+    {
+      "name": "R",
+      "start": 302154969,
+      "end": 302155041,
+      "sha256": "4ab10d4748647ba79cd7f0af48d092cfe552ede5f99b10b7d765fa15adbadd63"
+    },
+    {
+      "name": "U",
+      "start": 302157593,
+      "end": 302157775,
+      "sha256": "f30a19e98fad5e85dc741096a3694e99403cd916e7a6769fa33a1e143e573df1"
+    },
+    {
+      "name": "Xt",
+      "start": 302216477,
+      "end": 302218071,
+      "sha256": "8cc0232a2fda04049b3a5e12adaecc393006618f6316c6f63537df67b7dbcadc"
+    },
+    {
+      "name": "Qt",
+      "start": 302225345,
+      "end": 302227452,
+      "sha256": "46685275c980249af032a91afd2f974aa09abcb46b55bae3fec13e8ecfd4e794"
+    },
+    {
+      "name": "Uo",
+      "start": 302227452,
+      "end": 302228466,
+      "sha256": "91fd6470c2016dfd8fd2c49fca37466f8687280dd68fb3b0680814d03003b5e1"
+    },
+    {
+      "name": "en",
+      "start": 302228466,
+      "end": 302228782,
+      "sha256": "1331555cdfac929e191caa6ffe2eff4d9ce26e713597b353ef83c07013f890a5"
+    },
+    {
+      "name": "Ho",
+      "start": 302228782,
+      "end": 302228821,
+      "sha256": "7e3a0d02e3d3f32703b5fbbc81daa2c31c3766d25d84d0e85f65ddf6b627e017"
+    },
+    {
+      "name": "tn",
+      "start": 302228821,
+      "end": 302229881,
+      "sha256": "e619bed04b01887eaeac42e9aa2c7f99f7e226f3bde1d52a29cb8dbbfb04ea80"
+    },
+    {
+      "name": "Ce",
+      "start": 302229881,
+      "end": 302230332,
+      "sha256": "71295fea16873770fcbd98572f8eac14948400ec81987ec0087759eae5caf7e8"
+    },
+    {
+      "name": "Ae",
+      "start": 302230332,
+      "end": 302230812,
+      "sha256": "205f1f4b9a0d6b551364f73d1d27bdc241393727205180a7f3d72566edf38fbb"
+    },
+    {
+      "name": "F",
+      "start": 302154220,
+      "end": 302154303,
+      "sha256": "448b329e776cd7f2df47a580027c6173b2351e9f1f771e2018bbaf5c7aa07522"
+    },
+    {
+      "name": "er",
+      "start": 302252305,
+      "end": 302253735,
+      "sha256": "f8f7587d287718ff0f74f9a99737f3c91256de9681c4f170587252f2d80381fc"
+    },
+    {
+      "name": "Bo",
+      "start": 302222642,
+      "end": 302223146,
+      "sha256": "332ec58b2e1893a8e0b24540041071fd6bcdef62006be8407199d42281cd7912"
+    },
+    {
+      "name": "st",
+      "start": 302239645,
+      "end": 302239868,
+      "sha256": "b2d7ae684c1f4fc22a95ae7787f8e58eb1b320a515230306c9edd50f9219910e"
+    }
+  ],
+  "constants": {
+    "Xt": "You requested access to Claude's own application. Claude cannot be granted control of its own window: doing so would let you operate Claude's own interface and change your own permissions, settings, and allowed behaviors. This can never be granted — do not request it again. To operate a different application, request access to that application by name instead.",
+    "Jt": " If you genuinely need this restricted access, call request_access again right now, in THIS SAME turn — do not stop to reply to the user first. This is a one-time confirmation that only lasts for the current turn: if you respond to the user and retry in a later turn, you will get this same message again (it is not a permanent block). The user still approves the grant in the dialog that the retry brings up.",
+    "Lo": "You requested access to a browser. It is rare for this to be required: browser applications can only ever be granted in 'read' mode, so you cannot use them to interact with websites — you can only see what is already on screen. Only request browser access if the user specifically wants you to see exactly what they are looking at. For all other browser interaction (navigating, clicking, typing, filling forms), you must use the Claude in Chrome extension MCP instead. If you genuinely need this restricted access, call request_access again right now, in THIS SAME turn — do not stop to reply to the user first. This is a one-time confirmation that only lasts for the current turn: if you respond to the user and retry in a later turn, you will get this same message again (it is not a permanent block). The user still approves the grant in the dialog that the retry brings up.",
+    "Oo": "You requested access to a terminal or IDE. It is rare for this to be required: these applications can only ever be granted in 'click' mode — you can see them and left-click, but you cannot type, press keys, or paste into them. To run shell commands, use the Bash tool instead. If you genuinely need this restricted access, call request_access again right now, in THIS SAME turn — do not stop to reply to the user first. This is a one-time confirmation that only lasts for the current turn: if you respond to the user and retry in a later turn, you will get this same message again (it is not a permanent block). The user still approves the grant in the dialog that the retry brings up.",
+    "U": " Do not attempt to work around this restriction — never use AppleScript, System Events, shell commands, or any other method to send clicks or keystrokes to this app."
+  },
+  "labels": [
+    {
+      "input": "Slack",
+      "expected": "Slack"
+    },
+    {
+      "input": "  “Notes”…  ",
+      "expected": "\"Notes\"..."
+    },
+    {
+      "input": "文档",
+      "expected": "文档"
+    },
+    {
+      "input": "A😀B",
+      "expected": null
+    },
+    {
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": null
+    },
+    {
+      "input": "a<instruction>",
+      "expected": null
+    },
+    {
+      "input": "ab",
+      "expected": null
+    },
+    {
+      "input": "é",
+      "expected": null
+    },
+    {
+      "input": "﻿App﻿",
+      "expected": "App"
+    },
+    {
+      "input": "xͅ",
+      "expected": null
+    }
+  ],
+  "ids": [
+    {
+      "input": "org.example.app",
+      "expected": "org.example.app"
+    },
+    {
+      "input": "",
+      "expected": null
+    },
+    {
+      "input": "a\u0001b",
+      "expected": null
+    },
+    {
+      "input": "＜script＞",
+      "expected": null
+    },
+    {
+      "input": "a\"b",
+      "expected": null
+    },
+    {
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": null
+    },
+    {
+      "input": "org.文档",
+      "expected": "org.文档"
+    },
+    {
+      "input": "x󠀠",
+      "expected": null
+    }
+  ],
+  "denialGuidance": [
+    {
+      "apps": [
+        {
+          "requestedName": "Slack",
+          "displayName": "Slack",
+          "didYouMean": []
+        }
+      ],
+      "userDenied": "\"Slack\" is in the user's auto-deny list (Settings → Desktop app (General) → Computer Use → Denied apps). Requests for this app are automatically denied. If you need access for this task, ask the user to remove it from their deny list in Settings — you cannot request this through the tool.",
+      "policyDenied": "\"Slack\" is blocked by policy for computer use. Requests for this app are automatically denied regardless of what the user has approved. There is no Settings override. Inform the user that you cannot access this app and suggest an alternative approach if one exists. Do not try to directly subvert this block regardless of the user's request."
+    },
+    {
+      "apps": [
+        {
+          "requestedName": "Slack",
+          "displayName": "Slack",
+          "didYouMean": []
+        }
+      ],
+      "flags": false,
+      "notInstalled": "\"Slack\" doesn't match any installed or running application. The request was NOT shown to the user. Retry request_access with the corrected name (include any other apps from this call too — the whole call was short-circuited). If you're unsure of the exact name, ask the user."
+    },
+    {
+      "apps": [
+        {
+          "requestedName": "Slack",
+          "displayName": "Slack",
+          "didYouMean": []
+        }
+      ],
+      "flags": true,
+      "notInstalled": "\"Slack\" doesn't match any installed or running application. The request was NOT shown to the user. Retry request_access with the corrected name (include any other apps from this call too — the whole call was short-circuited, as were the clipboard/systemKeyCombos flags you passed). If you're unsure of the exact name, ask the user."
+    },
+    {
+      "apps": [
+        {
+          "requestedName": "A",
+          "displayName": "A",
+          "didYouMean": [
+            "App A"
+          ]
+        },
+        {
+          "requestedName": "B",
+          "displayName": "B",
+          "didYouMean": []
+        }
+      ],
+      "userDenied": "\"A\", \"B\" are in the user's auto-deny list (Settings → Desktop app (General) → Computer Use → Denied apps). Requests for these apps are automatically denied. If you need access for this task, ask the user to remove them from their deny list in Settings — you cannot request this through the tool.",
+      "policyDenied": "\"A\", \"B\" are blocked by policy for computer use. Requests for these apps are automatically denied regardless of what the user has approved. There is no Settings override. Inform the user that you cannot access these apps and suggest an alternative approach if one exists. Do not try to directly subvert this block regardless of the user's request."
+    },
+    {
+      "apps": [
+        {
+          "requestedName": "A",
+          "displayName": "A",
+          "didYouMean": [
+            "App A"
+          ]
+        },
+        {
+          "requestedName": "B",
+          "displayName": "B",
+          "didYouMean": []
+        }
+      ],
+      "flags": false,
+      "notInstalled": "\"A\", \"B\" don't match any installed or running application. The request was NOT shown to the user. Did you mean: A → \"App A\"? Retry request_access with the corrected names (include any other apps from this call too — the whole call was short-circuited). If you're unsure of the exact name, ask the user."
+    },
+    {
+      "apps": [
+        {
+          "requestedName": "A",
+          "displayName": "A",
+          "didYouMean": [
+            "App A"
+          ]
+        },
+        {
+          "requestedName": "B",
+          "displayName": "B",
+          "didYouMean": []
+        }
+      ],
+      "flags": true,
+      "notInstalled": "\"A\", \"B\" don't match any installed or running application. The request was NOT shown to the user. Did you mean: A → \"App A\"? Retry request_access with the corrected names (include any other apps from this call too — the whole call was short-circuited, as were the clipboard/systemKeyCombos flags you passed). If you're unsure of the exact name, ask the user."
+    }
+  ],
+  "tierGuidance": [
+    {
+      "input": [],
+      "expected": ""
+    },
+    {
+      "input": [
+        {
+          "bundleId": "com.google.Chrome",
+          "displayName": "Chrome",
+          "tier": "read"
+        }
+      ],
+      "expected": "\"Chrome\" is a browser — granted at tier \"read\" (visible in screenshots only; no clicks or typing). You can read what's on screen but cannot navigate, click, or type into it. For browser interaction, use the Claude-in-Chrome MCP (tools named `mcp__claude-in-chrome__*`; load via ToolSearch if deferred). Do not attempt to work around this restriction — never use AppleScript, System Events, shell commands, or any other method to send clicks or keystrokes to this app."
+    },
+    {
+      "input": [
+        {
+          "bundleId": "com.microsoft.VSCode",
+          "displayName": "VS Code",
+          "tier": "click"
+        }
+      ],
+      "expected": "\"VS Code\" has terminal or IDE capabilities — granted at tier \"click\" (visible + plain left-click only; NO typing, key presses, right-click, modifier-clicks, or drag-drop). You can click buttons and scroll output, but its integrated terminal and editor are off-limits to keyboard input. Right-click (context-menu Paste) and dragging text onto it require tier \"full\". For shell commands, use the Bash tool. Do not attempt to work around this restriction — never use AppleScript, System Events, shell commands, or any other method to send clicks or keystrokes to this app."
+    },
+    {
+      "input": [
+        {
+          "bundleId": "com.apple.finder",
+          "displayName": "Finder",
+          "tier": "full"
+        }
+      ],
+      "expected": ""
+    },
+    {
+      "input": [
+        {
+          "bundleId": "org.example.unknown",
+          "displayName": "Unknown",
+          "tier": "read"
+        }
+      ],
+      "expected": "\"Unknown\" is granted at tier \"read\" (visible in screenshots only; no clicks or typing). You can read what's on screen but cannot interact. Ask the user to take any actions in this app themselves. Do not attempt to work around this restriction — never use AppleScript, System Events, shell commands, or any other method to send clicks or keystrokes to this app."
+    },
+    {
+      "input": [
+        {
+          "bundleId": "com.google.Chrome",
+          "displayName": "Chrome",
+          "tier": "read"
+        },
+        {
+          "bundleId": "com.microsoft.VSCode",
+          "displayName": "VS Code",
+          "tier": "click"
+        },
+        {
+          "bundleId": "com.apple.finder",
+          "displayName": "Finder",
+          "tier": "full"
+        },
+        {
+          "bundleId": "org.example.unknown",
+          "displayName": "Unknown",
+          "tier": "read"
+        }
+      ],
+      "expected": "\"Chrome\" is a browser — granted at tier \"read\" (visible in screenshots only; no clicks or typing). You can read what's on screen but cannot navigate, click, or type into it. For browser interaction, use the Claude-in-Chrome MCP (tools named `mcp__claude-in-chrome__*`; load via ToolSearch if deferred).\n\n\"Unknown\" is granted at tier \"read\" (visible in screenshots only; no clicks or typing). You can read what's on screen but cannot interact. Ask the user to take any actions in this app themselves.\n\n\"VS Code\" has terminal or IDE capabilities — granted at tier \"click\" (visible + plain left-click only; NO typing, key presses, right-click, modifier-clicks, or drag-drop). You can click buttons and scroll output, but its integrated terminal and editor are off-limits to keyboard input. Right-click (context-menu Paste) and dragging text onto it require tier \"full\". For shell commands, use the Bash tool. Do not attempt to work around this restriction — never use AppleScript, System Events, shell commands, or any other method to send clicks or keystrokes to this app."
+    }
+  ],
+  "suggestions": [
+    {
+      "query": "slack",
+      "installed": [
+        {
+          "bundleId": "com.tinyspeck.slackmacgap",
+          "displayName": "Slack"
+        },
+        {
+          "bundleId": "com.apple.mail",
+          "displayName": "Mail"
+        },
+        {
+          "bundleId": "com.apple.Notes",
+          "displayName": "Notes"
+        },
+        {
+          "bundleId": "org.example",
+          "displayName": "Apple Notes"
+        }
+      ],
+      "expected": [
+        "Slack"
+      ]
+    },
+    {
+      "query": "Slaak",
+      "installed": [
+        {
+          "bundleId": "com.tinyspeck.slackmacgap",
+          "displayName": "Slack"
+        },
+        {
+          "bundleId": "com.apple.mail",
+          "displayName": "Mail"
+        },
+        {
+          "bundleId": "com.apple.Notes",
+          "displayName": "Notes"
+        },
+        {
+          "bundleId": "org.example",
+          "displayName": "Apple Notes"
+        }
+      ],
+      "expected": [
+        "Slack"
+      ]
+    },
+    {
+      "query": "Mail",
+      "installed": [
+        {
+          "bundleId": "com.tinyspeck.slackmacgap",
+          "displayName": "Slack"
+        },
+        {
+          "bundleId": "com.apple.mail",
+          "displayName": "Mail"
+        },
+        {
+          "bundleId": "com.apple.Notes",
+          "displayName": "Notes"
+        },
+        {
+          "bundleId": "org.example",
+          "displayName": "Apple Notes"
+        }
+      ],
+      "expected": [
+        "Mail"
+      ]
+    },
+    {
+      "query": "ab",
+      "installed": [
+        {
+          "bundleId": "com.tinyspeck.slackmacgap",
+          "displayName": "Slack"
+        },
+        {
+          "bundleId": "com.apple.mail",
+          "displayName": "Mail"
+        },
+        {
+          "bundleId": "com.apple.Notes",
+          "displayName": "Notes"
+        },
+        {
+          "bundleId": "org.example",
+          "displayName": "Apple Notes"
+        }
+      ],
+      "expected": []
+    },
+    {
+      "query": "apple notes",
+      "installed": [
+        {
+          "bundleId": "com.tinyspeck.slackmacgap",
+          "displayName": "Slack"
+        },
+        {
+          "bundleId": "com.apple.mail",
+          "displayName": "Mail"
+        },
+        {
+          "bundleId": "com.apple.Notes",
+          "displayName": "Notes"
+        },
+        {
+          "bundleId": "org.example",
+          "displayName": "Apple Notes"
+        }
+      ],
+      "expected": [
+        "Apple Notes",
+        "Notes"
+      ]
+    },
+    {
+      "query": "org.example",
+      "installed": [
+        {
+          "bundleId": "com.tinyspeck.slackmacgap",
+          "displayName": "Slack"
+        },
+        {
+          "bundleId": "com.apple.mail",
+          "displayName": "Mail"
+        },
+        {
+          "bundleId": "com.apple.Notes",
+          "displayName": "Notes"
+        },
+        {
+          "bundleId": "org.example",
+          "displayName": "Apple Notes"
+        }
+      ],
+      "expected": [
+        "Apple Notes"
+      ]
+    }
+  ],
+  "listApps": [
+    {
+      "input": {},
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "a",
+            "displayName": "App 6",
+            "isRunning": true,
+            "pid": 106
+          },
+          {
+            "bundleId": "é",
+            "displayName": "App 9",
+            "isRunning": true,
+            "pid": 109
+          },
+          {
+            "bundleId": "file2",
+            "displayName": "App 0",
+            "isRunning": true,
+            "isRunningFromDevPath": true,
+            "pid": 100
+          },
+          {
+            "bundleId": "foo_2",
+            "displayName": "App 3",
+            "isRunning": true,
+            "pid": 103
+          },
+          {
+            "bundleId": "ı",
+            "displayName": "App 12",
+            "isRunning": true,
+            "pid": 112
+          },
+          {
+            "bundleId": "org.example_2",
+            "displayName": "App 15",
+            "isRunning": true,
+            "pid": 115
+          },
+          {
+            "bundleId": "😀",
+            "displayName": "App 13",
+            "isRunning": false
+          },
+          {
+            "bundleId": "A",
+            "displayName": "App 7",
+            "isRunning": false
+          },
+          {
+            "bundleId": "ä",
+            "displayName": "App 4",
+            "isRunning": false
+          },
+          {
+            "bundleId": "ae",
+            "displayName": "App 5",
+            "isRunning": false
+          },
+          {
+            "bundleId": "é",
+            "displayName": "App 8",
+            "isRunning": false
+          },
+          {
+            "bundleId": "file10",
+            "displayName": "App 1",
+            "isRunning": false
+          },
+          {
+            "bundleId": "foo-2",
+            "displayName": "App 2",
+            "isRunning": false
+          },
+          {
+            "bundleId": "i",
+            "displayName": "App 10",
+            "isRunning": false
+          },
+          {
+            "bundleId": "İ",
+            "displayName": "App 11",
+            "isRunning": false
+          },
+          {
+            "bundleId": "org.example-2",
+            "displayName": "App 14",
+            "isRunning": false
+          }
+        ]
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"a\",\"displayName\":\"App 6\",\"isRunning\":true,\"pid\":106},{\"bundleId\":\"é\",\"displayName\":\"App 9\",\"isRunning\":true,\"pid\":109},{\"bundleId\":\"file2\",\"displayName\":\"App 0\",\"isRunning\":true,\"isRunningFromDevPath\":true,\"pid\":100},{\"bundleId\":\"foo_2\",\"displayName\":\"App 3\",\"isRunning\":true,\"pid\":103},{\"bundleId\":\"ı\",\"displayName\":\"App 12\",\"isRunning\":true,\"pid\":112},{\"bundleId\":\"org.example_2\",\"displayName\":\"App 15\",\"isRunning\":true,\"pid\":115},{\"bundleId\":\"😀\",\"displayName\":\"App 13\",\"isRunning\":false},{\"bundleId\":\"A\",\"displayName\":\"App 7\",\"isRunning\":false},{\"bundleId\":\"ä\",\"displayName\":\"App 4\",\"isRunning\":false},{\"bundleId\":\"ae\",\"displayName\":\"App 5\",\"isRunning\":false},{\"bundleId\":\"é\",\"displayName\":\"App 8\",\"isRunning\":false},{\"bundleId\":\"file10\",\"displayName\":\"App 1\",\"isRunning\":false},{\"bundleId\":\"foo-2\",\"displayName\":\"App 2\",\"isRunning\":false},{\"bundleId\":\"i\",\"displayName\":\"App 10\",\"isRunning\":false},{\"bundleId\":\"İ\",\"displayName\":\"App 11\",\"isRunning\":false},{\"bundleId\":\"org.example-2\",\"displayName\":\"App 14\",\"isRunning\":false}]}"
+    },
+    {
+      "input": {
+        "running_first": false
+      },
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "😀",
+            "displayName": "App 13",
+            "isRunning": false
+          },
+          {
+            "bundleId": "a",
+            "displayName": "App 6",
+            "isRunning": true,
+            "pid": 106
+          },
+          {
+            "bundleId": "A",
+            "displayName": "App 7",
+            "isRunning": false
+          },
+          {
+            "bundleId": "ä",
+            "displayName": "App 4",
+            "isRunning": false
+          },
+          {
+            "bundleId": "ae",
+            "displayName": "App 5",
+            "isRunning": false
+          },
+          {
+            "bundleId": "é",
+            "displayName": "App 8",
+            "isRunning": false
+          },
+          {
+            "bundleId": "é",
+            "displayName": "App 9",
+            "isRunning": true,
+            "pid": 109
+          },
+          {
+            "bundleId": "file10",
+            "displayName": "App 1",
+            "isRunning": false
+          },
+          {
+            "bundleId": "file2",
+            "displayName": "App 0",
+            "isRunning": true,
+            "isRunningFromDevPath": true,
+            "pid": 100
+          },
+          {
+            "bundleId": "foo_2",
+            "displayName": "App 3",
+            "isRunning": true,
+            "pid": 103
+          },
+          {
+            "bundleId": "foo-2",
+            "displayName": "App 2",
+            "isRunning": false
+          },
+          {
+            "bundleId": "i",
+            "displayName": "App 10",
+            "isRunning": false
+          },
+          {
+            "bundleId": "İ",
+            "displayName": "App 11",
+            "isRunning": false
+          },
+          {
+            "bundleId": "ı",
+            "displayName": "App 12",
+            "isRunning": true,
+            "pid": 112
+          },
+          {
+            "bundleId": "org.example_2",
+            "displayName": "App 15",
+            "isRunning": true,
+            "pid": 115
+          },
+          {
+            "bundleId": "org.example-2",
+            "displayName": "App 14",
+            "isRunning": false
+          }
+        ]
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"😀\",\"displayName\":\"App 13\",\"isRunning\":false},{\"bundleId\":\"a\",\"displayName\":\"App 6\",\"isRunning\":true,\"pid\":106},{\"bundleId\":\"A\",\"displayName\":\"App 7\",\"isRunning\":false},{\"bundleId\":\"ä\",\"displayName\":\"App 4\",\"isRunning\":false},{\"bundleId\":\"ae\",\"displayName\":\"App 5\",\"isRunning\":false},{\"bundleId\":\"é\",\"displayName\":\"App 8\",\"isRunning\":false},{\"bundleId\":\"é\",\"displayName\":\"App 9\",\"isRunning\":true,\"pid\":109},{\"bundleId\":\"file10\",\"displayName\":\"App 1\",\"isRunning\":false},{\"bundleId\":\"file2\",\"displayName\":\"App 0\",\"isRunning\":true,\"isRunningFromDevPath\":true,\"pid\":100},{\"bundleId\":\"foo_2\",\"displayName\":\"App 3\",\"isRunning\":true,\"pid\":103},{\"bundleId\":\"foo-2\",\"displayName\":\"App 2\",\"isRunning\":false},{\"bundleId\":\"i\",\"displayName\":\"App 10\",\"isRunning\":false},{\"bundleId\":\"İ\",\"displayName\":\"App 11\",\"isRunning\":false},{\"bundleId\":\"ı\",\"displayName\":\"App 12\",\"isRunning\":true,\"pid\":112},{\"bundleId\":\"org.example_2\",\"displayName\":\"App 15\",\"isRunning\":true,\"pid\":115},{\"bundleId\":\"org.example-2\",\"displayName\":\"App 14\",\"isRunning\":false}]}"
+    },
+    {
+      "input": {
+        "limit": 3
+      },
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "a",
+            "displayName": "App 6",
+            "isRunning": true,
+            "pid": 106
+          },
+          {
+            "bundleId": "é",
+            "displayName": "App 9",
+            "isRunning": true,
+            "pid": 109
+          },
+          {
+            "bundleId": "file2",
+            "displayName": "App 0",
+            "isRunning": true,
+            "isRunningFromDevPath": true,
+            "pid": 100
+          }
+        ],
+        "nextCursor": "Mw=="
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"a\",\"displayName\":\"App 6\",\"isRunning\":true,\"pid\":106},{\"bundleId\":\"é\",\"displayName\":\"App 9\",\"isRunning\":true,\"pid\":109},{\"bundleId\":\"file2\",\"displayName\":\"App 0\",\"isRunning\":true,\"isRunningFromDevPath\":true,\"pid\":100}],\"nextCursor\":\"Mw==\"}"
+    },
+    {
+      "input": {
+        "limit": 3,
+        "cursor": "Mw=="
+      },
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "foo_2",
+            "displayName": "App 3",
+            "isRunning": true,
+            "pid": 103
+          },
+          {
+            "bundleId": "ı",
+            "displayName": "App 12",
+            "isRunning": true,
+            "pid": 112
+          },
+          {
+            "bundleId": "org.example_2",
+            "displayName": "App 15",
+            "isRunning": true,
+            "pid": 115
+          }
+        ],
+        "nextCursor": "Ng=="
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"foo_2\",\"displayName\":\"App 3\",\"isRunning\":true,\"pid\":103},{\"bundleId\":\"ı\",\"displayName\":\"App 12\",\"isRunning\":true,\"pid\":112},{\"bundleId\":\"org.example_2\",\"displayName\":\"App 15\",\"isRunning\":true,\"pid\":115}],\"nextCursor\":\"Ng==\"}"
+    },
+    {
+      "input": {
+        "query": "app 1"
+      },
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "ı",
+            "displayName": "App 12",
+            "isRunning": true,
+            "pid": 112
+          },
+          {
+            "bundleId": "org.example_2",
+            "displayName": "App 15",
+            "isRunning": true,
+            "pid": 115
+          },
+          {
+            "bundleId": "😀",
+            "displayName": "App 13",
+            "isRunning": false
+          },
+          {
+            "bundleId": "file10",
+            "displayName": "App 1",
+            "isRunning": false
+          },
+          {
+            "bundleId": "i",
+            "displayName": "App 10",
+            "isRunning": false
+          },
+          {
+            "bundleId": "İ",
+            "displayName": "App 11",
+            "isRunning": false
+          },
+          {
+            "bundleId": "org.example-2",
+            "displayName": "App 14",
+            "isRunning": false
+          }
+        ]
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"ı\",\"displayName\":\"App 12\",\"isRunning\":true,\"pid\":112},{\"bundleId\":\"org.example_2\",\"displayName\":\"App 15\",\"isRunning\":true,\"pid\":115},{\"bundleId\":\"😀\",\"displayName\":\"App 13\",\"isRunning\":false},{\"bundleId\":\"file10\",\"displayName\":\"App 1\",\"isRunning\":false},{\"bundleId\":\"i\",\"displayName\":\"App 10\",\"isRunning\":false},{\"bundleId\":\"İ\",\"displayName\":\"App 11\",\"isRunning\":false},{\"bundleId\":\"org.example-2\",\"displayName\":\"App 14\",\"isRunning\":false}]}"
+    },
+    {
+      "input": {
+        "cursor": "MTA"
+      },
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "é",
+            "displayName": "App 8",
+            "isRunning": false
+          },
+          {
+            "bundleId": "file10",
+            "displayName": "App 1",
+            "isRunning": false
+          },
+          {
+            "bundleId": "foo-2",
+            "displayName": "App 2",
+            "isRunning": false
+          },
+          {
+            "bundleId": "i",
+            "displayName": "App 10",
+            "isRunning": false
+          },
+          {
+            "bundleId": "İ",
+            "displayName": "App 11",
+            "isRunning": false
+          },
+          {
+            "bundleId": "org.example-2",
+            "displayName": "App 14",
+            "isRunning": false
+          }
+        ]
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"é\",\"displayName\":\"App 8\",\"isRunning\":false},{\"bundleId\":\"file10\",\"displayName\":\"App 1\",\"isRunning\":false},{\"bundleId\":\"foo-2\",\"displayName\":\"App 2\",\"isRunning\":false},{\"bundleId\":\"i\",\"displayName\":\"App 10\",\"isRunning\":false},{\"bundleId\":\"İ\",\"displayName\":\"App 11\",\"isRunning\":false},{\"bundleId\":\"org.example-2\",\"displayName\":\"App 14\",\"isRunning\":false}]}"
+    },
+    {
+      "input": {
+        "cursor": "Mg=!"
+      },
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "file2",
+            "displayName": "App 0",
+            "isRunning": true,
+            "isRunningFromDevPath": true,
+            "pid": 100
+          },
+          {
+            "bundleId": "foo_2",
+            "displayName": "App 3",
+            "isRunning": true,
+            "pid": 103
+          },
+          {
+            "bundleId": "ı",
+            "displayName": "App 12",
+            "isRunning": true,
+            "pid": 112
+          },
+          {
+            "bundleId": "org.example_2",
+            "displayName": "App 15",
+            "isRunning": true,
+            "pid": 115
+          },
+          {
+            "bundleId": "😀",
+            "displayName": "App 13",
+            "isRunning": false
+          },
+          {
+            "bundleId": "A",
+            "displayName": "App 7",
+            "isRunning": false
+          },
+          {
+            "bundleId": "ä",
+            "displayName": "App 4",
+            "isRunning": false
+          },
+          {
+            "bundleId": "ae",
+            "displayName": "App 5",
+            "isRunning": false
+          },
+          {
+            "bundleId": "é",
+            "displayName": "App 8",
+            "isRunning": false
+          },
+          {
+            "bundleId": "file10",
+            "displayName": "App 1",
+            "isRunning": false
+          },
+          {
+            "bundleId": "foo-2",
+            "displayName": "App 2",
+            "isRunning": false
+          },
+          {
+            "bundleId": "i",
+            "displayName": "App 10",
+            "isRunning": false
+          },
+          {
+            "bundleId": "İ",
+            "displayName": "App 11",
+            "isRunning": false
+          },
+          {
+            "bundleId": "org.example-2",
+            "displayName": "App 14",
+            "isRunning": false
+          }
+        ]
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"file2\",\"displayName\":\"App 0\",\"isRunning\":true,\"isRunningFromDevPath\":true,\"pid\":100},{\"bundleId\":\"foo_2\",\"displayName\":\"App 3\",\"isRunning\":true,\"pid\":103},{\"bundleId\":\"ı\",\"displayName\":\"App 12\",\"isRunning\":true,\"pid\":112},{\"bundleId\":\"org.example_2\",\"displayName\":\"App 15\",\"isRunning\":true,\"pid\":115},{\"bundleId\":\"😀\",\"displayName\":\"App 13\",\"isRunning\":false},{\"bundleId\":\"A\",\"displayName\":\"App 7\",\"isRunning\":false},{\"bundleId\":\"ä\",\"displayName\":\"App 4\",\"isRunning\":false},{\"bundleId\":\"ae\",\"displayName\":\"App 5\",\"isRunning\":false},{\"bundleId\":\"é\",\"displayName\":\"App 8\",\"isRunning\":false},{\"bundleId\":\"file10\",\"displayName\":\"App 1\",\"isRunning\":false},{\"bundleId\":\"foo-2\",\"displayName\":\"App 2\",\"isRunning\":false},{\"bundleId\":\"i\",\"displayName\":\"App 10\",\"isRunning\":false},{\"bundleId\":\"İ\",\"displayName\":\"App 11\",\"isRunning\":false},{\"bundleId\":\"org.example-2\",\"displayName\":\"App 14\",\"isRunning\":false}]}"
+    },
+    {
+      "input": {
+        "limit": 2.9,
+        "running_first": false
+      },
+      "apps": [
+        {
+          "bundleId": "file2",
+          "displayName": "App 0",
+          "isRunning": true,
+          "pid": 100,
+          "isFromDevPath": true
+        },
+        {
+          "bundleId": "file10",
+          "displayName": "App 1",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo-2",
+          "displayName": "App 2",
+          "isRunning": false
+        },
+        {
+          "bundleId": "foo_2",
+          "displayName": "App 3",
+          "isRunning": true,
+          "pid": 103
+        },
+        {
+          "bundleId": "ä",
+          "displayName": "App 4",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ae",
+          "displayName": "App 5",
+          "isRunning": false
+        },
+        {
+          "bundleId": "a",
+          "displayName": "App 6",
+          "isRunning": true,
+          "pid": 106
+        },
+        {
+          "bundleId": "A",
+          "displayName": "App 7",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 8",
+          "isRunning": false
+        },
+        {
+          "bundleId": "é",
+          "displayName": "App 9",
+          "isRunning": true,
+          "pid": 109
+        },
+        {
+          "bundleId": "i",
+          "displayName": "App 10",
+          "isRunning": false
+        },
+        {
+          "bundleId": "İ",
+          "displayName": "App 11",
+          "isRunning": false
+        },
+        {
+          "bundleId": "ı",
+          "displayName": "App 12",
+          "isRunning": true,
+          "pid": 112
+        },
+        {
+          "bundleId": "😀",
+          "displayName": "App 13",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example-2",
+          "displayName": "App 14",
+          "isRunning": false
+        },
+        {
+          "bundleId": "org.example_2",
+          "displayName": "App 15",
+          "isRunning": true,
+          "pid": 115
+        }
+      ],
+      "defaultLocale": "en-US",
+      "expected": {
+        "apps": [
+          {
+            "bundleId": "😀",
+            "displayName": "App 13",
+            "isRunning": false
+          },
+          {
+            "bundleId": "a",
+            "displayName": "App 6",
+            "isRunning": true,
+            "pid": 106
+          }
+        ],
+        "nextCursor": "Mg=="
+      },
+      "expectedModelText": "{\"apps\":[{\"bundleId\":\"😀\",\"displayName\":\"App 13\",\"isRunning\":false},{\"bundleId\":\"a\",\"displayName\":\"App 6\",\"isRunning\":true,\"pid\":106}],\"nextCursor\":\"Mg==\"}"
+    }
+  ],
+  "windowLocations": [
+    {
+      "granted": [
+        {
+          "bundleId": "org.example.a",
+          "displayName": "Alpha"
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayName": "Beta"
+        }
+      ],
+      "displays": [],
+      "windows": [
+        {
+          "bundleId": "org.example.a",
+          "displayIds": [
+            3,
+            2,
+            99
+          ]
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayIds": []
+        }
+      ],
+      "expected": []
+    },
+    {
+      "granted": [
+        {
+          "bundleId": "org.example.a",
+          "displayName": "Alpha"
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayName": "Beta"
+        }
+      ],
+      "displays": [
+        {
+          "displayId": 2,
+          "label": "Display",
+          "isPrimary": true
+        }
+      ],
+      "windows": [
+        {
+          "bundleId": "org.example.a",
+          "displayIds": [
+            3,
+            2,
+            99
+          ]
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayIds": []
+        }
+      ],
+      "expected": []
+    },
+    {
+      "granted": [
+        {
+          "bundleId": "org.example.a",
+          "displayName": "Alpha"
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayName": "Beta"
+        }
+      ],
+      "displays": [
+        {
+          "displayId": 3,
+          "label": "Display",
+          "isPrimary": false
+        },
+        {
+          "displayId": 2,
+          "label": "Display",
+          "isPrimary": true
+        }
+      ],
+      "windows": [
+        {
+          "bundleId": "org.example.a",
+          "displayIds": [
+            3,
+            2,
+            99
+          ]
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayIds": []
+        }
+      ],
+      "expected": [
+        {
+          "bundleId": "org.example.a",
+          "displayName": "Alpha",
+          "displays": [
+            {
+              "id": 3,
+              "label": "Display (2)",
+              "isPrimary": false
+            },
+            {
+              "id": 2,
+              "label": "Display",
+              "isPrimary": true
+            },
+            {
+              "id": 99
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "granted": [
+        {
+          "bundleId": "org.example.a",
+          "displayName": "Alpha"
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayName": "Beta"
+        }
+      ],
+      "displays": [
+        {
+          "displayId": 3,
+          "label": "<bad>",
+          "isPrimary": false
+        },
+        {
+          "displayId": 2,
+          "label": "“Monitor”…",
+          "isPrimary": true
+        }
+      ],
+      "windows": [
+        {
+          "bundleId": "org.example.a",
+          "displayIds": [
+            3,
+            2,
+            99
+          ]
+        },
+        {
+          "bundleId": "org.example.b",
+          "displayIds": []
+        }
+      ],
+      "expected": [
+        {
+          "bundleId": "org.example.a",
+          "displayName": "Alpha",
+          "displays": [
+            {
+              "id": 3,
+              "label": "display 3",
+              "isPrimary": false
+            },
+            {
+              "id": 2,
+              "label": "\"Monitor\"...",
+              "isPrimary": true
+            },
+            {
+              "id": 99
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

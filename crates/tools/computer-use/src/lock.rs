@@ -375,3 +375,72 @@ mod generation_tests {
         assert_eq!(peer.advance_generation().unwrap(), before + 2);
     }
 }
+
+/// Background control shares the display gate while exclusively leasing one
+/// application window. Foreground DesktopLease uses the same inode exclusively.
+pub struct BackgroundLease {
+    gate: std::fs::File,
+    _window: DesktopLease,
+}
+
+#[derive(Debug)]
+pub enum BackgroundLeaseError {
+    Exclusive(std::io::Error),
+    Window(std::io::Error),
+}
+impl BackgroundLease {
+    pub fn acquire(home: &Path, app: &str, window: u32) -> Result<Self, BackgroundLeaseError> {
+        use fs2::FileExt;
+        use sha2::{Digest, Sha256};
+        std::fs::create_dir_all(home).map_err(BackgroundLeaseError::Exclusive)?;
+        let gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(home.join("computer-use.atomic.lock"))
+            .map_err(BackgroundLeaseError::Exclusive)?;
+        FileExt::try_lock_shared(&gate).map_err(BackgroundLeaseError::Exclusive)?;
+        let key = format!(
+            "{:x}",
+            Sha256::digest(format!("{app}\0{window}").as_bytes())
+        );
+        let lease = DesktopLease::acquire(&home.join("app-windows").join(key))
+            .map_err(BackgroundLeaseError::Window)?;
+        Ok(Self {
+            gate,
+            _window: lease,
+        })
+    }
+}
+impl Drop for BackgroundLease {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.gate);
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    #[test]
+    fn background_leases_share_desktop_but_exclude_same_window_and_foreground() {
+        let home = std::env::temp_dir().join(format!("background-lease-{}", std::process::id()));
+        let first = BackgroundLease::acquire(&home, "test.app", 1).unwrap();
+        let second = BackgroundLease::acquire(&home, "test.app", 2).unwrap();
+        assert!(matches!(
+            BackgroundLease::acquire(&home, "test.app", 1),
+            Err(BackgroundLeaseError::Window(_))
+        ));
+        assert!(DesktopLease::acquire(&home).is_err());
+        drop(first);
+        drop(second);
+        let foreground = DesktopLease::acquire(&home).unwrap();
+        assert!(matches!(
+            BackgroundLease::acquire(&home, "test.app", 1),
+            Err(BackgroundLeaseError::Exclusive(_))
+        ));
+        drop(foreground);
+        assert!(BackgroundLease::acquire(&home, "test.app", 1).is_ok());
+        let _ = std::fs::remove_dir_all(home);
+    }
+}

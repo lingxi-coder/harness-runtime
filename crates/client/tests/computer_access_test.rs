@@ -10,9 +10,28 @@
 
 use client::protocol::commands::ClientCommand;
 use client::protocol::computer_access::{
-    AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
-    TccStateDto,
+    AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, ComputerInteractionDto,
+    RequestedAppDto, TccStateDto,
 };
+
+#[test]
+fn interaction_metadata_and_choice_preserve_the_explicit_wire_contract() {
+    let wire = r#"{"request_id":9,"reason":"guided step","apps":[],"tier":"full","clipboard_read":false,"clipboard_write":false,"system_key_combos":false,"interaction":{"kind":"teach_step","explanation":"Open Notes","next_preview":"Select a note","anchor_json":"[20,30]"}}"#;
+    let request: ComputerAccessRequestDto = serde_json::from_str(wire).unwrap();
+    assert!(matches!(
+        request.interaction,
+        Some(ComputerInteractionDto::TeachStep { .. })
+    ));
+    assert_eq!(serde_json::to_string(&request).unwrap(), wire);
+    let response = r#"{"granted_apps":[],"clipboard_read":false,"clipboard_write":false,"system_key_combos":false,"interaction_action":"continue"}"#;
+    let parsed: ComputerAccessResponseDto = serde_json::from_str(response).unwrap();
+    assert_eq!(parsed.interaction_action.as_deref(), Some("continue"));
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), response);
+    assert!(serde_json::from_str::<ComputerAccessRequestDto>(
+        &wire.replace("teach_step", "grant_everything")
+    )
+    .is_err());
+}
 
 /// `AccessTierDto` is a bare wire STRING (not internally tagged like this
 /// crate's other enums) — byte-identical to
@@ -56,6 +75,7 @@ fn request_with_tcc_state_matches_exact_wire_shape() {
             accessibility: true,
             screen_recording: false,
         }),
+        interaction: None,
     };
     let json = serde_json::to_string(&req).expect("serialize ComputerAccessRequestDto");
     assert_eq!(
@@ -83,6 +103,7 @@ fn request_without_tcc_state_omits_the_key() {
         clipboard_write: false,
         system_key_combos: false,
         tcc_state: None,
+        interaction: None,
     };
     let json = serde_json::to_string(&req).expect("serialize ComputerAccessRequestDto");
     assert_eq!(
@@ -120,6 +141,8 @@ fn response_default_is_fully_denied_and_round_trips() {
         clipboard_read: false,
         clipboard_write: false,
         system_key_combos: false,
+        interaction_action: None,
+        preferred_mode: None,
     };
     let json = serde_json::to_string(&granted).expect("serialize ComputerAccessResponseDto");
     assert_eq!(
@@ -141,6 +164,8 @@ fn approve_computer_access_matches_exact_wire_shape() {
             clipboard_read: false,
             clipboard_write: false,
             system_key_combos: false,
+            interaction_action: None,
+            preferred_mode: None,
         },
     };
     let json = serde_json::to_string(&cmd).expect("serialize ApproveComputerAccess");

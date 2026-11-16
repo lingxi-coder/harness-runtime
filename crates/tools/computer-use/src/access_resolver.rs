@@ -15,6 +15,16 @@ use permission::computer_access::{
 /// Resolves one `request_access` call to the user's actual decision.
 #[async_trait]
 pub trait ComputerAccessResolver: Send + Sync {
+    /// Whether a live application grant decision can be requested.
+    fn supports_app_approval(&self) -> bool {
+        false
+    }
+    /// Whether the host can present explicit takeover/teaching confirmations.
+    /// Test auto-grant and headless resolvers must opt in separately.
+    fn supports_interactions(&self) -> bool {
+        false
+    }
+
     /// Present `request` to the user (however this resolver is wired) and
     /// return their decision. Never errors — any failure mode (no UI wired,
     /// closed channel, dropped exchange) resolves to the fully-denied
@@ -47,12 +57,17 @@ pub struct AutoGrantResolver;
 
 #[async_trait]
 impl ComputerAccessResolver for AutoGrantResolver {
+    fn supports_app_approval(&self) -> bool {
+        true
+    }
     async fn resolve(&self, request: ComputerAccessRequest) -> ComputerAccessResponse {
         ComputerAccessResponse {
             granted_apps: request.apps.into_iter().map(|a| a.label).collect(),
             clipboard_read: request.clipboard_read,
             clipboard_write: request.clipboard_write,
             system_key_combos: request.system_key_combos,
+            interaction_action: None,
+            preferred_mode: None,
         }
     }
 }
@@ -75,6 +90,13 @@ impl TuiBridgeResolver {
 
 #[async_trait]
 impl ComputerAccessResolver for TuiBridgeResolver {
+    fn supports_app_approval(&self) -> bool {
+        true
+    }
+    fn supports_interactions(&self) -> bool {
+        true
+    }
+
     async fn resolve(&self, request: ComputerAccessRequest) -> ComputerAccessResponse {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let exchange = ComputerAccessExchange { request, resp_tx };
@@ -102,6 +124,7 @@ mod tests {
             clipboard_write: false,
             system_key_combos: false,
             tcc_state: None,
+            interaction: None,
         }
     }
 
@@ -135,6 +158,8 @@ mod tests {
                 clipboard_read: true,
                 clipboard_write: false,
                 system_key_combos: false,
+                interaction_action: None,
+                preferred_mode: None,
             })
             .unwrap();
         let response = handle.await.unwrap();

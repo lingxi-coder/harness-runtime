@@ -602,8 +602,28 @@ impl ConversationOrchestrator {
     pub(crate) async fn mcp_instructions_prompt_ingress_attachment(
         &self,
     ) -> Option<crate::request_context::PromptIngressAttachment> {
-        let registry = self.mcp_registry.as_ref()?;
-        let (names, current) = registry.server_instruction_snapshot().await;
+        let (mut names, current) = match self.mcp_registry.as_ref() {
+            Some(registry) => registry.server_instruction_snapshot().await,
+            None => (Vec::new(), Vec::new()),
+        };
+        // The host's Computer Use server runs in-process, so it has no external
+        // MCP transport connection. Admit its builtin block from the registered
+        // trusted owner/provenance, never from a model-visible FQN prefix.
+        if self.filtered_available_tools().await.iter().any(|tool| {
+            tool.computer_control_owner().is_some()
+                && tool.mcp_server_provenance().is_some_and(|source| {
+                    source
+                        .name
+                        .utf16_units()
+                        .iter()
+                        .copied()
+                        .eq("computer-use".encode_utf16())
+                        && source.source == "builtin"
+                })
+        }) && !names.iter().any(|name| name == "computer-use")
+        {
+            names.push("computer-use".to_owned());
+        }
         let prior = {
             let session = self.session.lock().await;
             let attachments = self

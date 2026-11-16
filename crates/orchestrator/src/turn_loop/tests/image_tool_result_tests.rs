@@ -87,6 +87,13 @@ fn non_image_and_malformed_results_map_to_none() {
 }
 
 fn encoded_history(messages: Vec<lingxi_core::types::ConversationMessage>) -> serde_json::Value {
+    encoded_history_for_protocol(messages, false)
+}
+
+fn encoded_history_for_protocol(
+    messages: Vec<lingxi_core::types::ConversationMessage>,
+    openai: bool,
+) -> serde_json::Value {
     use llm_runtime::services::sdk::{self, WireCodec};
     let messages = llm_runtime::convert::to_llm_messages(
         llm_runtime::convert::normalize_messages_for_api(messages),
@@ -97,21 +104,130 @@ fn encoded_history(messages: Vec<lingxi_core::types::ConversationMessage>) -> se
         &messages,
         &[],
         &[],
-        sdk::protocol::ProtocolFamily::AnthropicMessages,
+        if openai {
+            sdk::protocol::ProtocolFamily::OpenAiResponses
+        } else {
+            sdk::protocol::ProtocolFamily::AnthropicMessages
+        },
     )
     .unwrap();
     let profile = serde_json::from_value(json!({
-        "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
-        "protocol":"anthropic_messages", "auth":"none", "models":[]
+        "provider_id": if openai { "openai" } else { "anthropic" }, "profile_name":"test", "base_url":"https://api.example.test",
+        "protocol": if openai { "open_ai_responses" } else { "anthropic_messages" }, "auth":"none", "models":[]
     }))
     .unwrap();
-    let encoded = sdk::AnthropicMessagesCodec
-        .encode_request(
-            sdk::EncodeRequest::new(&input),
-            &sdk::CodecContext::new(&profile, &input.model, sdk::RequestMode::Complete),
+    let context = sdk::CodecContext::new(&profile, &input.model, sdk::RequestMode::Complete);
+    let encoded = if openai {
+        sdk::OpenAiResponsesCodec.encode_request(sdk::EncodeRequest::new(&input), &context)
+    } else {
+        sdk::AnthropicMessagesCodec.encode_request(sdk::EncodeRequest::new(&input), &context)
+    }
+    .unwrap();
+    serde_json::from_slice(&encoded.body).unwrap()
+}
+
+#[test]
+fn native_mcp_png_and_jpeg_reach_anthropic_and_openai_as_exact_image_bytes() {
+    use super::tool_dispatch::main_tool_result_content_blocks;
+    use base64::Engine as _;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+
+    fn find_image(value: &serde_json::Value, kind: &str) -> Option<serde_json::Value> {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if fields.get("type").and_then(|value| value.as_str()) == Some(kind) {
+                    Some(value.clone())
+                } else {
+                    fields.values().find_map(|value| find_image(value, kind))
+                }
+            }
+            serde_json::Value::Array(values) => {
+                values.iter().find_map(|value| find_image(value, kind))
+            }
+            _ => None,
+        }
+    }
+
+    for (bytes, mime) in [
+        (
+            include_bytes!("../../../../tool-api/tests/fixtures/mcp-media.png").as_slice(),
+            "image/png",
+        ),
+        (
+            include_bytes!("../../../../tool-api/tests/fixtures/mcp-media.jpg").as_slice(),
+            "image/jpeg",
+        ),
+    ] {
+        let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let native = source(&json!([
+            {"type":"text", "text":"Screenshot 🙂"},
+            {"type":"image", "data":base64, "mimeType":mime}
+        ]));
+        let original = native.to_json_string().unwrap();
+        let blocks = main_tool_result_content_blocks(
+            "mcp__computer-use__screenshot",
+            &native,
+            &"Screenshot".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("native MCP media maps");
+        let child = tool_api::tool_result_media::media_content_blocks_for_tool(
+            "mcp__computer-use__screenshot",
+            &native,
+            &"Screenshot".into(),
         )
         .unwrap();
-    serde_json::from_slice(&encoded.body).unwrap()
+        assert_eq!(blocks, Utf16JsonProjection::array(child).unwrap());
+        for openai in [false, true] {
+            let id = ToolUseId::new();
+            let assistant = ConversationMessage::Assistant {
+                id: MessageId::new(),
+                stop_reason: Some("tool_use".into()),
+                content: vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: "mcp__computer-use__screenshot".into(),
+                    input: source(&json!({})),
+                    provider_id: None,
+                }],
+                per_turn_effort: None,
+                resumable: None,
+            };
+            let mut user = ConversationMessage::user(MessageId::new(), String::new());
+            if let ConversationMessage::User { content, .. } = &mut user {
+                *content = vec![ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content: "Screenshot".into(),
+                    is_error: None,
+                    provider_tool_use_id: None,
+                    content_blocks: Some(blocks.clone()),
+                }];
+            }
+            let wire = encoded_history_for_protocol(vec![assistant, user], openai);
+            let image = find_image(&wire, if openai { "input_image" } else { "image" })
+                .unwrap_or_else(|| panic!("provider did not receive image: {wire}"));
+            let encoded = if openai {
+                let url = image["image_url"].as_str().expect("image URL");
+                url.strip_prefix(&format!("data:{mime};base64,"))
+                    .expect("correct image media type")
+            } else {
+                assert_eq!(image["source"]["type"], "base64");
+                assert_eq!(image["source"]["media_type"], mime);
+                image["source"]["data"]
+                    .as_str()
+                    .expect("inline image bytes")
+            };
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+                bytes
+            );
+        }
+        assert_eq!(native.to_json_string().unwrap(), original);
+        assert_eq!(native.string_at("/1/mimeType"), Some(mime));
+    }
 }
 
 fn count_wire_media(value: &serde_json::Value, kind: &str) -> usize {

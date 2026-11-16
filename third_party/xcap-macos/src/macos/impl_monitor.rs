@@ -205,7 +205,11 @@ impl ImplMonitor {
     pub fn capture_image(&self) -> XCapResult<RgbaImage> {
         let cg_rect = CGDisplayBounds(self.cg_direct_display_id);
 
-        capture(cg_rect, CGWindowListOption::OptionAll, 0)
+        capture(
+            cg_rect,
+            CGWindowListOption::OptionAll,
+            self.cg_direct_display_id,
+        )
     }
 
     pub fn capture_region(&self, x: u32, y: u32, width: u32, height: u32) -> XCapResult<RgbaImage> {
@@ -238,7 +242,11 @@ impl ImplMonitor {
             },
         };
 
-        capture(cg_rect, CGWindowListOption::OptionAll, 0)
+        capture(
+            cg_rect,
+            CGWindowListOption::OptionAll,
+            self.cg_direct_display_id,
+        )
     }
 
     pub fn video_recorder(&self) -> XCapResult<(ImplVideoRecorder, Receiver<Frame>)> {

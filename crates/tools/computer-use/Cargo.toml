@@ -14,6 +14,7 @@ license.workspace = true
 core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
 permission = { path = "../../permission" }
+mcp = { path = "../../mcp" }
 lingxi-llm-client.workspace = true
 # `request_access`'s interactive resolver (mirrors `tool-ui`'s
 # `AskUserQuestionResolver`, which depends on `tui-core` the same way).
@@ -28,7 +29,15 @@ base64 = "0.22"
 once_cell = "1"
 fs2 = "0.4"
 sha2 = "0.10"
+image = { version = "=0.24.9", default-features = false, features = ["png", "jpeg"] }
+unicode-segmentation = "=1.12.0"
+unicode-normalization = "0.1"
+regex = "1"
+icu_collator = { path = "../../../third_party/icu_collator", version = "=2.3.1", default-features = false, features = ["compiled_data"] }
+icu_locale = "=2.3.1"
+sys-locale = "=0.3.2"
 tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util.workspace = true
 
 # `kill(pid, 0)` liveness probe for the cross-session lock's staleness check
 # (mirrors `apps/cli`'s `daemon_lock` module) — a safe wrapper, so this stays
@@ -37,15 +46,9 @@ tokio = { workspace = true, features = ["sync", "time"] }
 nix = { version = "0.27", default-features = false, features = ["signal", "user"] }
 
 [dev-dependencies]
-tokio-util.workspace = true
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 telemetry = { path = "../../telemetry" }
-# Test-only: generates real (tiny, decodable) PNG bytes for the mock
-# screenshot backend — `tool_api::util::image_budget::process_image` needs
-# an actually-decodable image, not an empty placeholder. Same version
-# `tool-api` itself already pins (already resolved in the lockfile).
-image = { version = "=0.24.9", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 platform-macos-computer-control = { path = "../../platforms/macos-computer-control" }

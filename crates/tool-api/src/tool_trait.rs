@@ -232,6 +232,14 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Host-owned execution state behind one member of a split Computer Use
+    /// family. Resolve this only after the member itself passed catalog and
+    /// session policy checks; the owner is not an independent permission grant.
+    /// The canonical internal tool keeps the default to avoid ownership cycles.
+    fn computer_control_owner(&self) -> Option<std::sync::Arc<dyn Tool>> {
+        None
+    }
+
     /// Convert protocol data into this tool's ordinary input without executing it.
     fn lower_computer_operation(
         &self,

@@ -7,9 +7,14 @@
 //! `objc2-app-kit` (`NSWorkspace`/`NSRunningApplication` for app
 //! enumeration, frontmost detection, and hide/unhide).
 
+mod app_scoped;
 mod apps;
 mod capture_policy;
+mod escape;
+mod jpeg;
 mod keymap;
+mod raw_input;
+mod spaces;
 mod tcc;
 
 use async_trait::async_trait;
@@ -98,6 +103,7 @@ type InputJob = Box<dyn FnOnce(&mut Option<Enigo>) + Send>;
 
 /// Real macOS computer input and capture backend.
 pub struct MacosComputerControl {
+    escape: std::sync::Arc<escape::EscapeHook>,
     selected_display: std::sync::Mutex<Option<u32>>,
     input_worker: std::sync::mpsc::Sender<InputJob>,
     owned_mouse: std::sync::Arc<std::sync::atomic::AtomicU8>,
@@ -133,6 +139,7 @@ impl MacosComputerControl {
             })
             .expect("computer input worker thread");
         Self {
+            escape: std::sync::Arc::new(escape::EscapeHook::default()),
             selected_display: std::sync::Mutex::new(None),
             input_worker: sender,
             owned_mouse,
@@ -250,6 +257,63 @@ fn app_info_from(app: &NSRunningApplication) -> Option<AppInfo> {
 
 #[async_trait]
 impl ComputerControl for MacosComputerControl {
+    async fn encode_computer_jpeg(
+        &self,
+        png_bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>, ComputerError> {
+        jpeg::encode(png_bytes).await.map(Some)
+    }
+    fn register_escape_abort(&self, callback: std::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+        self.escape.register(callback)
+    }
+    fn unregister_escape_abort(&self) {
+        self.escape.unregister();
+    }
+    fn notify_expected_escape(&self) {
+        self.escape.notify_expected();
+    }
+    fn supports_app_scoped(&self) -> bool {
+        true
+    }
+    fn supports_app_scoped_space_move(&self) -> bool {
+        spaces::available()
+    }
+    fn supports_app_scoped_raw_input(&self) -> bool {
+        raw_input::available()
+    }
+    async fn app_scoped(
+        &self,
+        action: &str,
+        app: &str,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ComputerError> {
+        let escape = self.escape.clone();
+        app_scoped::execute_with_cancel_and_escape(
+            action,
+            app,
+            input,
+            std::sync::Arc::new(|| false),
+            std::sync::Arc::new(move || escape.notify_expected()),
+        )
+        .await
+    }
+    async fn app_scoped_with_cancel(
+        &self,
+        action: &str,
+        app: &str,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        is_cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ComputerError> {
+        let escape = self.escape.clone();
+        app_scoped::execute_with_cancel_and_escape(
+            action,
+            app,
+            input,
+            is_cancelled,
+            std::sync::Arc::new(move || escape.notify_expected()),
+        )
+        .await
+    }
     async fn screen_locked(&self) -> Result<bool, ComputerError> {
         tcc::screen_locked()
     }
@@ -261,6 +325,16 @@ impl ComputerControl for MacosComputerControl {
     }
     async fn target_application(&self, x: u32, y: u32) -> Result<Option<AppInfo>, ComputerError> {
         self.app_at(x, y)
+    }
+    fn supports_native_filtered_capture(&self) -> bool {
+        xcap::native_filtered_capture_available()
+    }
+    async fn capture_filtered_display(
+        &self,
+        request: &lingxi_core::host::computer_control::FilteredCaptureRequest,
+        allowed: &[String],
+    ) -> Result<Option<lingxi_core::host::computer_control::FilteredCapture>, ComputerError> {
+        self.capture_native_filtered(request, allowed).await
     }
     async fn screenshot_for_apps(&self, allowed: &[String]) -> Result<Screenshot, ComputerError> {
         let image = self.capture_allowed(allowed)?;
@@ -558,6 +632,16 @@ impl ComputerControl for MacosComputerControl {
             ));
         }
         Ok((x.round() as u32, y.round() as u32))
+    }
+
+    async fn global_cursor_position(&self) -> Result<Option<(f64, f64)>, ComputerError> {
+        let event = core_graphics::event::CGEvent::new(event_source()?)
+            .map_err(|()| ComputerError::Other("cursor snapshot unavailable".into()))?;
+        let point = event.location();
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return Err(ComputerError::Other("cursor location is not finite".into()));
+        }
+        Ok(Some((point.x, point.y)))
     }
 
     async fn hold_key(&self, key: String, duration_ms: u64) -> Result<(), ComputerError> {

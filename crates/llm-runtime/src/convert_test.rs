@@ -590,6 +590,49 @@ mod tests {
     }
 
     #[test]
+    fn native_computer_descriptors_survive_actual_tool_lowering() {
+        use lingxi_core::{host::SourceToolWireDefinition, types::utf16_json::Utf16JsonProjection};
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/computer-use/fixtures/protocol-2.1.325.json"
+        ))
+        .unwrap();
+        let descriptors = corpus["descriptorCorpus"].as_object().unwrap();
+        assert_eq!(descriptors.len(), 93);
+        for (digest, raw) in descriptors {
+            let native = Utf16JsonProjection::parse(raw.as_str().unwrap()).unwrap();
+            let source = SourceToolWireDefinition {
+                name: format!("mcp__computer-use__{}", native.string_at("/name").unwrap()),
+                description: native.subprojection("/description").unwrap(),
+                input_schema: native.subprojection("/inputSchema").unwrap(),
+                strict: false,
+                defer_loading: true,
+            };
+            let lowered = to_tool_declarations(vec![source.clone()])
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(lowered.name, source.name, "{digest}");
+            assert_eq!(
+                lowered.description.as_json_source(),
+                source.description.to_json_string().unwrap(),
+                "{digest}"
+            );
+            assert_eq!(
+                lowered.input_schema.as_json_source(),
+                source.input_schema.to_json_string().unwrap(),
+                "{digest}"
+            );
+            assert_eq!(
+                lowered.input_schema_projection.as_ref(),
+                Some(&source.input_schema),
+                "{digest}"
+            );
+            assert!(!lowered.strict);
+            assert!(lowered.defer_loading);
+        }
+    }
+
+    #[test]
     fn source_tool_declaration_rejects_non_string_description() {
         let mut tool = source_tool(r#""Read a file""#, r#"{"type":"object"}"#);
         tool.description =

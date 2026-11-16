@@ -1,4 +1,4 @@
-//! App policy data observed in the hash-pinned Claude Code 2.1.310 oracle.
+//! App policy verified against the hash-pinned Claude Code 2.1.325 oracle.
 use super::permission_model::AppTier;
 
 const BROWSER_IDS: &[&str] = &[
@@ -460,7 +460,8 @@ pub fn blocked(id: Option<&str>, name: &str) -> bool {
     let name = name.to_lowercase();
     let compact: String = name
         .chars()
-        .filter(|c| !c.is_whitespace() && *c != '\u{feff}')
+        // ECMAScript \s excludes NEXT LINE, unlike Rust's Unicode White_Space.
+        .filter(|c| !(c.is_whitespace() && *c != '\u{85}' || *c == '\u{feff}'))
         .collect();
     BLOCKED_NAMES.iter().any(|word| {
         name.contains(word)
@@ -476,7 +477,8 @@ mod tests {
     #[test]
     fn reference_classification_cases() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../fixtures/claude-code-2.1.310.json")).unwrap();
+            serde_json::from_str(include_str!("../fixtures/claude-code-2.1.325.json")).unwrap();
+        assert_eq!(fixture["version"], "2.1.325");
         for case in fixture["classification"].as_array().unwrap() {
             let id = case["input"]["bundleId"].as_str();
             let name = case["input"]["displayName"].as_str().unwrap();

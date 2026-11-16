@@ -191,4 +191,8 @@
 /// Version 33 requires `by_account` on `CostDto` and `CostUpdate`. The array is
 /// always present; a missing field is not filled from an older total, and the
 /// generated native record no longer defaults it.
-pub const CLIENT_PROTOCOL_VERSION: &str = "33.0.0";
+/// Version 34 adds takeover/teaching interaction metadata and response choices
+/// to computer-access records. The JSON fields are optional, but the generated
+/// UniFFI request/response record layouts change. Native libraries and generated
+/// Kotlin/Swift bindings must be regenerated and shipped together.
+pub const CLIENT_PROTOCOL_VERSION: &str = "34.0.0";

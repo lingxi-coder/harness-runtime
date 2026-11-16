@@ -1,16 +1,17 @@
 //! Generic preauthorization for the Desktop host's dedicated computer-access adapters.
 //!
 //! The reference adds its builtin Computer Use MCP tools to `allowedTools`.
-//! LingXi exposes combined builtin tools instead, but their dedicated resolver,
-//! device policy and OS checks must remain the authorization boundary.
+//! LingXi's host-owned MCP facade uses the same dedicated resolver, device
+//! policy and OS checks as its internal combined owner.
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct DesktopComputerPermissionIntegration {
     pub transport: bool,
     pub access_resolver: bool,
     pub native_control: bool,
     pub computer_policy: bool,
     pub browser_descriptor: bool,
+    pub protocol_tool_names: Vec<String>,
 }
 
 pub(crate) fn append_desktop_computer_permission_rules(
@@ -33,6 +34,19 @@ pub(crate) fn append_desktop_computer_permission_rules(
             rules.push(permission::PermissionRule {
                 value: permission::PermissionRuleValue {
                     tool_name: tool_name.into(),
+                    rule_content: None,
+                    original_rule: None,
+                },
+                behavior: permission::PermissionBehavior::Allow,
+                source: permission::PermissionRuleSource::CliArg,
+            });
+        }
+    }
+    if integration.native_control && integration.computer_policy {
+        for name in integration.protocol_tool_names {
+            rules.push(permission::PermissionRule {
+                value: permission::PermissionRuleValue {
+                    tool_name: name,
                     rule_content: None,
                     original_rule: None,
                 },
@@ -67,6 +81,10 @@ mod tests {
             native_control: true,
             computer_policy: true,
             browser_descriptor: true,
+            protocol_tool_names: vec![
+                "mcp__computer-use__request_access".into(),
+                "mcp__computer-use__type".into(),
+            ],
         }
     }
 
@@ -90,7 +108,12 @@ mod tests {
         let mut rules = Vec::new();
         append_desktop_computer_permission_rules(&mut rules, desktop(), false);
         if let Some(behavior) = extra {
-            for name in ["computer", "browser"] {
+            for name in [
+                "computer",
+                "browser",
+                "mcp__computer-use__request_access",
+                "mcp__computer-use__type",
+            ] {
                 rules.push(PermissionRule {
                     value: PermissionRuleValue {
                         tool_name: name.into(),
@@ -170,7 +193,12 @@ mod tests {
         .unwrap();
         for mode in [PermissionMode::Default, PermissionMode::Auto] {
             let (gate, inner) = gate(mode, None);
-            for name in ["computer", "browser"] {
+            for name in [
+                "computer",
+                "browser",
+                "mcp__computer-use__request_access",
+                "mcp__computer-use__type",
+            ] {
                 let evaluation = gate
                     .check_mod_query(name, &input, &PermissionCheckContext::default())
                     .await
@@ -191,7 +219,12 @@ mod tests {
                 (PermissionBehavior::Deny, ModToolCheckDecision::Deny),
             ] {
                 let (gate, inner) = gate(mode, Some(behavior));
-                for name in ["computer", "browser"] {
+                for name in [
+                    "computer",
+                    "browser",
+                    "mcp__computer-use__request_access",
+                    "mcp__computer-use__type",
+                ] {
                     let evaluation = gate
                         .check_mod_query(name, &input, &PermissionCheckContext::default())
                         .await
@@ -208,6 +241,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_combined_owner_restrictions_still_constrain_protocol_members() {
+        const NAME: &str = "mcp__computer-use__request_access";
+        let input = Utf16JsonProjection::parse(r#"{"apps":["test.app"],"reason":"test"}"#).unwrap();
+        for (behavior, expected) in [
+            (PermissionBehavior::Ask, ModToolCheckDecision::Ask),
+            (PermissionBehavior::Deny, ModToolCheckDecision::Deny),
+        ] {
+            let mut rules = Vec::new();
+            append_desktop_computer_permission_rules(&mut rules, desktop(), false);
+            rules.push(PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "computer".into(),
+                    rule_content: None,
+                    original_rule: None,
+                },
+                behavior,
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+            });
+            let policy =
+                PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, false);
+            let gate =
+                PolicyPermissionGate::new(Arc::new(policy), Arc::new(PromptCounter::default()));
+            let context = PermissionCheckContext {
+                mcp_deny_aliases: std::collections::BTreeMap::from([(
+                    NAME.into(),
+                    vec!["computer".into()],
+                )]),
+                ..Default::default()
+            };
+            let evaluation = gate.check_mod_query(NAME, &input, &context).await.unwrap();
+            assert_eq!(evaluation.verdict.decision, expected);
+        }
+    }
+
+    #[tokio::test]
     async fn host_ceiling_is_preserved_for_the_dispatcher() {
         let input = Utf16JsonProjection::parse(r#"{"action":"screenshot"}"#).unwrap();
         let (gate, _) = gate(PermissionMode::Default, None);
@@ -215,7 +283,12 @@ mod tests {
             lingxi_core::host::McpPermissionCeiling::Ask,
             lingxi_core::host::McpPermissionCeiling::Deny,
         ] {
-            for name in ["computer", "browser"] {
+            for name in [
+                "computer",
+                "browser",
+                "mcp__computer-use__request_access",
+                "mcp__computer-use__type",
+            ] {
                 let context = PermissionCheckContext {
                     tool_check_ceiling: Some(ceiling),
                     ..Default::default()

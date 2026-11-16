@@ -1,0 +1,604 @@
+{
+  "version": "2.1.325",
+  "nativeSha256": "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2",
+  "sourceByteRanges": [
+    {
+      "name": "p",
+      "start": 302154067,
+      "end": 302154167,
+      "sha256": "4136c18c67daaa1aa4c308a09c7d3c01e6fecaffcea395698c590a0e32bced04"
+    },
+    {
+      "name": "G",
+      "start": 302155308,
+      "end": 302155408,
+      "sha256": "88edea3e13af43e48dfd8db53054a606980bcfef9a77abddfe43c87d5b319d9d"
+    },
+    {
+      "name": "Fo",
+      "start": 302218071,
+      "end": 302222642,
+      "sha256": "49f87b479dfae797b0781b40ba71c4db1c0dd94b2631378f64f3ff3c169252e3"
+    },
+    {
+      "name": "ensureOsPermissions",
+      "start": 302276857,
+      "end": 302277010,
+      "sha256": "9f025521fed5d876e796bb23b5dc7a5a806077a2198b85b0e39617ee56f3b65a"
+    }
+  ],
+  "scope": "Exact OS-grant adapter and TCC-only request_access branches with deterministic native boolean seams. Does not execute native TCC, display/background actions, permissions UI, or full request_access app-selection logic.",
+  "brandingSubstitution": {
+    "from": "Claude desktop app",
+    "to": "LingXi desktop app"
+  },
+  "permissionStates": [
+    {
+      "state": [
+        false,
+        false
+      ],
+      "expected": {
+        "granted": false,
+        "accessibility": false,
+        "screenRecording": false
+      },
+      "trace": [
+        "checkAccessibility",
+        "checkScreenRecording"
+      ]
+    },
+    {
+      "state": [
+        false,
+        true
+      ],
+      "expected": {
+        "granted": false,
+        "accessibility": false,
+        "screenRecording": true
+      },
+      "trace": [
+        "checkAccessibility",
+        "checkScreenRecording"
+      ]
+    },
+    {
+      "state": [
+        true,
+        false
+      ],
+      "expected": {
+        "granted": false,
+        "accessibility": true,
+        "screenRecording": false
+      },
+      "trace": [
+        "checkAccessibility",
+        "checkScreenRecording"
+      ]
+    },
+    {
+      "state": [
+        true,
+        true
+      ],
+      "expected": {
+        "granted": true
+      },
+      "trace": [
+        "checkAccessibility",
+        "checkScreenRecording"
+      ]
+    }
+  ],
+  "setupTransitions": [
+    {
+      "input": {
+        "before": [
+          false,
+          false
+        ],
+        "after": [
+          false,
+          false
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Accessibility and Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Accessibility and Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": false
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          false,
+          false
+        ],
+        "after": [
+          false,
+          true
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Accessibility permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Accessibility permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": false
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          false,
+          false
+        ],
+        "after": [
+          true,
+          false
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": false
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          false,
+          false
+        ],
+        "after": [
+          true,
+          true
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "macOS Accessibility and Screen Recording are now both granted. Call request_access again immediately — the next call will show the app selection list."
+          }
+        ],
+        "isError": true
+      },
+      "expectedModelTextJson": "\"macOS Accessibility and Screen Recording are now both granted. Call request_access again immediately — the next call will show the app selection list.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": false
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          false,
+          true
+        ],
+        "after": [
+          false,
+          false
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Accessibility and Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Accessibility and Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": true
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          false,
+          true
+        ],
+        "after": [
+          false,
+          true
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Accessibility permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Accessibility permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": true
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          false,
+          true
+        ],
+        "after": [
+          true,
+          false
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": true
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          false,
+          true
+        ],
+        "after": [
+          true,
+          true
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "macOS Accessibility and Screen Recording are now both granted. Call request_access again immediately — the next call will show the app selection list."
+          }
+        ],
+        "isError": true
+      },
+      "expectedModelTextJson": "\"macOS Accessibility and Screen Recording are now both granted. Call request_access again immediately — the next call will show the app selection list.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": false,
+            "screenRecording": true
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          true,
+          false
+        ],
+        "after": [
+          false,
+          false
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Accessibility and Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Accessibility and Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": true,
+            "screenRecording": false
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          true,
+          false
+        ],
+        "after": [
+          false,
+          true
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Accessibility permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Accessibility permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": true,
+            "screenRecording": false
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          true,
+          false
+        ],
+        "after": [
+          true,
+          false
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The user saw the permission prompt but macOS Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the Claude desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "tcc_not_granted"
+        }
+      },
+      "expectedModelTextJson": "\"The user saw the permission prompt but macOS Screen Recording permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": true,
+            "screenRecording": false
+          }
+        }
+      ]
+    },
+    {
+      "input": {
+        "before": [
+          true,
+          false
+        ],
+        "after": [
+          true,
+          true
+        ]
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "macOS Accessibility and Screen Recording are now both granted. Call request_access again immediately — the next call will show the app selection list."
+          }
+        ],
+        "isError": true
+      },
+      "expectedModelTextJson": "\"macOS Accessibility and Screen Recording are now both granted. Call request_access again immediately — the next call will show the app selection list.\"",
+      "trace": [
+        "permissionPanel",
+        "checkAccessibility",
+        "checkScreenRecording"
+      ],
+      "requests": [
+        {
+          "requestId": "controlled-request",
+          "reason": "set up computer access",
+          "apps": [],
+          "requestedFlags": {},
+          "screenshotFiltering": "native",
+          "tccState": {
+            "accessibility": true,
+            "screenRecording": false
+          }
+        }
+      ]
+    }
+  ]
+}

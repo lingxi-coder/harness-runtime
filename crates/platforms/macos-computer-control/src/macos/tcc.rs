@@ -2,14 +2,14 @@
 //!
 //! Parity target: `cu.tcc.checkAccessibility()` / `checkScreenRecording()`
 //! (Swift, via a private-ish but Apple-documented pair of public C functions).
-//! Both are simple no-argument boolean queries, so a raw `extern "C"` binding
+//! Both are boolean TCC queries, so a raw `extern "C"` binding
 //! is simpler and lighter than pulling in a whole accessibility crate for two
 //! functions.
 //!
 //! `request_access` uses the request variants so macOS can register the app
-//! in System Settings. Effects use only read-only queries. A nominal trust
-//! result is not sufficient evidence of working AX messaging, so Accessibility
-//! additionally needs a bounded real message before reporting access as available.
+//! in System Settings. Effects use only read-only queries. The trust
+//! result describes authorization; target availability is checked separately
+//! by the operation, as in the upstream adapter.
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn CGSessionCopyCurrentDictionary() -> core_foundation::dictionary::CFDictionaryRef;
@@ -27,17 +27,7 @@ extern "C" {
     /// else in the unused high bits of the underlying register/byte.
     fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef) -> u8;
     fn AXIsProcessTrusted() -> u8;
-    fn AXUIElementCreateSystemWide() -> core_foundation::base::CFTypeRef;
-    fn AXUIElementSetMessagingTimeout(
-        element: core_foundation::base::CFTypeRef,
-        seconds: f32,
-    ) -> i32;
-    fn AXUIElementCopyElementAtPosition(
-        element: core_foundation::base::CFTypeRef,
-        x: f32,
-        y: f32,
-        value: *mut core_foundation::base::CFTypeRef,
-    ) -> i32;
+
 }
 
 /// Refuse operations when Quartz cannot establish a console session or reports a lock.
@@ -75,90 +65,28 @@ extern "C" {
     /// legacy `Boolean` — Rust `bool` is the correct ABI type here.
     fn CGRequestScreenCaptureAccess() -> bool;
     fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGEventCreate(source: core_foundation::base::CFTypeRef) -> core_foundation::base::CFTypeRef;
-    fn CGEventGetLocation(
-        event: core_foundation::base::CFTypeRef,
-    ) -> core_graphics::geometry::CGPoint;
+
 }
 
-/// Read-only live TCC queries. Never registers/prompts for access during effects.
+/// Read-only TCC state, matching Claude Code's native `tcc` checks.
+///
+/// AX hit testing is target-dependent, so it belongs to target validation, not
+/// global permission detection. In particular, NotImplemented/ CannotComplete
+/// from an application must not override an already granted TCC permission.
 #[must_use]
 pub fn query_os_permissions(
 ) -> Result<(bool, bool), lingxi_core::host::computer_control::ComputerError> {
-    Ok((query_accessibility()?, unsafe {
+    Ok((accessibility_granted(), unsafe {
         CGPreflightScreenCaptureAccess()
     }))
 }
 
-fn query_unavailable(
-    stage: &str,
-    status: Option<i32>,
-    has_value: Option<bool>,
-) -> lingxi_core::host::computer_control::ComputerError {
-    // Status and presence are safe diagnostic facts: never include the AX value
-    // itself, window titles, application content or any user-controlled string.
-    lingxi_core::host::computer_control::ComputerError::PermissionDenied(format!(
-        "Could not verify macOS Accessibility access. Retry when the accessibility service is available. (AX probe stage={stage}, status={status:?}, hasValue={has_value:?})"
-    ))
-}
-
-fn accessibility_query_result(
-    trusted: bool,
-    status: i32,
-    has_value: bool,
-) -> Result<bool, lingxi_core::host::computer_control::ComputerError> {
-    if !trusted || status == -25211 {
-        return Ok(false);
-    }
-    match (status, has_value) {
-        (0, true) => Ok(true),
-        _ => Err(query_unavailable("hit_test", Some(status), Some(has_value))),
-    }
-}
-
-fn query_accessibility() -> Result<bool, lingxi_core::host::computer_control::ComputerError> {
-    use core_foundation::base::{CFType, TCFType};
-
-    let trusted = unsafe { AXIsProcessTrusted() } != 0;
-    if !trusted {
-        return Ok(false);
-    }
-    let raw = unsafe { AXUIElementCreateSystemWide() };
-    if raw.is_null() {
-        return Err(query_unavailable("create_systemwide", None, Some(false)));
-    }
-    let system = unsafe { CFType::wrap_under_create_rule(raw) };
-    let timeout_status =
-        unsafe { AXUIElementSetMessagingTimeout(system.as_concrete_TypeRef(), 0.25) };
-    if timeout_status != 0 {
-        return Err(query_unavailable("set_timeout", Some(timeout_status), None));
-    }
-    // A system-wide focused-application query can return CannotComplete even
-    // with working AX access. Hit testing is the same real AX request used to
-    // establish input targets, and requires no focus or application content.
-    // Creating a snapshot event reads the current cursor; it never posts input.
-    let raw_event = unsafe { CGEventCreate(std::ptr::null()) };
-    if raw_event.is_null() {
-        return Err(query_unavailable("create_cursor_event", None, Some(false)));
-    }
-    let event = unsafe { CFType::wrap_under_create_rule(raw_event) };
-    let point = unsafe { CGEventGetLocation(event.as_concrete_TypeRef()) };
-    let (x, y) = (point.x as f32, point.y as f32);
-    if !x.is_finite() || !y.is_finite() {
-        return Err(query_unavailable("cursor_location", None, None));
-    }
-    let mut value = std::ptr::null();
-    let status =
-        unsafe { AXUIElementCopyElementAtPosition(system.as_concrete_TypeRef(), x, y, &mut value) };
-    let has_value = !value.is_null();
-    if has_value {
-        // Copy ownership must be released even on an unexpected error/value pair.
-        let _value = unsafe { CFType::wrap_under_create_rule(value) };
-    }
-    // In particular, kAXErrorAPIDisabled (-25211) overrides a nominal trust=true result.
-    // Busy/unknown failures block only this operation; they must not latch a
-    // fabricated permission revocation or tell the user to reauthorize.
-    accessibility_query_result(trusted, status, has_value)
+/// Read only the current Accessibility grant. Target AX failures use this
+/// query to distinguish unavailable target messaging from an actual OS denial.
+/// This never requests, registers or prompts for permission.
+#[must_use]
+pub(super) fn accessibility_granted() -> bool {
+    (unsafe { AXIsProcessTrusted() }) != 0
 }
 
 /// `(accessibility_granted, screen_recording_granted)`.
@@ -188,47 +116,4 @@ pub fn check_os_permissions() -> Option<(bool, bool)> {
     let _ = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) };
     let _ = unsafe { CGRequestScreenCaptureAccess() };
     query_os_permissions().ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{accessibility_query_result, query_unavailable};
-
-    #[test]
-    fn cached_trust_cannot_override_disabled_or_unavailable_ax_messaging() {
-        assert!(accessibility_query_result(true, 0, true).unwrap());
-        assert!(!accessibility_query_result(false, 0, true).unwrap());
-        assert!(!accessibility_query_result(true, -25211, false).unwrap());
-        assert!(!accessibility_query_result(true, -25211, true).unwrap());
-        assert!(accessibility_query_result(true, -25212, false).is_err());
-        assert!(accessibility_query_result(true, 0, false).is_err());
-        for status in [-25204, -1, 1] {
-            assert!(
-                accessibility_query_result(true, status, true).is_err(),
-                "AX status {status}"
-            );
-            assert!(
-                accessibility_query_result(true, status, false).is_err(),
-                "AX status {status}"
-            );
-        }
-    }
-
-    #[test]
-    fn unavailable_queries_report_only_the_bounded_probe_stage_and_raw_status() {
-        let error = accessibility_query_result(true, -25204, false)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("stage=hit_test"));
-        assert!(error.contains("status=Some(-25204)"));
-        assert!(error.contains("hasValue=Some(false)"));
-        let error = query_unavailable("set_timeout", Some(-25202), None).to_string();
-        assert!(error.contains("stage=set_timeout"));
-        assert!(error.contains("status=Some(-25202)"));
-        assert!(error.contains("hasValue=None"));
-        let error = query_unavailable("create_systemwide", None, Some(false)).to_string();
-        assert!(error.contains("stage=create_systemwide"));
-        assert!(error.contains("status=None"));
-        assert!(error.contains("hasValue=Some(false)"));
-    }
 }

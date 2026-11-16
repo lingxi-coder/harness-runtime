@@ -405,10 +405,44 @@ pub fn media_content_blocks(data: &Utf16JsonProjection) -> Option<Vec<Utf16JsonP
             return None;
         }
         return (0..count)
-            .map(|index| data.subprojection(&format!("/{index}")).ok())
+            .map(|index| {
+                let block = data.subprojection(&format!("/{index}")).ok()?;
+                Some(normalize_mcp_image_block(&block).unwrap_or(block))
+            })
             .collect();
     }
     image_content_blocks(data)
+}
+
+/// In-process MCP servers return native MCP image blocks. External MCP
+/// connections already transform these into the model's base64 source shape.
+/// Normalize only at media egress so the original protocol result remains exact.
+fn normalize_mcp_image_block(block: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    if block.string_at("/type") != Some("image") || block.get_property("source").is_some() {
+        return None;
+    }
+    let data = block.get_property("data")?.code_units()?;
+    if data.is_empty() {
+        return None;
+    }
+    let media_type = block
+        .string_at("/mimeType")
+        .and_then(|mime| mime.split(';').next())
+        .and_then(|mime| mime.split('/').nth(1))
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let media_type = if media_type == "jpg" {
+        "jpeg"
+    } else {
+        &media_type
+    };
+    Some(media_block(
+        "image",
+        source_text_projection_units(data),
+        source_text_projection(&format!("image/{media_type}")),
+    ))
 }
 
 /// The `{type:"image", file:{base64, type}}` shape: `Read` on an image file, a
@@ -458,6 +492,45 @@ mod tests {
 
     fn source_json_fixture(value: serde_json::Value) -> Utf16JsonProjection {
         generated_builtin_result(&value)
+    }
+
+    #[test]
+    fn native_mcp_images_normalize_only_the_egress_projection() {
+        let data = Utf16JsonProjection::parse(
+            r#"[{"type":"text","text":"\ud800🙂"},{"type":"image","data":"QUJD","mimeType":"image/jpg; charset=binary"},{"type":"image","source":{"type":"base64","data":"REVG","media_type":"image/png"}},{"type":"image","data":17}]"#,
+        ).unwrap();
+        let original = data.to_json_string().unwrap();
+        let blocks = media_content_blocks(&data).unwrap();
+        assert_eq!(blocks[0], data.subprojection("/0").unwrap());
+        assert_eq!(
+            blocks[1].to_json_string().unwrap(),
+            r#"{"type":"image","source":{"type":"base64","data":"QUJD","media_type":"image/jpeg"}}"#
+        );
+        assert_eq!(blocks[2], data.subprojection("/2").unwrap());
+        assert_eq!(blocks[3], data.subprojection("/3").unwrap());
+        assert_eq!(data.to_json_string().unwrap(), original);
+        assert_eq!(
+            blocks[0].string_units("/text"),
+            data.string_units("/0/text")
+        );
+    }
+
+    #[test]
+    fn provider_media_fixtures_are_decodable_png_and_jpeg() {
+        for (bytes, format) in [
+            (
+                include_bytes!("../tests/fixtures/mcp-media.png").as_slice(),
+                image::ImageFormat::Png,
+            ),
+            (
+                include_bytes!("../tests/fixtures/mcp-media.jpg").as_slice(),
+                image::ImageFormat::Jpeg,
+            ),
+        ] {
+            assert_eq!(image::guess_format(bytes).unwrap(), format);
+            let image = image::load_from_memory(bytes).unwrap();
+            assert_eq!((image.width(), image.height()), (2, 2));
+        }
     }
 
     #[test]

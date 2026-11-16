@@ -1,0 +1,1957 @@
+{
+  "version": "2.1.325",
+  "binarySha256": "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2",
+  "sourceByteRanges": [
+    {
+      "name": "scale",
+      "start": 302086147,
+      "end": 302087380,
+      "sha256": "35d6198bf3f51f36295e6f397589ee3d1248455e4c0e58706bbbf888f4487e55"
+    },
+    {
+      "name": "keys",
+      "start": 302088399,
+      "end": 302090484,
+      "sha256": "057ef814a6a51cdc2f7874207b2d4804cda25272a471139c44a99da3ccf2031c"
+    },
+    {
+      "name": "valuesCoordinates",
+      "start": 302154067,
+      "end": 302157442,
+      "sha256": "a141ef4ccaa6d3d9fb77e97d70196340f1c2dd54602d67118ea958e40a946170"
+    },
+    {
+      "name": "focusRestriction",
+      "start": 302157593,
+      "end": 302157775,
+      "sha256": "f30a19e98fad5e85dc741096a3694e99403cd916e7a6769fa33a1e143e573df1"
+    },
+    {
+      "name": "focusDelivery",
+      "start": 302161149,
+      "end": 302161657,
+      "sha256": "000728628c3b1fe041eb9fe300a9ff03ff9aacb152bad98120d65210527b3066"
+    },
+    {
+      "name": "scaleValidator",
+      "start": 302213824,
+      "end": 302213913,
+      "sha256": "e5d6df7cf486db683c55e3ae8f02dd5f2bf17661995b84b80bb715cb8a134013"
+    },
+    {
+      "name": "graphemes",
+      "start": 302213913,
+      "end": 302214222,
+      "sha256": "05df0610b4859f22e823bb77b53af207ee7f78280c98c2a41a9fe6e6ca0f500f"
+    },
+    {
+      "name": "mouseState",
+      "start": 302214222,
+      "end": 302214331,
+      "sha256": "1e9b09bcbe9dc411c77d1d730facfee25d1314d2c791503e013cdb51be8ee569"
+    },
+    {
+      "name": "displayNames",
+      "start": 302239645,
+      "end": 302239868,
+      "sha256": "b2d7ae684c1f4fc22a95ae7787f8e58eb1b320a515230306c9edd50f9219910e"
+    },
+    {
+      "name": "handlers",
+      "start": 302243026,
+      "end": 302260388,
+      "sha256": "94cfd169ba2fe2e7d0e13fae63ca47e7bfb092929539ba0be4b756f97edea1a4"
+    },
+    {
+      "name": "dispatch",
+      "start": 302260458,
+      "end": 302261465,
+      "sha256": "336699ca9edd502d9b7503e73018f21428fd9b6cfa7f3b96e2e3114cb01c01d1"
+    }
+  ],
+  "scope": "Source-replayed field validation, coordinate conversion, focus delivery continuity, success text and batch content with controlled permission/target/native-effect seams; numberCases capture ECMAScript interpolation spelling. Production tests compare marked public wire outputs and assert selected actual backend effects. No native screenshot bytes, live GUI, OS grants or native event implementation claim.",
+  "cases": [
+    {
+      "action": "left_click",
+      "input": {
+        "coordinate": [
+          1.25,
+          0.4
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clicked."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "move",
+          -99,
+          0
+        ],
+        [
+          "click",
+          -99,
+          0,
+          "left",
+          1,
+          []
+        ]
+      ]
+    },
+    {
+      "action": "left_click",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate is required"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "left_click",
+      "input": {
+        "coordinate": [
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be an array of length 2"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "left_click",
+      "input": {
+        "coordinate": [
+          -1,
+          0
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be a tuple of non-negative finite numbers"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "double_click",
+      "input": {
+        "coordinate": [
+          1.25,
+          0.4
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clicked."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "move",
+          -99,
+          0
+        ],
+        [
+          "click",
+          -99,
+          0,
+          "left",
+          2,
+          []
+        ]
+      ]
+    },
+    {
+      "action": "double_click",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate is required"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "double_click",
+      "input": {
+        "coordinate": [
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be an array of length 2"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "double_click",
+      "input": {
+        "coordinate": [
+          -1,
+          0
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be a tuple of non-negative finite numbers"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "triple_click",
+      "input": {
+        "coordinate": [
+          1.25,
+          0.4
+        ]
+      },
+      "productionDifferential": false,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clicked."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "move",
+          -99,
+          0
+        ],
+        [
+          "click",
+          -99,
+          0,
+          "left",
+          3,
+          []
+        ]
+      ]
+    },
+    {
+      "action": "triple_click",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate is required"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "triple_click",
+      "input": {
+        "coordinate": [
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be an array of length 2"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "triple_click",
+      "input": {
+        "coordinate": [
+          -1,
+          0
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be a tuple of non-negative finite numbers"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "right_click",
+      "input": {
+        "coordinate": [
+          1.25,
+          0.4
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clicked."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "move",
+          -99,
+          0
+        ],
+        [
+          "click",
+          -99,
+          0,
+          "right",
+          1,
+          []
+        ]
+      ]
+    },
+    {
+      "action": "right_click",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate is required"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "right_click",
+      "input": {
+        "coordinate": [
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be an array of length 2"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "right_click",
+      "input": {
+        "coordinate": [
+          -1,
+          0
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be a tuple of non-negative finite numbers"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "middle_click",
+      "input": {
+        "coordinate": [
+          1.25,
+          0.4
+        ]
+      },
+      "productionDifferential": false,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clicked."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "move",
+          -99,
+          0
+        ],
+        [
+          "click",
+          -99,
+          0,
+          "middle",
+          1,
+          []
+        ]
+      ]
+    },
+    {
+      "action": "middle_click",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate is required"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "middle_click",
+      "input": {
+        "coordinate": [
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be an array of length 2"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "middle_click",
+      "input": {
+        "coordinate": [
+          -1,
+          0
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be a tuple of non-negative finite numbers"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "mouse_move",
+      "input": {
+        "coordinate": [
+          1.25,
+          0.4
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Moved."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "move",
+          -99,
+          0
+        ]
+      ]
+    },
+    {
+      "action": "mouse_move",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate is required"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "mouse_move",
+      "input": {
+        "coordinate": [
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be an array of length 2"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "mouse_move",
+      "input": {
+        "coordinate": [
+          -1,
+          0
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "coordinate must be a tuple of non-negative finite numbers"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "left_click",
+      "input": {
+        "coordinate": [
+          1,
+          1
+        ],
+        "text": 42
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "text must be a string"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "left_click",
+      "input": {
+        "coordinate": [
+          1,
+          1
+        ],
+        "text": "cmd+q"
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The modifier chord \"cmd+q\" would fire a system shortcut. Request the systemKeyCombos grant flag via request_access, or use only modifier keys (shift, ctrl, alt, cmd) in the text parameter."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "type",
+      "input": {
+        "text": "Aé😀\n\t"
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Typed 5 grapheme(s)."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "type",
+          "A",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "é",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "😀",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "key",
+          "return"
+        ],
+        [
+          "key",
+          "tab"
+        ]
+      ]
+    },
+    {
+      "action": "type",
+      "input": {
+        "text": ""
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Typed 0 grapheme(s)."
+          }
+        ]
+      },
+      "effects": []
+    },
+    {
+      "action": "type",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"text\" must be a string."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "key",
+      "input": {
+        "text": "a"
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Key pressed."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "key",
+          "a"
+        ]
+      ]
+    },
+    {
+      "action": "key",
+      "input": {
+        "text": "a",
+        "repeat": 3
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Key pressed 3 times."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "key",
+          "a"
+        ],
+        [
+          "key",
+          "a"
+        ],
+        [
+          "key",
+          "a"
+        ]
+      ]
+    },
+    {
+      "action": "key",
+      "input": {
+        "text": "a",
+        "repeat": 0
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "repeat must be a positive integer"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "key",
+      "input": {
+        "text": "a",
+        "repeat": 1.5
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "repeat must be a positive integer"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "key",
+      "input": {
+        "text": "a",
+        "repeat": 101
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "repeat exceeds maximum of 100"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "key",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "text is required"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": 0
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Waited 0s."
+          }
+        ]
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": 1e-7
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Waited 1e-7s."
+          }
+        ]
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": 0.000001
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Waited 0.000001s."
+          }
+        ]
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": 1.234e-7
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Waited 1.234e-7s."
+          }
+        ]
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": 5e-324
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Waited 5e-324s."
+          }
+        ]
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": -1
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "duration must be non-negative"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": 101
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "duration is too long. Duration is in seconds."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {
+        "duration": "1"
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "duration must be a number"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "wait",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "duration must be a number"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "hold_key",
+      "input": {
+        "text": "space",
+        "duration": 0
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Key held."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "hold",
+          [
+            "space"
+          ],
+          0
+        ]
+      ]
+    },
+    {
+      "action": "hold_key",
+      "input": {
+        "text": "space",
+        "duration": -1
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "duration must be non-negative"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "hold_key",
+      "input": {
+        "duration": 0
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"text\" must be a string."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "scroll",
+      "input": {
+        "coordinate": [
+          1,
+          1
+        ],
+        "scroll_direction": "down",
+        "scroll_amount": 2
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Scrolled."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "scroll",
+          -99,
+          1,
+          0,
+          2
+        ]
+      ]
+    },
+    {
+      "action": "scroll",
+      "input": {
+        "coordinate": [
+          1,
+          1
+        ],
+        "scroll_direction": "wrong",
+        "scroll_amount": 2
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "scroll_direction must be 'up', 'down', 'left', or 'right'"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "scroll",
+      "input": {
+        "coordinate": [
+          1,
+          1
+        ],
+        "scroll_direction": "down",
+        "scroll_amount": -1
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "scroll_amount must be a non-negative int"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "scroll",
+      "input": {
+        "coordinate": [
+          1,
+          1
+        ],
+        "scroll_direction": "down",
+        "scroll_amount": 101
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "scroll_amount exceeds maximum of 100"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "left_click_drag",
+      "input": {
+        "start_coordinate": [
+          0,
+          0
+        ],
+        "coordinate": [
+          1.5,
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Dragged."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "drag",
+          {
+            "x": -100,
+            "y": 0
+          },
+          {
+            "x": -99,
+            "y": 1
+          }
+        ]
+      ]
+    },
+    {
+      "action": "left_click_drag",
+      "input": {
+        "start_coordinate": [
+          1
+        ],
+        "coordinate": [
+          1,
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "start_coordinate must be an array of length 2"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "left_mouse_down",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mouse button pressed."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "down"
+        ]
+      ]
+    },
+    {
+      "action": "left_mouse_up",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mouse button released."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "up"
+        ]
+      ]
+    },
+    {
+      "action": "cursor_position",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"x\":-99,\"y\":1.5,\"coordinateSpace\":\"logical_points\",\"note\":\"take a screenshot first for image-pixel coordinates\"}"
+          }
+        ]
+      },
+      "effects": []
+    },
+    {
+      "action": "read_clipboard",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clipboard read is not granted. Request `clipboardRead` via request_access."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "write_clipboard",
+      "input": {
+        "text": "hello"
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clipboard write is not granted. Request `clipboardWrite` via request_access."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "write_clipboard",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clipboard write is not granted. Request `clipboardWrite` via request_access."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "write_clipboard",
+      "input": {
+        "text": 7
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Clipboard write is not granted. Request `clipboardWrite` via request_access."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "open_application",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"app\" must be a string."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "open_application",
+      "input": {
+        "app": "test.app"
+      },
+      "productionDifferential": false,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Opened \"test.app\"."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "open",
+          "test.app"
+        ]
+      ]
+    },
+    {
+      "action": "switch_display",
+      "input": {
+        "display": "auto"
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Returned to automatic monitor selection. Call screenshot to continue."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "display",
+          null
+        ]
+      ]
+    },
+    {
+      "action": "switch_display",
+      "input": {
+        "display": "missing"
+      },
+      "productionDifferential": false,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Only one monitor is connected. There is nothing to switch to."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "switch_display",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"display\" must be a string."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "region must be an array of length 4: [x0, y0, x1, y1]"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {
+        "region": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "region x1 must be greater than x0"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {
+        "region": [
+          0,
+          0,
+          1,
+          0
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "region y1 must be greater than y0"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {
+        "region": [
+          0,
+          -1,
+          1,
+          2
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "region values must be non-negative numbers"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {
+        "region": [
+          0,
+          0,
+          1,
+          1
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "take a screenshot before zooming (region coords are relative to it)"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {
+        "scale": 2
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "region must be an array of length 4: [x0, y0, x1, y1]"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {
+        "region": [
+          0,
+          0,
+          1,
+          1
+        ],
+        "scale": 2
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "take a screenshot before zooming (region coords are relative to it)"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "zoom",
+      "input": {
+        "region": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": 2
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "region x1 must be greater than x0"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "computer_batch",
+      "input": {},
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "actions must be a non-empty array"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "computer_batch",
+      "input": {
+        "actions": [
+          null
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "actions[0] must be an object"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "computer_batch",
+      "input": {
+        "actions": [
+          {}
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "actions[0].action must be a string"
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "computer_batch",
+      "input": {
+        "actions": [
+          {
+            "action": "request_access"
+          }
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "actions[0].action=\"request_access\" is not allowed in a batch. Allowed: key, type, mouse_move, left_click, left_click_drag, right_click, middle_click, double_click, triple_click, scroll, hold_key, screenshot, zoom, cursor_position, left_mouse_down, left_mouse_up, wait."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    },
+    {
+      "action": "computer_batch",
+      "input": {
+        "actions": [
+          {
+            "action": "wait",
+            "duration": 0
+          },
+          {
+            "action": "key",
+            "text": "b"
+          },
+          {
+            "action": "type",
+            "text": "Hi"
+          }
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[1/3] wait: Waited 0s."
+          },
+          {
+            "type": "text",
+            "text": "[2/3] key: Key pressed."
+          },
+          {
+            "type": "text",
+            "text": "[3/3] type: Typed 2 grapheme(s)."
+          }
+        ]
+      },
+      "effects": [
+        [
+          "key",
+          "b"
+        ],
+        [
+          "type",
+          "H",
+          {
+            "viaClipboard": false
+          }
+        ],
+        [
+          "type",
+          "i",
+          {
+            "viaClipboard": false
+          }
+        ]
+      ]
+    },
+    {
+      "action": "computer_batch",
+      "input": {
+        "actions": [
+          {
+            "action": "wait",
+            "duration": 0
+          },
+          {
+            "action": "key",
+            "repeat": 0,
+            "text": "b"
+          },
+          {
+            "action": "type",
+            "text": "never"
+          }
+        ]
+      },
+      "productionDifferential": true,
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[1/3] wait: Waited 0s."
+          },
+          {
+            "type": "text",
+            "text": "[2/3] key: FAILED — repeat must be a positive integer"
+          },
+          {
+            "type": "text",
+            "text": "Batch stopped at actions[1] (key). 1 completed, 1 remaining."
+          }
+        ],
+        "isError": true
+      },
+      "effects": []
+    }
+  ],
+  "scaleCases": [
+    {
+      "input": [
+        4,
+        4
+      ],
+      "output": [
+        4,
+        4
+      ]
+    },
+    {
+      "input": [
+        2880,
+        1800
+      ],
+      "output": [
+        1389,
+        868
+      ]
+    },
+    {
+      "input": [
+        3000,
+        500
+      ],
+      "output": [
+        1568,
+        261
+      ]
+    },
+    {
+      "input": [
+        500,
+        3000
+      ],
+      "output": [
+        261,
+        1568
+      ]
+    },
+    {
+      "input": [
+        1568,
+        1568
+      ],
+      "output": [
+        1092,
+        1092
+      ]
+    },
+    {
+      "input": [
+        10000,
+        1
+      ],
+      "output": [
+        1568,
+        1
+      ]
+    },
+    {
+      "input": [
+        1,
+        10000
+      ],
+      "output": [
+        1,
+        1568
+      ]
+    }
+  ],
+  "focusCases": [
+    {
+      "input": {
+        "expected": null,
+        "current": {
+          "bundleId": "test.app",
+          "displayName": "Test"
+        },
+        "prefix": "Typing aborted after 1 of 3 graphemes"
+      },
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Typing aborted after 1 of 3 graphemes: \"Test\" became frontmost mid-delivery. Keystrokes follow key focus, so the remaining input was NOT delivered — it was approved for a different focus state only. Take a screenshot to see where focus went and what was actually typed before retrying. Do not attempt to work around this restriction — never use AppleScript, System Events, shell commands, or any other method to send clicks or keystrokes to this app."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "input": {
+        "expected": {
+          "bundleId": "test.app",
+          "displayName": "Test"
+        },
+        "current": {
+          "bundleId": "test.app",
+          "displayName": "Test"
+        },
+        "prefix": "Typing aborted after 1 of 3 graphemes"
+      },
+      "output": null
+    },
+    {
+      "input": {
+        "expected": {
+          "bundleId": "other.app",
+          "displayName": "Other"
+        },
+        "current": {
+          "bundleId": "test.app",
+          "displayName": "Test"
+        },
+        "prefix": "Typing aborted after 1 of 3 graphemes"
+      },
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Typing aborted after 1 of 3 graphemes: \"Test\" became frontmost mid-delivery. Keystrokes follow key focus, so the remaining input was NOT delivered — it was approved for \"Other\" only. Take a screenshot to see where focus went and what was actually typed before retrying. Do not attempt to work around this restriction — never use AppleScript, System Events, shell commands, or any other method to send clicks or keystrokes to this app."
+          }
+        ],
+        "isError": true
+      }
+    }
+  ],
+  "numberCases": [
+    {
+      "input": 0,
+      "output": "0"
+    },
+    {
+      "input": 1e-7,
+      "output": "1e-7"
+    },
+    {
+      "input": 0.000001,
+      "output": "0.000001"
+    },
+    {
+      "input": 1.234e-7,
+      "output": "1.234e-7"
+    },
+    {
+      "input": 100000000000000000000,
+      "output": "100000000000000000000"
+    },
+    {
+      "input": 1e+21,
+      "output": "1e+21"
+    },
+    {
+      "input": 5e-324,
+      "output": "5e-324"
+    },
+    {
+      "input": 1.7976931348623157e+308,
+      "output": "1.7976931348623157e+308"
+    },
+    {
+      "input": 1.0000000000000002,
+      "output": "1.0000000000000002"
+    }
+  ],
+  "zoomCases": [
+    {
+      "input": {
+        "region": [
+          0.25,
+          0.5,
+          100.75,
+          55.25
+        ],
+        "captureWidth": 2880,
+        "captureHeight": 1800,
+        "scale": 2,
+        "frameWidth": 1568,
+        "frameHeight": 980
+      },
+      "output": {
+        "x": 0.22959183673469388,
+        "y": 0.45918367346938777,
+        "w": 92.29591836734694,
+        "h": 50.28061224489796
+      }
+    },
+    {
+      "input": {
+        "region": [
+          0,
+          0,
+          1568,
+          980
+        ],
+        "captureWidth": 2880,
+        "captureHeight": 1800,
+        "scale": 2,
+        "frameWidth": 1568,
+        "frameHeight": 980
+      },
+      "output": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900
+      }
+    },
+    {
+      "input": {
+        "region": [
+          1.23456789,
+          2.3456789,
+          444.555555,
+          666.777777
+        ],
+        "captureWidth": 2880,
+        "captureHeight": 1800,
+        "scale": 2,
+        "frameWidth": 1568,
+        "frameHeight": 980
+      },
+      "output": {
+        "x": 1.133786837755102,
+        "y": 2.154194908163265,
+        "w": 407.13151877448985,
+        "h": 610.1927431530612
+      }
+    }
+  ]
+}

@@ -1,0 +1,1306 @@
+{
+  "version": "2.1.325",
+  "nativeSha256": "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2",
+  "sourceByteRanges": [
+    {
+      "name": "p",
+      "start": 302154067,
+      "end": 302154167,
+      "sha256": "4136c18c67daaa1aa4c308a09c7d3c01e6fecaffcea395698c590a0e32bced04"
+    },
+    {
+      "name": "P",
+      "start": 302154167,
+      "end": 302154220,
+      "sha256": "d4781f8482fc2e8392267436c0e7c18f85b560961d6161d5b8b24a50c91e89b5"
+    },
+    {
+      "name": "F",
+      "start": 302154220,
+      "end": 302154303,
+      "sha256": "448b329e776cd7f2df47a580027c6173b2351e9f1f771e2018bbaf5c7aa07522"
+    },
+    {
+      "name": "G",
+      "start": 302155308,
+      "end": 302155408,
+      "sha256": "88edea3e13af43e48dfd8db53054a606980bcfef9a77abddfe43c87d5b319d9d"
+    },
+    {
+      "name": "vo",
+      "start": 302188707,
+      "end": 302190126,
+      "sha256": "e09e0b025173b04c922502016d3931abbeed2c267dafe10a22b694c412af3d57"
+    },
+    {
+      "name": "To",
+      "start": 302190126,
+      "end": 302190377,
+      "sha256": "5e4f891e13e16c7d095eacb193eb7bc86ba2c554ed1d2fb86e30e7eab1f257df"
+    },
+    {
+      "name": "on",
+      "start": 302234530,
+      "end": 302235612,
+      "sha256": "f86e09ee4f03ee18b740c5c7e5b91d0e3a865a57acc1de0a16d4fdeab1bf485f"
+    },
+    {
+      "name": "rn",
+      "start": 302235612,
+      "end": 302236699,
+      "sha256": "3ee434b18171f610e353aa0075d93b4a8daa7da2e6be2718dd8aecd9e751eb46"
+    },
+    {
+      "name": "sn",
+      "start": 302236699,
+      "end": 302236865,
+      "sha256": "4958beb45c093bbe687a481ed10d2e23fa95e5ab4252a442476130acaaf9916d"
+    },
+    {
+      "name": "Wo",
+      "start": 302236865,
+      "end": 302237388,
+      "sha256": "62e3d22db282cb7f44db8d7af075081ef375b6d1db67addf3cddc4cf00189868"
+    },
+    {
+      "name": "Go",
+      "start": 302237388,
+      "end": 302238254,
+      "sha256": "a81695dbae81a2b29d1dddd7ae47e96d71e1fd9fa9bd63f612200bf23122f0ce"
+    }
+  ],
+  "scope": "Takeover allow/deny/scheduled and teach activation/validation/zero-action steps through exact reviewed functions. No UI, input, capture or timing effects.",
+  "cases": [
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": false,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control approved for this session. The display-scope tools (screenshot, left_click, type, ...) will now proceed. This approval lasts until the session ends."
+          }
+        ]
+      },
+      "trace": [
+        "takeover",
+        "approveTakeover"
+      ]
+    },
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": false,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control needs your approval, which can't be given during a scheduled run. Stay with the app_* tools for the granted background apps, or send a message in this conversation so the approval card can appear. (Retrying returns this same result.)"
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "unattended_no_approver"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": true,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control is already available for this session — the display-scope tools (screenshot, left_click, type, ...) will proceed. No further approval is needed."
+          }
+        ]
+      },
+      "trace": []
+    },
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": true,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control is already available for this session — the display-scope tools (screenshot, left_click, type, ...) will proceed. No further approval is needed."
+          }
+        ]
+      },
+      "trace": []
+    },
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": false,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control was not approved (declined or not confirmed). Stay with the app_* tools for the granted background apps, or explain what full-screen access is needed for and let the user decide."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "takeover_declined"
+        }
+      },
+      "trace": [
+        "takeover"
+      ]
+    },
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": false,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control needs your approval, which can't be given during a scheduled run. Stay with the app_* tools for the granted background apps, or send a message in this conversation so the approval card can appear. (Retrying returns this same result.)"
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "unattended_no_approver"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": true,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control is already available for this session — the display-scope tools (screenshot, left_click, type, ...) will proceed. No further approval is needed."
+          }
+        ]
+      },
+      "trace": []
+    },
+    {
+      "action": "request_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": true,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-screen control is already available for this session — the display-scope tools (screenshot, left_click, type, ...) will proceed. No further approval is needed."
+          }
+        ]
+      },
+      "trace": []
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": false,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": false,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": true,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "allow",
+      "approved": true,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": false,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": false,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": true,
+      "scheduled": false,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "release_full_control",
+      "input": {},
+      "decision": "deny",
+      "approved": true,
+      "scheduled": true,
+      "active": false,
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Released full-screen control. The display overlay is off. Keep going with the app_* tools; call request_full_control again if you need full-screen later (it will ask the user again)."
+          }
+        ]
+      },
+      "trace": [
+        "releaseCuLock",
+        "revokeTakeover"
+      ]
+    },
+    {
+      "action": "teach_step",
+      "input": {},
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {},
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: \"explanation\" must be a string."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": 3
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": 3
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: \"explanation\" must be a string."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step"
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step"
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: \"next_preview\" must be a string."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": null
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": null
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: \"actions\" must be an array (empty is allowed)."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [
+          null
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [
+          null
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: actions[0] must be an object"
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [
+          {}
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [
+          {}
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: actions[0].action must be a string"
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [
+          {
+            "action": "zoom"
+          }
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [
+          {
+            "action": "zoom"
+          }
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: actions[0].action=\"zoom\" is not allowed. Allowed: key, type, mouse_move, left_click, left_click_drag, right_click, middle_click, double_click, triple_click, scroll, hold_key, screenshot, cursor_position, left_mouse_down, left_mouse_up, wait."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [],
+        "anchor": [
+          1
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [],
+        "anchor": [
+          1
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: \"anchor\" must be a [x, y] number tuple or omitted."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [],
+        "anchor": [
+          "a",
+          2
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": [],
+        "anchor": [
+          "a",
+          2
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "teach_step: \"anchor\" must be a [x, y] number tuple or omitted."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {},
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {},
+      "active": false,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {},
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"steps\" must be a non-empty array."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {},
+      "active": true,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"steps\" must be a non-empty array."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": []
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": []
+      },
+      "active": false,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": []
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"steps\" must be a non-empty array."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": []
+      },
+      "active": true,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "\"steps\" must be a non-empty array."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          null
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          null
+        ]
+      },
+      "active": false,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          null
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "steps[0] must be an object"
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          null
+        ]
+      },
+      "active": true,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "steps[0] must be an object"
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {}
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {}
+        ]
+      },
+      "active": false,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {}
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "steps[0]: \"explanation\" must be a string."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {}
+        ]
+      },
+      "active": true,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "steps[0]: \"explanation\" must be a string."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "bad_args"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {
+            "explanation": "step",
+            "next_preview": "next",
+            "actions": []
+          }
+        ]
+      },
+      "active": false,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {
+            "explanation": "step",
+            "next_preview": "next",
+            "actions": []
+          }
+        ]
+      },
+      "active": false,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Teach mode is not active. Call request_teach_access first."
+          }
+        ],
+        "isError": true,
+        "telemetry": {
+          "error_kind": "teach_mode_not_active"
+        }
+      },
+      "trace": []
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {
+            "explanation": "step",
+            "next_preview": "next",
+            "actions": []
+          }
+        ]
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"stepsCompleted\":1,\"results\":[[]]}"
+          }
+        ]
+      },
+      "trace": [
+        "teachStep"
+      ]
+    },
+    {
+      "action": "teach_batch",
+      "input": {
+        "steps": [
+          {
+            "explanation": "step",
+            "next_preview": "next",
+            "actions": []
+          }
+        ]
+      },
+      "active": true,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"exited\":true,\"stepsCompleted\":0}"
+          }
+        ]
+      },
+      "trace": [
+        "teachStep"
+      ]
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": []
+      },
+      "active": true,
+      "decision": "continue",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"executed\":0,\"results\":[]}"
+          }
+        ]
+      },
+      "trace": [
+        "teachStep"
+      ]
+    },
+    {
+      "action": "teach_step",
+      "input": {
+        "explanation": "step",
+        "next_preview": "next",
+        "actions": []
+      },
+      "active": true,
+      "decision": "exit",
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"exited\":true}"
+          }
+        ]
+      },
+      "trace": [
+        "teachStep"
+      ]
+    }
+  ]
+}

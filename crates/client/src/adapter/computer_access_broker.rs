@@ -49,12 +49,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::protocol::computer_access::{
-    AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
-    TccStateDto,
+    AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, ComputerInteractionDto,
+    RequestedAppDto, TccStateDto,
 };
 use async_trait::async_trait;
 use permission::computer_access::{
-    AccessTier, ComputerAccessExchange, ComputerAccessResponse, RequestedApp, TccState,
+    AccessTier, ComputerAccessExchange, ComputerAccessRequest, ComputerAccessResponse,
+    ComputerInteraction, RequestedApp, TccState,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -92,6 +93,39 @@ fn lower_app(app: RequestedApp) -> RequestedAppDto {
     RequestedAppDto { label: app.label }
 }
 
+fn lower_interaction(interaction: ComputerInteraction) -> ComputerInteractionDto {
+    macro_rules! lower {
+        ($variant:ident, $reason:ident, $explanation:ident, $next_preview:ident, $anchor:ident) => {
+            ComputerInteractionDto::$variant {
+                reason: $reason,
+                explanation: $explanation,
+                next_preview: $next_preview,
+                anchor_json: $anchor.map(|anchor| anchor.to_string()),
+            }
+        };
+    }
+    match interaction {
+        ComputerInteraction::Takeover {
+            reason,
+            explanation,
+            next_preview,
+            anchor,
+        } => lower!(Takeover, reason, explanation, next_preview, anchor),
+        ComputerInteraction::TeachAccess {
+            reason,
+            explanation,
+            next_preview,
+            anchor,
+        } => lower!(TeachAccess, reason, explanation, next_preview, anchor),
+        ComputerInteraction::TeachStep {
+            reason,
+            explanation,
+            next_preview,
+            anchor,
+        } => lower!(TeachStep, reason, explanation, next_preview, anchor),
+    }
+}
+
 /// Raise the wire [`ComputerAccessResponseDto`] back to `tui_core`'s
 /// [`ComputerAccessResponse`] (the type the parked `oneshot::Sender` expects).
 fn raise_response(response: ComputerAccessResponseDto) -> ComputerAccessResponse {
@@ -100,12 +134,19 @@ fn raise_response(response: ComputerAccessResponseDto) -> ComputerAccessResponse
         clipboard_read: response.clipboard_read,
         clipboard_write: response.clipboard_write,
         system_key_combos: response.system_key_combos,
+        interaction_action: response.interaction_action,
+        preferred_mode: response.preferred_mode,
     }
 }
 
 /// The connection-scoped broker driving the `computer`-tool `request_access`
 /// round-trip over the bridge-server transport. See the module doc for the
 /// full shape.
+struct PendingComputerAccess {
+    request: ComputerAccessRequest,
+    response_tx: oneshot::Sender<ComputerAccessResponse>,
+}
+
 pub struct ComputerAccessBroker {
     /// Where outbound [`ComputerAccessRequestDto`]s go (the transport).
     sink: Arc<dyn ComputerAccessRequestSink>,
@@ -116,7 +157,7 @@ pub struct ComputerAccessBroker {
     /// owner: draining this map (or dropping the broker) drops every sender,
     /// resolving every in-flight `TuiBridgeResolver::resolve` await to the
     /// fully-denied default.
-    pending: Mutex<HashMap<u64, oneshot::Sender<ComputerAccessResponse>>>,
+    pending: Mutex<HashMap<u64, PendingComputerAccess>>,
 }
 
 impl ComputerAccessBroker {
@@ -141,7 +182,13 @@ impl ComputerAccessBroker {
             let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let ComputerAccessExchange { request, resp_tx } = exchange;
             {
-                self.pending.lock().await.insert(request_id, resp_tx);
+                self.pending.lock().await.insert(
+                    request_id,
+                    PendingComputerAccess {
+                        request: request.clone(),
+                        response_tx: resp_tx,
+                    },
+                );
             }
             let dto = ComputerAccessRequestDto {
                 request_id,
@@ -152,6 +199,7 @@ impl ComputerAccessBroker {
                 clipboard_write: request.clipboard_write,
                 system_key_combos: request.system_key_combos,
                 tcc_state: request.tcc_state.map(lower_tcc),
+                interaction: request.interaction.map(lower_interaction),
             };
             self.sink.emit_request(dto).await;
         }
@@ -162,23 +210,32 @@ impl ComputerAccessBroker {
     /// and resolved, `false` if the id was unknown / already resolved (a safe
     /// no-op, mirroring [`crate::adapter::AdapterPermissionGate::resolve`]).
     pub async fn resolve(&self, request_id: u64, response: ComputerAccessResponseDto) -> bool {
-        let Some(sender) = self.pending.lock().await.remove(&request_id) else {
+        let Some(pending) = self.pending.lock().await.remove(&request_id) else {
             return false;
         };
         // If the receiver vanished (e.g. a drain raced this resolve), the send
         // simply fails; that path already resolved fully-denied, so it is safe
         // to ignore.
-        sender.send(raise_response(response)).is_ok()
+        let response = raise_response(response);
+        if !pending.request.allows_response(&response) {
+            // The invalid resolution consumes its correlator and fails closed.
+            let _ = pending.response_tx.send(ComputerAccessResponse::default());
+            return false;
+        }
+        pending.response_tx.send(response).is_ok()
     }
 
     /// Deny a parked request (an inbound `DenyComputerAccess`) — resolves the
     /// awaiting `TuiBridgeResolver::resolve` call to the fully-denied default.
     /// Returns `true` if a matching request was found and resolved.
     pub async fn deny(&self, request_id: u64) -> bool {
-        let Some(sender) = self.pending.lock().await.remove(&request_id) else {
+        let Some(pending) = self.pending.lock().await.remove(&request_id) else {
             return false;
         };
-        sender.send(ComputerAccessResponse::default()).is_ok()
+        pending
+            .response_tx
+            .send(ComputerAccessResponse::default())
+            .is_ok()
     }
 
     /// Remove only requests whose owning tool has dropped its reply receiver.
@@ -186,7 +243,7 @@ impl ComputerAccessBroker {
     pub async fn cancel_closed(&self) -> usize {
         let mut pending = self.pending.lock().await;
         let before = pending.len();
-        pending.retain(|_, reply| !reply.is_closed());
+        pending.retain(|_, reply| !reply.response_tx.is_closed());
         before - pending.len()
     }
 
@@ -249,8 +306,20 @@ mod tests {
         let broker = ComputerAccessBroker::new(Arc::new(MockSink::default()));
         let (old_tx, old_rx) = oneshot::channel();
         let (live_tx, live_rx) = oneshot::channel();
-        broker.pending.lock().await.insert(1, old_tx);
-        broker.pending.lock().await.insert(2, live_tx);
+        broker.pending.lock().await.insert(
+            1,
+            PendingComputerAccess {
+                request: sample_request(),
+                response_tx: old_tx,
+            },
+        );
+        broker.pending.lock().await.insert(
+            2,
+            PendingComputerAccess {
+                request: sample_request(),
+                response_tx: live_tx,
+            },
+        );
         drop(old_rx);
         assert_eq!(broker.cancel_closed().await, 1);
         assert_eq!(broker.pending_count().await, 1);
@@ -280,6 +349,50 @@ mod tests {
                 accessibility: true,
                 screen_recording: false,
             }),
+            interaction: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn interaction_resolution_rejects_cross_kind_and_smuggled_grants() {
+        for (action, grant_app) in [("continue", false), ("allow", true)] {
+            let broker = ComputerAccessBroker::new(Arc::new(MockSink::default()));
+            let mut request = sample_request();
+            request.tcc_state = None;
+            request.interaction = Some(ComputerInteraction::Takeover {
+                reason: None,
+                explanation: Some("Control desktop".into()),
+                next_preview: None,
+                anchor: None,
+            });
+            let (response_tx, response_rx) = oneshot::channel();
+            broker.pending.lock().await.insert(
+                1,
+                PendingComputerAccess {
+                    request,
+                    response_tx,
+                },
+            );
+            assert!(
+                !broker
+                    .resolve(
+                        1,
+                        ComputerAccessResponseDto {
+                            granted_apps: if grant_app {
+                                vec!["Slack".into()]
+                            } else {
+                                vec![]
+                            },
+                            interaction_action: Some(action.into()),
+                            ..Default::default()
+                        }
+                    )
+                    .await
+            );
+            let denied = response_rx.await.unwrap();
+            assert!(denied.granted_apps.is_empty());
+            assert!(denied.interaction_action.is_none());
+            assert_eq!(broker.pending_count().await, 0);
         }
     }
 
@@ -296,12 +409,11 @@ mod tests {
         let run_task = tokio::spawn(async move { broker_run.run(rx).await });
 
         let (resp_tx, resp_rx) = oneshot::channel();
-        tx.send(ComputerAccessExchange {
-            request: sample_request(),
-            resp_tx,
-        })
-        .await
-        .unwrap();
+        let mut request = sample_request();
+        request.tcc_state = None;
+        tx.send(ComputerAccessExchange { request, resp_tx })
+            .await
+            .unwrap();
 
         // Wait for the broker to have parked (and emitted) the request.
         for _ in 0..2000 {
@@ -316,13 +428,7 @@ mod tests {
         assert_eq!(dto.reason, "automate chat");
         assert_eq!(dto.apps.len(), 2);
         assert_eq!(dto.tier, AccessTierDto::Full);
-        assert_eq!(
-            dto.tcc_state,
-            Some(TccStateDto {
-                accessibility: true,
-                screen_recording: false
-            })
-        );
+        assert_eq!(dto.tcc_state, None);
 
         assert!(
             broker
@@ -333,6 +439,8 @@ mod tests {
                         clipboard_read: false,
                         clipboard_write: false,
                         system_key_combos: false,
+                        interaction_action: None,
+                        preferred_mode: None,
                     },
                 )
                 .await

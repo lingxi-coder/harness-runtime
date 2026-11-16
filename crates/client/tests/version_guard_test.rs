@@ -1946,6 +1946,24 @@ fn current_contract_index() -> ContractIndex {
     put("ComputerAccessRequestDto.clipboard_write", "bool");
     put("ComputerAccessRequestDto.system_key_combos", "bool");
     put("ComputerAccessRequestDto.tcc_state", "Option<TccStateDto>");
+    put(
+        "ComputerAccessRequestDto.interaction",
+        "Option<ComputerInteractionDto>",
+    );
+
+    for (variant, tag) in [
+        ("Takeover", "takeover"),
+        ("TeachAccess", "teach_access"),
+        ("TeachStep", "teach_step"),
+    ] {
+        put(&format!("ComputerInteractionDto::{variant}"), tag);
+        for field in ["reason", "explanation", "next_preview", "anchor_json"] {
+            put(
+                &format!("ComputerInteractionDto::{variant}.{field}"),
+                "Option<String>",
+            );
+        }
+    }
 
     put("RequestedAppDto.label", "String");
 
@@ -1960,6 +1978,11 @@ fn current_contract_index() -> ContractIndex {
     put("ComputerAccessResponseDto.clipboard_read", "bool");
     put("ComputerAccessResponseDto.clipboard_write", "bool");
     put("ComputerAccessResponseDto.system_key_combos", "bool");
+    put(
+        "ComputerAccessResponseDto.interaction_action",
+        "Option<String>",
+    );
+    put("ComputerAccessResponseDto.preferred_mode", "Option<String>");
 
     // ── ClientError (error.rs) ────────────────────────────────────────────
     put("ClientError::Transport", "transport");
@@ -3029,6 +3052,49 @@ fn identical_index_is_compatible() {
 /// legitimate only after classifying the change and bumping the major when the
 /// change is breaking.
 #[test]
+fn computer_interaction_native_record_layout_is_versioned_and_fully_indexed() {
+    // The structural JSON classifier treats optional fields as additive. This
+    // particular change also grows UniFFI records: old generated native peers
+    // cannot be mixed with the new Rust library, so it deliberately bumps major.
+    assert!(major_of(CLIENT_PROTOCOL_VERSION) >= 34);
+    let current = current_contract_index();
+    assert_eq!(
+        current
+            .get("ComputerAccessRequestDto.interaction")
+            .map(String::as_str),
+        Some("Option<ComputerInteractionDto>")
+    );
+    for field in ["interaction_action", "preferred_mode"] {
+        assert_eq!(
+            current
+                .get(&format!("ComputerAccessResponseDto.{field}"))
+                .map(String::as_str),
+            Some("Option<String>")
+        );
+    }
+    for (variant, tag) in [
+        ("Takeover", "takeover"),
+        ("TeachAccess", "teach_access"),
+        ("TeachStep", "teach_step"),
+    ] {
+        assert_eq!(
+            current
+                .get(&format!("ComputerInteractionDto::{variant}"))
+                .map(String::as_str),
+            Some(tag)
+        );
+        for field in ["reason", "explanation", "next_preview", "anchor_json"] {
+            assert_eq!(
+                current
+                    .get(&format!("ComputerInteractionDto::{variant}.{field}"))
+                    .map(String::as_str),
+                Some("Option<String>")
+            );
+        }
+    }
+}
+
+#[test]
 fn current_contract_matches_index_or_version_bumped() {
     let current = current_contract_index();
     let current_major = major_of(CLIENT_PROTOCOL_VERSION);
@@ -3154,8 +3220,8 @@ fn contract_index_covers_every_dto() {
         PromptModeDto, ProviderCredentialSecretDto, SkillAdminCommandDto, WritableScopeDto,
     };
     use client::protocol::computer_access::{
-        AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
-        TccStateDto,
+        AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, ComputerInteractionDto,
+        RequestedAppDto, TccStateDto,
     };
     use client::protocol::controls::{
         ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
@@ -4649,6 +4715,35 @@ fn contract_index_covers_every_dto() {
             accessibility: false,
             screen_recording: false,
         }),
+        interaction: None,
+    };
+    let _computer_interactions = [
+        ComputerInteractionDto::Takeover {
+            reason: None,
+            explanation: None,
+            next_preview: None,
+            anchor_json: None,
+        },
+        ComputerInteractionDto::TeachAccess {
+            reason: None,
+            explanation: None,
+            next_preview: None,
+            anchor_json: None,
+        },
+        ComputerInteractionDto::TeachStep {
+            reason: None,
+            explanation: None,
+            next_preview: None,
+            anchor_json: None,
+        },
+    ];
+    let _computer_response = ComputerAccessResponseDto {
+        granted_apps: vec![],
+        clipboard_read: false,
+        clipboard_write: false,
+        system_key_combos: false,
+        interaction_action: None,
+        preferred_mode: None,
     };
     let _rows = (
         SessionRowDto {

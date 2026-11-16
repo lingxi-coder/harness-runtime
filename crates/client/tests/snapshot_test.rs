@@ -1480,6 +1480,8 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                     clipboard_read: false,
                     clipboard_write: false,
                     system_key_combos: false,
+                    interaction_action: None,
+                    preferred_mode: None,
                 },
             },
         ),
@@ -2242,6 +2244,7 @@ fn computer_access_goldens() -> Vec<(&'static str, ComputerAccessRequestDto)> {
                     accessibility: true,
                     screen_recording: false,
                 }),
+                interaction: None,
             },
         ),
         (
@@ -2257,6 +2260,7 @@ fn computer_access_goldens() -> Vec<(&'static str, ComputerAccessRequestDto)> {
                 clipboard_write: false,
                 system_key_combos: false,
                 tcc_state: None,
+                interaction: None,
             },
         ),
     ]
@@ -2719,6 +2723,8 @@ fn every_computer_access_dto_matches_golden() {
             clipboard_read: false,
             clipboard_write: false,
             system_key_combos: false,
+            interaction_action: None,
+            preferred_mode: None,
         },
         &mut failures,
     );

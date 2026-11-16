@@ -16,11 +16,12 @@ pub(crate) struct ClientInstructionBlock<'a> {
     pub(crate) block: &'a str,
 }
 
-/// Native `NR` / `Gvt` / `_ne`, reproduced by the hash-pinned generator.
+/// Native 2.1.325 `Ov` / `QLn` / `xNe`, reproduced by the hash-pinned generator.
+/// The computer-use block is byte-identical to the historical 2.1.286 block.
 pub(crate) const BUILTIN_CLIENT_BLOCKS: [ClientInstructionBlock<'static>; 1] =
     [ClientInstructionBlock {
         server_name: "computer-use",
-        block: include_str!("computer_use_mcp_instructions_286.txt"),
+        block: include_str!("computer_use_mcp_instructions_325.txt"),
     }];
 
 /// Build the attachment payload for the next model turn. `prior` contains full
@@ -365,16 +366,24 @@ mod tests {
     #[test]
     fn builtin_computer_use_block_matches_hash_pinned_native_string() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/instructions-2.1.286/computer_use_mcp.json"
+            "../../tests/fixtures/instructions-2.1.325/computer_use_mcp.json"
         ))
         .unwrap();
-        assert_eq!(fixture["version"], "2.1.286");
+        assert_eq!(fixture["version"], "2.1.325");
         assert_eq!(
             fixture["binary_sha256"],
-            "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433"
+            "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2"
         );
         assert_eq!(BUILTIN_CLIENT_BLOCKS[0].server_name, fixture["serverName"]);
         assert_eq!(BUILTIN_CLIENT_BLOCKS[0].block, fixture["block"]);
+        assert_eq!(BUILTIN_CLIENT_BLOCKS[0].block.len(), 5116);
+        assert_eq!(BUILTIN_CLIENT_BLOCKS[0].block.encode_utf16().count(), 5084);
+        assert_eq!(fixture["substitutions"], json!([]));
+        assert_eq!(fixture["comparison"]["identical_utf8_bytes"], true);
+        assert_eq!(
+            BUILTIN_CLIENT_BLOCKS[0].block,
+            include_str!("computer_use_mcp_instructions_286.txt")
+        );
     }
 
     #[test]

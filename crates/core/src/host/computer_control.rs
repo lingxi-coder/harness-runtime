@@ -50,6 +50,25 @@ pub struct Screenshot {
     pub png_bytes: Vec<u8>,
 }
 
+/// Host-only native display capture request. Region uses selected-display logical points (x,y,width,height);
+/// output dimensions are the reviewed model image budget.
+#[derive(Debug, Clone)]
+pub struct FilteredCaptureRequest {
+    pub display_id: u32,
+    pub source_rect: Option<[f64; 4]>,
+    pub output_width: u32,
+    pub output_height: u32,
+}
+#[derive(Debug, Clone)]
+pub struct FilteredCapture {
+    pub jpeg_bytes: Vec<u8>,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub geometry: ComputerFrameGeometry,
+}
+
 /// Geometry of the selected display in capture pixels and global OS points.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputerFrameGeometry {
@@ -124,6 +143,75 @@ pub trait ComputerControl: Send + Sync {
     }
     fn capabilities(&self) -> ComputerBackendCapabilities {
         ComputerBackendCapabilities::default()
+    }
+    /// Capability of the separate native MCP screenshot/zoom entry point.
+    /// Combined/portable screenshot filtering remains independently reported.
+    fn supports_native_filtered_capture(&self) -> bool {
+        false
+    }
+    /// Optional native, application-filtered capture at requested dimensions.
+    /// `Some` retains the native CGImage/color pipeline through JPEG encoding;
+    /// `None` selects the portable authorized-window/mask capture path.
+    async fn capture_filtered_display(
+        &self,
+        _request: &FilteredCaptureRequest,
+        _allowed_bundle_ids: &[String],
+    ) -> Result<Option<FilteredCapture>, ComputerError> {
+        Ok(None)
+    }
+    /// Optional native JPEG encoder for an already-resized PNG image. macOS
+    /// matches the AppKit computer-use pipeline at compression factor 0.75;
+    /// `None` preserves the caller's portable encoder on other backends.
+    async fn encode_computer_jpeg(
+        &self,
+        _png_bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>, ComputerError> {
+        Ok(None)
+    }
+    /// Install a foreground computer-use abort hook. `false` means the real
+    /// hook could not be installed, so the host must retain its Ctrl+C fallback.
+    fn register_escape_abort(&self, _callback: std::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+        false
+    }
+    fn unregister_escape_abort(&self) {}
+    /// Suppress abort for the next synthetic Escape press (expires after 100ms).
+    fn notify_expected_escape(&self) {}
+    /// Whether this backend exposes window-scoped Accessibility operations.
+    /// The returned records are native executor data; host/session grants are
+    /// enforced by the computer tool before reaching this seam.
+    fn supports_app_scoped(&self) -> bool {
+        false
+    }
+    /// A separate optional mechanism: AX-only backends cannot move a window
+    /// between Spaces without a verified WindowServer implementation.
+    fn supports_app_scoped_space_move(&self) -> bool {
+        false
+    }
+    fn supports_app_scoped_raw_input(&self) -> bool {
+        false
+    }
+    async fn app_scoped(
+        &self,
+        action: &str,
+        app: &str,
+        input: &crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, ComputerError> {
+        let _ = (app, input);
+        Err(ComputerError::Unsupported(format!("app_scoped {action}")))
+    }
+    /// Cancellation-aware native boundary. Backends with queued/blocking AX
+    /// work override this and check immediately before every native mutation.
+    async fn app_scoped_with_cancel(
+        &self,
+        action: &str,
+        app: &str,
+        input: &crate::types::utf16_json::Utf16JsonProjection,
+        is_cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, ComputerError> {
+        if is_cancelled() {
+            return Err(ComputerError::Other("computer operation cancelled".into()));
+        }
+        self.app_scoped(action, app, input).await
     }
     async fn frame_geometry(&self) -> Result<Option<ComputerFrameGeometry>, ComputerError> {
         Ok(None)
@@ -263,6 +351,11 @@ pub trait ComputerControl: Send + Sync {
     /// Current cursor position `(x, y)`.
     async fn cursor_position(&self) -> Result<(u32, u32), ComputerError> {
         Err(ComputerError::Unsupported("cursor_position".into()))
+    }
+    /// Live global desktop coordinates in logical points, independent of the
+    /// display selected for capture. `None` preserves older backend behavior.
+    async fn global_cursor_position(&self) -> Result<Option<(f64, f64)>, ComputerError> {
+        Ok(None)
     }
     /// Press and hold `key` for `duration_ms`, then release
     /// (parity with `holdKey`).

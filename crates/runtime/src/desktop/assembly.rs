@@ -3325,6 +3325,14 @@ pub async fn build_with_credential_stack(
         native_control: desktop_computer_control.is_some(),
         computer_policy: absolute_host_path(branding::DESKTOP_COMPUTER_POLICY_ENV),
         browser_descriptor: absolute_host_path(branding::DESKTOP_BROWSER_DESCRIPTOR_ENV),
+        protocol_tool_names: desktop_computer_control
+            .as_ref()
+            .map_or_else(Vec::new, |backend| {
+                tool_computer_use::protocol_tool_names_for_host(
+                    backend.as_ref(),
+                    cfg.computer_access_tx.is_some(),
+                )
+            }),
     };
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →

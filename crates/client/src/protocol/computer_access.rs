@@ -62,6 +62,60 @@ pub struct TccStateDto {
     pub screen_recording: bool,
 }
 
+/// Trusted interaction metadata. `anchor_json` retains the tool's JSON anchor
+/// as a string at the UniFFI boundary, following the client DTO convention.
+/// It is shown as inert text and is never used as a native action target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerInteractionDto {
+    /// Ask for full-desktop control.
+    Takeover {
+        /// Optional reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Explanation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explanation: Option<String>,
+        /// Next-action preview.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_preview: Option<String>,
+        /// Descriptive JSON anchor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_json: Option<String>,
+    },
+    /// Ask for teaching application access.
+    TeachAccess {
+        /// Optional reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Explanation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explanation: Option<String>,
+        /// Next-action preview.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_preview: Option<String>,
+        /// Descriptive JSON anchor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_json: Option<String>,
+    },
+    /// Wait for a teaching-step decision.
+    TeachStep {
+        /// Optional reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Explanation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explanation: Option<String>,
+        /// Next-action preview.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_preview: Option<String>,
+        /// Descriptive JSON anchor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_json: Option<String>,
+    },
+}
+
 /// Outbound `request_access` request — the wire lowering of
 /// `permission::computer_access::ComputerAccessRequest`. Correlated by
 /// `request_id` (assigned by the connection-scoped broker, mirroring
@@ -95,6 +149,9 @@ pub struct ComputerAccessRequestDto {
     /// convention).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tcc_state: Option<TccStateDto>,
+    /// Optional explicit interaction confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<ComputerInteractionDto>,
 }
 
 /// The user's resolution — the wire lowering of
@@ -112,4 +169,10 @@ pub struct ComputerAccessResponseDto {
     pub clipboard_write: bool,
     /// Whether `systemKeyCombos` was granted.
     pub system_key_combos: bool,
+    /// User choice for the pending interaction; absent means no approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_action: Option<String>,
+    /// Explicit user preference for app interactions, not a takeover grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_mode: Option<String>,
 }

@@ -24,25 +24,30 @@ license.workspace = true
 [dependencies]
 mobile-linux-api.workspace = true
 core = { path = "../../core" }
+branding.workspace = true
 async-trait.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Platform versions are validated with the workspace Rust 1.94 toolchain.
 enigo = "=0.3.0"
 xcap = { path = "../../../third_party/xcap-macos" }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
+serde_json.workspace = true
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
 arboard = { version = "3", default-features = false } # Only text clipboard support is used.
 plist = "=1.10.1" # XML parsing fixes; supported by the workspace Rust 1.94 toolchain
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication"] }
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "objc2-core-graphics"] }
 tokio = { workspace = true, features = ["time"] }
 # Builds the `{ kAXTrustedCheckOptionPrompt: true }` options dictionary
 # `AXIsProcessTrustedWithOptions` takes (tcc.rs) — already in the dependency
 # graph transitively (via objc2/xcap's macOS bindings), pinned here directly
 # since this crate calls its types by name.
 core-foundation = "0.10"
-core-graphics = "0.24"
+core-graphics = { version = "0.24", features = ["elcapitan"] }
 
 [lints]
 workspace = true

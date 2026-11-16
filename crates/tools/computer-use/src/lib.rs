@@ -7,7 +7,7 @@
 //! Pure-Rust dispatch.
 //!
 //! LingXi exposes a combined `computer` action adapter. App classification and
-//! key capability checks are verified against the pinned Claude Code 2.1.310
+//! key capability checks are verified against the pinned Claude Code 2.1.325
 //! helpers; this is not an identical MCP tool schema or native implementation.
 //! Requests use a dedicated `ComputerAccessResolver` even in generic tool bypass
 //! modes. The Desktop host's device policy is rechecked before effects, between
@@ -45,12 +45,22 @@ use tool_api::BuiltinToolContext;
 
 mod access_resolver;
 mod app_policy;
+mod background_protocol;
 mod browser;
 mod device_policy;
+mod display_protocol;
+mod escape_protocol;
+mod grant_protocol;
 mod key_policy;
 mod lock;
+#[cfg(all(test, target_os = "macos"))]
+mod native_acceptance_tests;
 mod permission_model;
+mod permission_result;
 mod policy_execution;
+mod protocol_result;
+mod protocol_tools;
+mod session_protocol;
 mod validate;
 
 pub use access_resolver::{
@@ -81,30 +91,13 @@ pub fn format_lock_held(holder: &str) -> String {
 /// approval-time message).
 pub const LOCK_HELD_AT_CALL: &str = "Another Claude session is currently using the computer. Wait for the user to acknowledge it is finished (stop button in the Claude window), or find a non-computer-use approach if one is readily apparent.";
 
-/// Enter-notification message when the Esc abort hotkey is registered
-/// (`wrapper.tsx` `computer_use_enter`).
-///
-/// Not currently wired to a live call site. It needs a system-wide (NOT
-/// terminal-focus-scoped) Esc capture — the whole point is aborting a
-/// computer-use action while focus has moved to whatever app the model is
-/// driving — which on macOS means a `CGEventTap` in
-/// `platform-macos-computer-control` (the only crate here allowed `unsafe`
-/// for exactly this kind of native seam). That capability doesn't exist yet
-/// and isn't interactively testable in a non-GUI sandbox, so it's
-/// deliberately not implemented blind; [`NOTIFY_ENTER_CTRL_C`] is the
-/// already-real fallback (the TUI's existing Ctrl+C-cancels-the-turn path
-/// works today regardless of which app has focus, as long as the terminal
-/// itself is still the foreground window).
+/// Exact native reference messages. Runtime progress uses these messages with
+/// the product name substituted; foreground registration and turn cleanup live
+/// in `escape_protocol`, backed by the macOS global Escape event tap.
 pub const NOTIFY_ENTER_ESC: &str = "Claude is using your computer · press Esc to stop";
-/// Enter-notification message when only Ctrl+C is available. Same "not yet
-/// wired to a live call site" status as [`NOTIFY_ENTER_ESC`] — showing
-/// EITHER enter notification needs a terminal-status surface this tool
-/// crate has no channel to (`tui-core`'s bridge pattern, e.g.
-/// `computer_access_bridge`, is the shape a future one would take).
+/// Fallback selected only when the host cannot register the Escape hook.
 pub const NOTIFY_ENTER_CTRL_C: &str = "Claude is using your computer · press Ctrl+C to stop";
-/// Exit-notification message at turn end (`cleanup.ts` `computer_use_exit`).
-/// Same "not yet wired" status — pairs with [`NOTIFY_ENTER_ESC`]/
-/// [`NOTIFY_ENTER_CTRL_C`].
+/// Exit notification paired with foreground registration at turn cleanup.
 pub const NOTIFY_EXIT: &str = "Claude is done using your computer";
 
 /// `ComputerTool` — screenshot + mouse/keyboard/clipboard/app automation.
@@ -121,6 +114,14 @@ pub struct ComputerTool {
     /// `$HOME/.lingxi` (or a concurrently-running real session's lock).
     lock_home: std::path::PathBuf,
     runtime: std::sync::Arc<Mutex<ExecutionState>>,
+    protocol: std::sync::Arc<Mutex<session_protocol::ProtocolState>>,
+    protocol_display: std::sync::Arc<Mutex<display_protocol::DisplayProtocolState>>,
+    advertise_combined: bool,
+    calls_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    escape_aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    escape_calls: std::sync::Arc<Mutex<escape_protocol::EscapeCalls>>,
+    escape_lifecycle: std::sync::Arc<Mutex<()>>,
+    escape_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ComputerTool {
@@ -150,6 +151,14 @@ impl ComputerTool {
             access_resolver,
             lock_home: lock::lingxi_config_home_dir(),
             runtime: std::sync::Arc::new(Mutex::new(ExecutionState::default())),
+            protocol: Default::default(),
+            protocol_display: Default::default(),
+            advertise_combined: true,
+            calls_in_flight: Default::default(),
+            escape_aborted: Default::default(),
+            escape_calls: Default::default(),
+            escape_lifecycle: Default::default(),
+            escape_generation: Default::default(),
         }
     }
 
@@ -383,6 +392,34 @@ fn multi_display_note(
 /// codebase already uses (`tool_api::util::image_budget`), since a raw
 /// Retina screenshot (often 3000+ px wide) is well past both Anthropic's
 /// image size limit and this crate's own multi-MB context-bloat concern.
+// Internal transport only: the MCP display adapter applies its own pinned
+// image budget once, to the actual capture pixels. Never exposed as input.
+#[derive(Clone, Copy)]
+enum CaptureFormat {
+    Generic,
+    Png,
+    Native {
+        width: u32,
+        height: u32,
+        region: Option<[f64; 4]>,
+    },
+}
+
+fn raw_image_action_result(
+    shot: lingxi_core::host::computer_control::Screenshot,
+    extra_note: Option<&str>,
+) -> Value {
+    use base64::Engine;
+    let mut data = json!({"type":"image","file":{
+        "base64":base64::engine::general_purpose::STANDARD.encode(&shot.png_bytes),
+        "type":"image/png", "originalSize":shot.png_bytes.len()
+    },"width":shot.width,"height":shot.height});
+    if let Some(note) = extra_note {
+        data["note"] = json!(note);
+    }
+    data
+}
+
 fn image_action_result(
     shot: lingxi_core::host::computer_control::Screenshot,
     extra_note: Option<&str>,
@@ -490,7 +527,7 @@ impl Tool for ComputerTool {
         // behind a subscription tier + GrowthBook flag (`getChicagoEnabled`)
         // — LingXi has neither concept, so backend-presence is the closest
         // faithful analog: "can this actually do anything."
-        self.ctx.computer_control.is_some()
+        self.advertise_combined && self.ctx.computer_control.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         4096
@@ -577,79 +614,10 @@ impl Tool for ComputerTool {
         ctx: ToolUseContext,
         progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let action = input
-            .get_property("action")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("`action` is required".into()))?
-            .to_string();
-
-        if let Err(error) = self.check_cancel(&ctx) {
-            self.invalidate_frame(&ctx).await;
-            self.release_owned_inputs(&ctx).await?;
-            return Err(error);
-        }
-        self.validate_final_input(&action, &input)?;
-        if let Err(error) = self.sync_policy(&ctx).await {
-            self.invalidate_frame(&ctx).await;
-            self.release_owned_inputs(&ctx).await?;
-            return Err(error);
-        }
-        if !matches!(
-            action.as_str(),
-            "request_access" | "key_up" | "left_mouse_up"
-        ) {
-            self.check_live_os_permissions(&ctx).await?;
-        }
-        let dirty = {
-            let runtime = self
-                .runtime
-                .lock()
-                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
-            runtime.backend_inputs_dirty
-                || runtime.backend_mouse_dirty
-                || runtime.observation_invalidation_pending
-        };
-        if dirty {
-            self.release_owned_inputs(&ctx).await?;
-        }
-        let _lease = self.acquire_call(&action, &ctx).await?;
-        if action != "screenshot" {
-            let owner = Self::owner(&ctx).await;
-            self.runtime
-                .lock()
-                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
-                .pending_observations
-                .remove(&owner);
-        }
-        self.check_cancel(&ctx)?;
-
-        let result = match action.as_str() {
-            "request_access" => self.handle_request_access(&input, &ctx).await,
-            "list_granted_applications" => Ok(self.handle_list_granted()),
-            "switch_display" => {
-                self.invalidate_frame(&ctx).await;
-                self.handle_switch_display(&input).await
-            }
-            "computer_batch" => self.handle_batch(&input, &ctx, &progress_tx).await,
-            _ => self
-                .execute_one(&action, &input, &ctx)
-                .await
-                .map(|data| finish(data, &action)),
-        };
-        if result.is_err()
-            || ctx
-                .cancel
-                .as_ref()
-                .is_some_and(|token| token.is_cancelled())
-        {
-            self.invalidate_frame(&ctx).await;
-            self.release_owned_inputs(&ctx).await?;
-        }
-        if action != "computer_batch" {
-            self.check_cancel(&ctx)?;
-        }
-        result
+        self.call_with_capture_format(input, ctx, progress_tx, CaptureFormat::Generic)
+            .await
     }
+
     fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
         tool_api::tool_result_media::computer_batch_model_text(result)
     }
@@ -734,7 +702,24 @@ impl Tool for ComputerTool {
         Ok(())
     }
     async fn cleanup_computer_inputs(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        self.release_owned_inputs(ctx).await
+        // Best-effort restoration of this owner's saved clipboard is cleanup,
+        // including cancellation/revocation, not a new model clipboard request.
+        let clipboard_result = self.restore_protocol_clipboard(ctx).await;
+        let escape_result = self.stop_escape_registration(ctx).await;
+        let sequence_result = self.end_computer_sequence(ctx).await;
+        let cleanup_result = self.release_owned_inputs(ctx).await;
+        let owner = Self::owner(ctx).await;
+        let mut protocol = self
+            .protocol
+            .lock()
+            .map_err(|_| ToolError::Internal("computer protocol state poisoned".into()))?;
+        protocol.background.clear_owner(&owner);
+        protocol.teach_active = false;
+        clipboard_result?;
+        cleanup_result?;
+        sequence_result?;
+        escape_result?;
+        Ok(())
     }
 }
 
@@ -796,16 +781,18 @@ impl ComputerTool {
             Some(cc) => cc.check_os_permissions().await,
             None => None,
         };
-        let tcc_state = self
-            .read_os_permissions(ctx)
-            .await?
-            .or(prompted_os_permissions)
-            .and_then(|(acc, rec)| {
-                (!acc || !rec).then_some(permission::computer_access::TccState {
-                    accessibility: acc,
-                    screen_recording: rec,
-                })
-            });
+        // Explicit setup uses the OS grant result, independently of live AX
+        // target availability. Effects still require read_os_permissions.
+        let setup_permissions = match prompted_os_permissions {
+            Some(state) => Some(state),
+            None => self.read_os_permissions(ctx).await?,
+        };
+        let tcc_state = setup_permissions.and_then(|(acc, rec)| {
+            (!acc || !rec).then_some(permission::computer_access::TccState {
+                accessibility: acc,
+                screen_recording: rec,
+            })
+        });
         self.check_cancel(ctx)?;
         self.check_policy_revision(revision.as_deref())?;
         if let Some(tcc_state) = tcc_state {
@@ -818,6 +805,7 @@ impl ComputerTool {
                 clipboard_write: false,
                 system_key_combos: false,
                 tcc_state: Some(tcc_state),
+                interaction: None,
             };
             self.check_cancel(ctx)?;
             if let Some(cancel) = &ctx.cancel {
@@ -832,16 +820,14 @@ impl ComputerTool {
             } else {
                 None
             };
-            let granted = self.read_os_permissions(ctx).await?.or(prompted) == Some((true, true));
+            let permissions = match prompted {
+                Some(state) => Some(state),
+                None => self.read_os_permissions(ctx).await?,
+            }
+            .unwrap_or((false, false));
             self.check_cancel(ctx)?;
             self.check_policy_revision(revision.as_deref())?;
-            if !granted {
-                return Err(ToolError::PermissionDenied("macOS Accessibility / Screen Recording permissions are still not granted. Grant them in System Settings before retrying.".into()));
-            }
-            return Ok(finish(
-                json!({"message":"macOS Accessibility and Screen Recording are now both granted. Call request_access again to select applications."}),
-                "request_access",
-            ));
+            return Ok(permission_result::tcc_setup_result(permissions));
         }
         let installed = if let Some(cc) = &self.ctx.computer_control {
             cc.list_installed_apps().await.unwrap_or_default()
@@ -923,6 +909,7 @@ impl ComputerTool {
             clipboard_write: flags.clipboard_write,
             system_key_combos: flags.system_key_combos,
             tcc_state: None,
+            interaction: None,
         };
         self.check_cancel(ctx)?;
         let response = if missing.is_empty()
@@ -1112,7 +1099,10 @@ impl ComputerTool {
                 ));
             }
             let _ = (ctx, progress_tx); // batch sub-actions don't emit per-item progress yet
-            match self.execute_one(sub_action, &item, ctx).await {
+            match self
+                .execute_one(sub_action, &item, ctx, CaptureFormat::Generic)
+                .await
+            {
                 Ok(data) => results.push(json!({ "action": sub_action, "result": data })),
                 Err(e) => {
                     self.invalidate_frame(ctx).await;
@@ -1212,11 +1202,102 @@ impl ComputerTool {
     // splitting it up would just scatter the dispatch table across more
     // indirection without shrinking it.
     #[allow(clippy::too_many_lines)]
+    async fn call_with_capture_format(
+        &self,
+        input: Utf16JsonProjection,
+        ctx: ToolUseContext,
+        progress_tx: ToolProgressSender,
+        capture_format: CaptureFormat,
+    ) -> Result<ToolCallResult, ToolError> {
+        let _flight = escape_protocol::CallFlight::begin(
+            &self.calls_in_flight,
+            &self.escape_calls,
+            Self::owner(&ctx).await,
+            ctx.cancel.clone(),
+        );
+        let action = input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| ToolError::InvalidInput("`action` is required".into()))?
+            .to_string();
+
+        if let Err(error) = self.check_cancel(&ctx) {
+            self.invalidate_frame(&ctx).await;
+            self.release_owned_inputs(&ctx).await?;
+            return Err(error);
+        }
+        self.validate_final_input(&action, &input)?;
+        if let Err(error) = self.sync_policy(&ctx).await {
+            self.invalidate_frame(&ctx).await;
+            self.release_owned_inputs(&ctx).await?;
+            return Err(error);
+        }
+        if !matches!(
+            action.as_str(),
+            "request_access" | "key_up" | "left_mouse_up"
+        ) {
+            self.check_live_os_permissions(&ctx).await?;
+        }
+        let dirty = {
+            let runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+            runtime.backend_inputs_dirty
+                || runtime.backend_mouse_dirty
+                || runtime.observation_invalidation_pending
+        };
+        if dirty {
+            self.release_owned_inputs(&ctx).await?;
+        }
+        let _lease = self.acquire_call(&action, &ctx).await?;
+        if _lease.is_some() {
+            self.ensure_escape_registration(&ctx, &progress_tx).await?;
+        }
+        if action != "screenshot" {
+            let owner = Self::owner(&ctx).await;
+            self.runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .pending_observations
+                .remove(&owner);
+        }
+        self.check_cancel(&ctx)?;
+
+        let result = match action.as_str() {
+            "request_access" => self.handle_request_access(&input, &ctx).await,
+            "list_granted_applications" => Ok(self.handle_list_granted()),
+            "switch_display" => {
+                self.invalidate_frame(&ctx).await;
+                self.handle_switch_display(&input).await
+            }
+            "computer_batch" => self.handle_batch(&input, &ctx, &progress_tx).await,
+            _ => self
+                .execute_one(&action, &input, &ctx, capture_format)
+                .await
+                .map(|data| finish(data, &action)),
+        };
+        if result.is_err()
+            || ctx
+                .cancel
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+        {
+            self.invalidate_frame(&ctx).await;
+            self.release_owned_inputs(&ctx).await?;
+        }
+        if action != "computer_batch" {
+            self.check_cancel(&ctx)?;
+        }
+        result
+    }
+
     async fn execute_one(
         &self,
         action: &str,
         input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
+        capture_format: CaptureFormat,
     ) -> Result<Value, ToolError> {
         // `wait` carries no host capability — it only pauses. Handled before
         // the seam check so it succeeds even when no ComputerControl is
@@ -1407,7 +1488,14 @@ impl ComputerTool {
                 self.check_live_os_permissions(ctx).await?;
             }
             let value = self
-                .execute_backend(action, input, required_action, ctx, revision.as_deref())
+                .execute_backend(
+                    action,
+                    input,
+                    required_action,
+                    ctx,
+                    revision.as_deref(),
+                    capture_format,
+                )
                 .await?;
             self.check_policy_revision(revision.as_deref())?;
             if !matches!(action, "key_up" | "left_mouse_up") {
@@ -1558,10 +1646,13 @@ impl ComputerTool {
         Ok(Some(CallLease { tool: self }))
     }
     fn check_cancel(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        if ctx
-            .cancel
-            .as_ref()
-            .is_some_and(|token| token.is_cancelled())
+        if self
+            .escape_aborted
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || ctx
+                .cancel
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
         {
             Err(ToolError::Aborted)
         } else {
@@ -1773,6 +1864,56 @@ impl ComputerTool {
             validate::require_coord(input, "coordinate")
         }
     }
+    async fn native_filtered_capture(
+        &self,
+        region: Option<[f64; 4]>,
+        width: u32,
+        height: u32,
+        allowed: &[String],
+        ctx: &ToolUseContext,
+    ) -> Result<Option<Value>, ToolError> {
+        use base64::Engine;
+        use lingxi_core::host::computer_control::FilteredCaptureRequest;
+        let backend = self
+            .ctx
+            .computer_control
+            .as_ref()
+            .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?;
+        let Some(geometry) = backend.frame_geometry().await.map_err(|e| map_err(&e))? else {
+            return Ok(None);
+        };
+        let request = FilteredCaptureRequest {
+            display_id: geometry.display_id,
+            source_rect: region,
+            output_width: width,
+            output_height: height,
+        };
+        let Some(capture) = backend
+            .capture_filtered_display(&request, allowed)
+            .await
+            .map_err(|e| map_err(&e))?
+        else {
+            return Ok(None);
+        };
+        if capture.geometry != geometry
+            || capture.output_width != width
+            || capture.output_height != height
+            || backend.frame_geometry().await.map_err(|e| map_err(&e))? != Some(geometry)
+        {
+            return Err(ToolError::PermissionDenied(
+                "Display geometry changed during native capture; take a fresh screenshot.".into(),
+            ));
+        }
+        let mut data = json!({"type":"image","file":{"base64":base64::engine::general_purpose::STANDARD.encode(&capture.jpeg_bytes),"type":"image/jpeg","originalSize":capture.jpeg_bytes.len(),"dimensions":{"originalWidth":capture.source_width,"originalHeight":capture.source_height,"displayWidth":width,"displayHeight":height}},"width":capture.source_width,"height":capture.source_height,"native_mcp_encoded":true,"screenshotFiltering":"native"});
+        if let Some(region) = region {
+            self.invalidate_frame(ctx).await;
+            data["capture_region"] = json!(region);
+        } else {
+            self.record_frame(&mut data, ctx).await?;
+        }
+        Ok(Some(data))
+    }
+
     async fn execute_backend(
         &self,
         action: &str,
@@ -1780,6 +1921,7 @@ impl ComputerTool {
         required_action: &str,
         ctx: &ToolUseContext,
         revision: Option<&str>,
+        capture_format: CaptureFormat,
     ) -> Result<Value, ToolError> {
         let cc = self
             .ctx
@@ -1828,6 +1970,14 @@ impl ComputerTool {
         match action {
             "screenshot" => {
                 let allowed = self.allowed_bundle_ids()?;
+                if let CaptureFormat::Native { width, height, .. } = capture_format {
+                    if let Some(data) = self
+                        .native_filtered_capture(None, width, height, &allowed, ctx)
+                        .await?
+                    {
+                        return Ok(data);
+                    }
+                }
                 let s = cc
                     .screenshot_for_apps(&allowed)
                     .await
@@ -1839,7 +1989,11 @@ impl ComputerTool {
                     Ok(displays) => multi_display_note(&displays),
                     Err(_) => None,
                 };
-                let mut data = image_action_result(s, note.as_deref())?;
+                let mut data = if !matches!(capture_format, CaptureFormat::Generic) {
+                    raw_image_action_result(s, note.as_deref())
+                } else {
+                    image_action_result(s, note.as_deref())?
+                };
                 data["screenshotFiltering"] = json!(cc.screenshot_filtering());
                 self.record_frame(&mut data, ctx).await?;
                 Ok(data)
@@ -2083,6 +2237,9 @@ impl ComputerTool {
                         .lock()
                         .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
                         .backend_inputs_dirty = true;
+                    if keys.len() == 1 && canonical_key(&keys[0]) == "escape" {
+                        cc.notify_expected_escape();
+                    }
                     let result = if input.get_property("keys").is_some() {
                         cc.key_chord(keys.clone()).await
                     } else {
@@ -2152,12 +2309,29 @@ impl ComputerTool {
             "zoom" => {
                 let (x0, y0, x1, y1) = validate::require_region(input)?;
                 let allowed = self.allowed_bundle_ids()?;
+                if let CaptureFormat::Native {
+                    width,
+                    height,
+                    region,
+                } = capture_format
+                {
+                    if let Some(data) = self
+                        .native_filtered_capture(region, width, height, &allowed, ctx)
+                        .await?
+                    {
+                        return Ok(data);
+                    }
+                }
                 let s = cc
                     .zoom_for_apps(x0, y0, x1 - x0, y1 - y0, &allowed)
                     .await
                     .map_err(|e| map_err(&e))?;
                 self.invalidate_frame(ctx).await;
-                let mut data = image_action_result(s, None)?;
+                let mut data = if !matches!(capture_format, CaptureFormat::Generic) {
+                    raw_image_action_result(s, None)
+                } else {
+                    image_action_result(s, None)?
+                };
                 data["capture_region"] = json!([x0, y0, x1, y1]);
                 Ok(data)
             }
@@ -2240,6 +2414,9 @@ impl ComputerTool {
             {
                 let _ = self.release_keys(&added).await;
                 return Err(error);
+            }
+            if key == "escape" {
+                cc.notify_expected_escape();
             }
             if let Err(error) = cc.key_down(key.clone()).await {
                 let _ = self.release_keys(&added).await;
@@ -2481,6 +2658,19 @@ fn batch_failure_result(
     result
 }
 
+/// Exact in-process MCP names for the same trusted host profile used during
+/// registration. Desktop uses these for its dedicated approval preauthorization.
+#[must_use]
+pub fn protocol_tool_names_for_host(
+    backend: &dyn lingxi_core::host::computer_control::ComputerControl,
+    supports_interactions: bool,
+) -> Vec<String> {
+    protocol_tools::tool_names(&session_protocol::protocol_capabilities_for_host(
+        Some(backend),
+        supports_interactions,
+    ))
+}
+
 /// Register the `computer` tool against `reg`, denying every
 /// `request_access` call (no live UI to ask). Composition roots with a live
 /// TUI should call [`register_all_with_access_resolver`] instead.
@@ -2489,7 +2679,11 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
     if let Some(browser) = browser::BrowserTool::from_environment(Arc::new(DenyAllResolver)) {
         reg.register_builtin(Arc::new(browser));
     }
-    reg.register_builtin(Arc::new(ComputerTool::new(ctx)));
+    let mut computer = ComputerTool::new(ctx);
+    computer.advertise_combined = false;
+    let owner = Arc::new(computer);
+    reg.register_builtin(owner.clone());
+    protocol_tools::register(reg, owner);
 }
 
 /// Register the `computer` tool with an explicit `request_access` resolver —
@@ -2504,10 +2698,11 @@ pub fn register_all_with_access_resolver(
     if let Some(browser) = browser::BrowserTool::from_environment(access_resolver.clone()) {
         reg.register_builtin(Arc::new(browser));
     }
-    reg.register_builtin(Arc::new(ComputerTool::with_access_resolver(
-        ctx,
-        access_resolver,
-    )));
+    let mut computer = ComputerTool::with_access_resolver(ctx, access_resolver);
+    computer.advertise_combined = false;
+    let owner = Arc::new(computer);
+    reg.register_builtin(owner.clone());
+    protocol_tools::register(reg, owner);
 }
 
 #[cfg(test)]
@@ -3408,6 +3603,8 @@ mod integration_tests {
                     clipboard_read: false,
                     clipboard_write: false,
                     system_key_combos: false,
+                    interaction_action: None,
+                    preferred_mode: None,
                 }
             }
         }

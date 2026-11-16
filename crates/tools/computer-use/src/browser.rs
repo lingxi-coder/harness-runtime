@@ -315,6 +315,7 @@ impl BrowserTool {
                 clipboard_write: false,
                 system_key_combos: false,
                 tcc_state: None,
+                interaction: None,
             };
             let decision = if let Some(cancel) = &ctx.cancel {
                 tokio::select! { biased; () = cancel.cancelled() => return Err(ToolError::Aborted), response = self.resolver.resolve(request) => response }

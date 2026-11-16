@@ -1,4 +1,4 @@
-mod capture;
+pub(crate) mod capture;
 
 pub mod impl_monitor;
 pub mod impl_video_recorder;

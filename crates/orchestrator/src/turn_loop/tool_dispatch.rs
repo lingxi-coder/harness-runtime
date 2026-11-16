@@ -5362,7 +5362,12 @@ pub(super) fn main_tool_result_content_blocks(
         return None;
     }
     if is_mcp {
-        return data.array_len("").map(|_| data.clone());
+        return data.array_len("").map(|_| {
+            Utf16JsonProjection::array(
+                tool_api::tool_result_media::media_content_blocks(data).unwrap_or_default(),
+            )
+            .expect("MCP media blocks form an array")
+        });
     }
     let blocks = match name {
         "ToolSearch" => source_tool_search_reference_blocks(data),
