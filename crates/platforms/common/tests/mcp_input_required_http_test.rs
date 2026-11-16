@@ -210,7 +210,7 @@ async fn retry_timeout_aborts_actual_http_socket_and_keeps_connection_usable() {
         )
         .await;
         let retry = read_http_request(&mut socket).await;
-        requests.lock().unwrap().push(retry);
+        requests.lock().unwrap().push(retry.clone());
         let mut byte = [0];
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
@@ -220,6 +220,23 @@ async fn retry_timeout_aborts_actual_http_socket_and_keeps_connection_usable() {
             0,
             "cancel must disconnect this POST before response headers"
         );
+        // 0128ba5a (Claude Code 2.1.322): a timed-out request is also
+        // cancelled on the wire with its own notification POST.
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let cancelled = read_http_request(&mut socket).await;
+        assert_eq!(cancelled["method"], "notifications/cancelled");
+        assert_eq!(cancelled["params"]["requestId"], retry["id"]);
+        requests.lock().unwrap().push(cancelled);
+        {
+            use tokio::io::AsyncWriteExt;
+            socket
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        }
+        drop(socket);
         let (mut socket, _) = listener.accept().await.unwrap();
         let followup = read_http_request(&mut socket).await;
         requests.lock().unwrap().push(followup.clone());
@@ -277,8 +294,16 @@ async fn retry_timeout_aborts_actual_http_socket_and_keeps_connection_usable() {
 
     server.await.unwrap();
     let requests = captured.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(requests.iter().all(|r| r["method"] == "tools/call"));
+    let methods: Vec<_> = requests.iter().map(|r| r["method"].clone()).collect();
+    assert_eq!(
+        methods,
+        [
+            "tools/call",
+            "tools/call",
+            "notifications/cancelled",
+            "tools/call"
+        ]
+    );
 }
 #[tokio::test]
 async fn cancelled_queued_post_never_reaches_http_server() {
@@ -309,7 +334,8 @@ async fn cancelled_queued_post_never_reaches_http_server() {
     let calls = state.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0["method"], "live");
-    assert_eq!(calls[0].0["id"], 2);
+    // SDK-compatible HTTP ids start at 0 (b622f461); the dropped call took 0.
+    assert_eq!(calls[0].0["id"], 1);
     connection.close();
     server.abort();
 }
@@ -451,14 +477,15 @@ async fn session_race_reply(
     use axum::response::IntoResponse;
     let id = request["id"].as_i64().unwrap();
     state.headers.lock().unwrap().push((id, headers));
-    if id == 1 {
+    // SDK-compatible HTTP ids start at 0 (b622f461).
+    if id == 0 {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let mut response = Json(json!({"jsonrpc":"2.0","id":id,"result":{"ok":true}})).into_response();
-    if id <= 2 {
+    if id <= 1 {
         response.headers_mut().insert(
             "mcp-session-id",
-            axum::http::HeaderValue::from_static(if id == 1 {
+            axum::http::HeaderValue::from_static(if id == 0 {
                 "late-first"
             } else {
                 "early-second"
@@ -497,7 +524,7 @@ async fn concurrent_initialization_session_headers_follow_response_arrival_order
     first.wait_value().await.unwrap();
     let _: Value = connection.call("ping", json!({})).await.unwrap();
     let headers = state.headers.lock().unwrap();
-    let (_, last) = headers.iter().find(|(id, _)| *id == 3).unwrap();
+    let (_, last) = headers.iter().find(|(id, _)| *id == 2).unwrap();
     assert_eq!(last["mcp-session-id"], "late-first");
     connection.close();
     server.abort();

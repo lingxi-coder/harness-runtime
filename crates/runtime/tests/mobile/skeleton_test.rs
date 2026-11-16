@@ -279,9 +279,12 @@ fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_pro
 
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1, "one slash dispatch makes one model request");
+        // The writer keys the project directory by the canonical cwd
+        // (`/private/var/...` on macOS), not the spelling the config holds.
+        let canonical_cwd = std::fs::canonicalize(&cfg.cwd).expect("canonical cwd");
         let transcript_path = session::jsonl::session_path(
             &cfg.lingxi_home,
-            &cfg.cwd.to_string_lossy(),
+            &canonical_cwd.to_string_lossy(),
             &session_id,
         );
         let transcript = std::fs::read_to_string(&transcript_path)
@@ -447,10 +450,18 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
 
         assert_eq!(session_ids.len(), 2);
         assert_ne!(session_ids[0], session_ids[1]);
-        assert_eq!(listed.len(), 2, "each completed session must be listed");
+        // Since 3ca67231/4676b43f the boot session is anchored as a persisted
+        // empty session, so the catalog lists it beside the two completed ones.
+        assert_eq!(listed.len(), 3, "boot anchor plus each completed session");
         assert!(session_ids
             .iter()
             .all(|id| listed_ids.contains(id.as_str())));
-        assert!(listed.iter().all(|row| row.message_count >= 2));
+        for row in &listed {
+            if session_ids.iter().any(|id| id == &row.uuid) {
+                assert!(row.message_count >= 2, "completed session {row:?}");
+            } else {
+                assert_eq!(row.message_count, 0, "only the empty boot anchor: {row:?}");
+            }
+        }
     });
 }

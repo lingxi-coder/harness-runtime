@@ -179,6 +179,29 @@ pub fn assemble_pool(
 pub(crate) struct AccountRuntimeSource {
     base: std::sync::Arc<llm_runtime::ModelRuntime>,
     pool: std::sync::Arc<llm_runtime::accounts::AccountPool>,
+    /// The last projection, keyed by its exact inputs. Rebuilding the routing
+    /// catalog costs ~100 ms in debug builds and runs on every catalog read.
+    cached: std::sync::Mutex<Option<AccountRuntimeProjection>>,
+}
+
+#[derive(Debug)]
+struct AccountRuntimeProjection {
+    config: llm_runtime::ClientConfig,
+    snapshot: lingxi_core::host::provider_accounts::AccountSnapshot,
+    runtime: std::sync::Arc<llm_runtime::ModelRuntime>,
+}
+
+impl AccountRuntimeSource {
+    fn new(
+        base: std::sync::Arc<llm_runtime::ModelRuntime>,
+        pool: std::sync::Arc<llm_runtime::accounts::AccountPool>,
+    ) -> Self {
+        Self {
+            base,
+            pool,
+            cached: std::sync::Mutex::new(None),
+        }
+    }
 }
 impl AccountRuntimeSource {
     pub(crate) fn configuration(&self) -> llm_runtime::ClientConfig {
@@ -231,8 +254,28 @@ impl llm_runtime::client::ModelRuntimeSource for AccountRuntimeSource {
             // Fail closed if a binding disappeared from the live catalog.
             config.providers.clear();
         }
-        match template.reconfigured_with_account_snapshot(config, &snapshot) {
-            Ok(runtime) => runtime,
+        if let Some(cached) = self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|cached| cached.config == config && cached.snapshot == snapshot)
+        {
+            return cached.runtime.with_account_owner_state(template);
+        }
+        match template.reconfigured_with_account_snapshot(config.clone(), &snapshot) {
+            Ok(runtime) => {
+                *self
+                    .cached
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(AccountRuntimeProjection {
+                        config,
+                        snapshot,
+                        runtime: runtime.clone(),
+                    });
+                runtime
+            }
             Err(_) => {
                 let mut config = base.configuration();
                 config.providers.clear();
@@ -251,10 +294,10 @@ pub(crate) fn attach_account_runtime(
     pool: std::sync::Arc<llm_runtime::accounts::AccountPool>,
     registry: &crate::desktop::FusionCatalogRegistry,
 ) -> llm_runtime::ModelRuntime {
-    let source = std::sync::Arc::new(AccountRuntimeSource {
-        base: std::sync::Arc::new(runtime.clone()),
-        pool: pool.clone(),
-    });
+    let source = std::sync::Arc::new(AccountRuntimeSource::new(
+        std::sync::Arc::new(runtime.clone()),
+        pool.clone(),
+    ));
     registry
         .account_sources
         .lock()
@@ -270,10 +313,10 @@ pub(crate) fn attach_mobile_account_runtime(
     llm_runtime::ModelRuntime,
     std::sync::Arc<AccountRuntimeSource>,
 ) {
-    let source = std::sync::Arc::new(AccountRuntimeSource {
-        base: std::sync::Arc::new(runtime.clone()),
-        pool: pool.clone(),
-    });
+    let source = std::sync::Arc::new(AccountRuntimeSource::new(
+        std::sync::Arc::new(runtime.clone()),
+        pool.clone(),
+    ));
     (
         runtime
             .with_account_pool(pool)
@@ -635,6 +678,106 @@ mod logical_call_directory_tests {
             self.0.lock().unwrap().push(event);
         }
     }
+    #[test]
+    fn account_projection_is_reused_until_the_account_snapshot_changes() {
+        use llm_runtime::client::ModelRuntimeSource;
+        let root = tempfile::tempdir().unwrap();
+        let mut template = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "deepseek")
+            .unwrap();
+        template.profile_name = "test".into();
+        template.connection.group = Some("test".into());
+        template.models.truncate(1);
+        let mut assembled = provider_config::Assembled {
+            client_config: llm_runtime::ClientConfig {
+                providers: vec![template],
+            },
+            pricing: cost::PricingCatalog::empty(),
+            chains: Default::default(),
+            credential_sources: vec![],
+            warnings: vec![],
+        };
+        let accounts: Vec<_> = (0..2)
+            .map(|priority| {
+                let id = uuid::Uuid::new_v4().to_string();
+                AccountMetadata {
+                    account_id: id.clone(),
+                    provider_id: "test".into(),
+                    display_name: format!("Account {priority}"),
+                    auth_kind: AccountAuthKind::ApiKey,
+                    execution_binding_id: "test".into(),
+                    credential_ref: CredentialRef {
+                        store_scope: "test-domain".into(),
+                        secret_ref: format!("acct.{id}"),
+                    },
+                    enabled: true,
+                    user_priority: priority,
+                    config_revision: 1,
+                    identity_generation: 1,
+                }
+            })
+            .collect();
+        let snapshot = AccountSnapshot {
+            store_scope: "test-domain".into(),
+            config_revision: 1,
+            accounts,
+            health: vec![],
+            model_entitlements: vec![],
+            scoped_health: vec![],
+            model_availability: vec![],
+            provider_policies: Default::default(),
+        };
+        let directory = Arc::new(RwLock::new(snapshot.clone()));
+        let pool = Arc::new(llm_runtime::accounts::AccountPool::from_directory(
+            directory.clone(),
+            Arc::new(
+                FileAccountPoolStore::new(root.path().to_owned())
+                    .with_directory_authority(directory),
+            ),
+        ));
+        provider_config::assemble_account_profiles(&mut assembled, &snapshot.accounts).unwrap();
+        let runtime = llm_runtime::ModelRuntime::from_config(assembled.client_config).unwrap();
+        let (runtime, source) = attach_mobile_account_runtime(runtime, pool);
+        let profile_names = |runtime: &llm_runtime::ModelRuntime| {
+            runtime
+                .configuration()
+                .providers
+                .into_iter()
+                .map(|profile| profile.profile_name)
+                .collect::<Vec<_>>()
+        };
+        let removed = format!("account.{}", snapshot.accounts[1].account_id);
+
+        let first = source.current(&runtime);
+        let cached = source
+            .cached
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|projection| Arc::clone(&projection.runtime))
+            .expect("first read caches its projection");
+        let second = source.current(&runtime);
+        assert!(Arc::ptr_eq(
+            &cached,
+            &source.cached.lock().unwrap().as_ref().unwrap().runtime
+        ));
+        assert_eq!(profile_names(&first), profile_names(&second));
+        assert!(profile_names(&second).contains(&removed));
+
+        let mut changed = snapshot.clone();
+        changed.config_revision = 2;
+        changed.accounts.truncate(1);
+        source.refresh(changed).unwrap();
+        let third = source.current(&runtime);
+        assert!(!Arc::ptr_eq(
+            &cached,
+            &source.cached.lock().unwrap().as_ref().unwrap().runtime
+        ));
+        assert!(!profile_names(&third).contains(&removed));
+    }
+
     #[tokio::test]
     async fn existing_process_reloads_external_reorder_and_removal_at_logical_boundary() {
         let root = tempfile::tempdir().unwrap();

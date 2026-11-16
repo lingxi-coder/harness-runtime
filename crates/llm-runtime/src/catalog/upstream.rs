@@ -190,8 +190,8 @@ pub fn catalog_from_profiles(profiles: Vec<wire::ProviderProfile>) -> BuiltinCat
         chatgpt.supports_websockets = true;
         chatgpt.pricing.billing_mode = Some(lingxi_core::host::ModelBillingMode::Subscription);
         // Served to ChatGPT sign-in, in OpenAI's recommended order (newest
-        // first; the picker keeps catalog order). GPT-5.6 stays routable while
-        // OpenAI keeps serving it during the GPT-6 rollout.
+        // first; the picker keeps catalog order). GPT-5.6 left this list in
+        // d3b14318.
         const CHATGPT_SIGN_IN_MODELS: &[&str] = &[
             "gpt-6-astra",
             "gpt-6.1-sol",

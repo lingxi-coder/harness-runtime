@@ -1235,10 +1235,12 @@ async fn standard_refresh_adopts_a_fresh_concurrent_credential_winner() {
     registry
         .connect(config)
         .await
-        .expect("stale client rejection falls back for this connect");
+        .expect("stale client rejection adopts the concurrent winner");
+    // Since 3d547f9f a superseded refresh adopts the valid concurrent winner
+    // rather than replaying the credential it started from.
     assert_eq!(
         spec_auth_header(&transport.last_spec()).as_deref(),
-        Some("Bearer access-current")
+        Some("Bearer access-rotated")
     );
     let current = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
         .await

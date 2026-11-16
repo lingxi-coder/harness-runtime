@@ -123,7 +123,7 @@ async fn ui_lifecycle_updates_roster_before_events_and_survives_in_place_switche
             vec![],
             None,
             None,
-            lingxi_core::host::ResumeRuntimeSnapshot::default(),
+            orchestrator::test_support::code_resume_runtime_snapshot(resumed_id),
         )
         .await
         .unwrap();

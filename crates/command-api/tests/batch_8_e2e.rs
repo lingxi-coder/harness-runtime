@@ -144,11 +144,26 @@ async fn autocompact_with_no_env_reports_auto_window() {
     // With no `LINGXI_AUTO_COMPACT_WINDOW` override the headless reporter shows
     // the model-default ("auto") status block.
     std::env::remove_var("LINGXI_AUTO_COMPACT_WINDOW");
-    let (d, _h, root) = fresh("autocompact");
+    let (d, h, root) = fresh("autocompact");
+    // Since 5f2a4641 the command reads the selected route's resolution from
+    // the handle instead of rediscovering ambient settings.
+    h.set_auto_compact_command_snapshot(Some(
+        lingxi_core::host::auto_compact::AutoCompactCommandSnapshot {
+            settings_key: "claude-opus-4-6".into(),
+            display_name: "Opus 4.6".into(),
+            enabled: true,
+            window: 200_000,
+            configured: 200_000,
+            source: "auto".into(),
+            recommend_auto: false,
+            override_warning: false,
+            user_settings_path: None,
+        },
+    ));
     let out = handled(&d, "/autocompact").await;
     let text = out.string_at("").unwrap();
     assert!(
-        text.starts_with("Auto-compact window: auto\n"),
+        text.starts_with("Auto-compact window for Opus 4.6: auto\n"),
         "unexpected /autocompact output: {text}"
     );
     assert!(text.contains("The actual threshold is the minimum of this setting"));

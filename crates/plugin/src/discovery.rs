@@ -5936,12 +5936,15 @@ mod tests {
         fs::write(plugin.join("workflow-files/upper.JS"), "// upper").unwrap();
 
         let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
-        let names = manifest
+        let mut names = manifest
             .components
             .workflows
             .iter()
             .map(|component| component.path.file_name().unwrap().to_str().unwrap())
             .collect::<Vec<_>>();
+        // A declared directory is listed in readdir order, which is sorted on
+        // APFS but not on ext4; this test is about the suffix filter only.
+        names.sort_unstable();
         assert_eq!(names, vec![".js", "lower.js"]);
     }
 

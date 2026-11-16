@@ -282,10 +282,12 @@ fn each_entry_takes_the_baseline_directly_after_begin_output_turn() {
         .match_indices("begin_output_turn(")
         .map(|(at, _)| at)
         .collect();
+    // run_turn, run_queued_prompt_batch_batched, the streaming entry and the
+    // resumed streaming turn (Teams M2 Q01, fc8802fd).
     assert_eq!(
         starts.len(),
-        3,
-        "expected exactly three turn starts, one per public entry"
+        4,
+        "expected exactly four turn starts, one per public entry"
     );
     for (index, at) in starts.into_iter().enumerate() {
         let window: String = DRIVERS[at..].lines().take(8).collect::<Vec<_>>().join("\n");

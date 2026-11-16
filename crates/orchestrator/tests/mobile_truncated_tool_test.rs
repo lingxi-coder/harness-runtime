@@ -243,7 +243,11 @@ fn alternating_length_and_format_failures_share_one_turn_allowance() {
                     orch.run_turn_streaming("create an animation")
                         .await
                         .unwrap();
-                    assert_eq!(streaming.captured_calls().await.len(), 4);
+                    // Native 2.1.319 (2bbcef32): each malformed retry resets the
+                    // output-limit recovery, and the third malformed response
+                    // ends the turn — length, format, length, format, length,
+                    // format = six calls.
+                    assert_eq!(streaming.captured_calls().await.len(), 6);
                 });
         })
         .unwrap()

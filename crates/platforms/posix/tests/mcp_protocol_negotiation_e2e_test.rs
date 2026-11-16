@@ -279,7 +279,8 @@ async fn modern_success_injects_meta_and_strips_complete_result_type() {
         .find(|r| r["method"] == "tools/list")
         .unwrap();
     assert_eq!(list["params"]["_meta"].as_object().unwrap().len(), 3);
-    assert_eq!(list["id"], 1, "probe must not advance live request IDs");
+    // SDK-compatible live ids start at 0 (b622f461).
+    assert_eq!(list["id"], 0, "probe must not advance live request IDs");
     transport
         .disconnect(result.connection.connection_id)
         .await
@@ -355,7 +356,16 @@ async fn remote_probe_timeout_is_not_treated_as_compatibility() {
     let transport = PosixMcpTransport::new();
     let (url, _state) = spawn_mock(DiscoveryMode::RemoteTimeout).await;
     let error = transport
-        .connect_and_initialize(&spec(url), options_with_deadline(100))
+        // Bound the probe, not the whole connect: the first HTTP connect in a
+        // process loads the OS trust roots once (0128ba5a), which can exceed a
+        // 100 ms total deadline before the probe is ever sent.
+        .connect_and_initialize(
+            &spec(url),
+            McpConnectOptions {
+                probe_timeout_ms: Some(100),
+                ..options()
+            },
+        )
         .await
         .expect_err("remote timeout must be reported");
     assert!(
@@ -368,10 +378,7 @@ async fn remote_probe_timeout_is_not_treated_as_compatibility() {
 async fn remote_network_failure_is_not_treated_as_compatibility() {
     let transport = PosixMcpTransport::new();
     let error = transport
-        .connect_and_initialize(
-            &spec("http://127.0.0.1:9/mcp".to_string()),
-            options_with_deadline(100),
-        )
+        .connect_and_initialize(&spec("http://127.0.0.1:9/mcp".to_string()), options())
         .await
         .expect_err("remote network failure must be reported");
     assert!(
@@ -426,11 +433,10 @@ async fn modern_catalog_rejects_non_complete_result_type() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn invalid_discovery_and_ordinary_errors_fall_back_on_the_same_http_session() {
+async fn invalid_discovery_and_ordinary_errors_fall_back_to_sessionless_legacy_initialize() {
     for mode in [
         DiscoveryMode::MissingCapabilities,
         DiscoveryMode::UnknownError,
-        DiscoveryMode::Malformed,
     ] {
         let transport = PosixMcpTransport::new();
         let (url, state) = spawn_mock(mode).await;
@@ -451,12 +457,11 @@ async fn invalid_discovery_and_ordinary_errors_fall_back_on_the_same_http_sessio
             .iter()
             .position(|r| r["method"] == "initialize")
             .unwrap();
-        if !matches!(mode, DiscoveryMode::Malformed) {
-            assert_eq!(
-                state.headers.lock().unwrap()[initialization]["mcp-session-id"],
-                "discovered-session"
-            );
-        }
+        // b622f461 (Claude Code 2.1.322 header cases): `initialize` never
+        // carries an MCP session id, even one the failed discovery assigned.
+        assert!(state.headers.lock().unwrap()[initialization]
+            .get("mcp-session-id")
+            .is_none());
         assert_eq!(
             requests[initialization]["params"]["protocolVersion"],
             "2025-11-25"
@@ -466,6 +471,28 @@ async fn invalid_discovery_and_ordinary_errors_fall_back_on_the_same_http_sessio
             .await
             .unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_json_discovery_reply_is_a_fatal_probe_transport_failure() {
+    // b622f461 (Claude Code 2.1.322 MIME cases): a discovery reply that is not
+    // JSON is a transport failure, never evidence of a legacy server.
+    let transport = PosixMcpTransport::new();
+    let (url, state) = spawn_mock(DiscoveryMode::Malformed).await;
+    let error = transport
+        .connect_and_initialize(&spec(url), options())
+        .await
+        .expect_err("non-JSON discovery must fail the connection");
+    assert!(
+        matches!(&error, lingxi_core::host::McpError::Connection(message) if message.string_at("").is_some_and(|text| text.starts_with("Version negotiation probe failed: Unexpected content type: text/plain"))),
+        "unexpected malformed discovery classification: {error:?}"
+    );
+    assert!(state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request["method"] == "server/discover"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

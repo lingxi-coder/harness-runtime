@@ -1108,6 +1108,10 @@ pub struct MockOrchestratorHandle {
     effort: StdMutex<Option<String>>,
     effort_session: StdMutex<lingxi_core::host::effort_table::SessionEffort>,
     effort_command_source: StdMutex<Option<EffortCommandSource>>,
+    /// Route state returned by `auto_compact_command_snapshot`; `None` keeps
+    /// the trait's unimplemented error.
+    auto_compact_snapshot:
+        StdMutex<Option<lingxi_core::host::auto_compact::AutoCompactCommandSnapshot>>,
     reasoning_default_path: StdMutex<Option<PathBuf>>,
     /// Output-style listing returned by `output_styles`; `None` means this
     /// engine has no prompt-assembly layer (the trait default).
@@ -1194,6 +1198,13 @@ impl MockOrchestratorHandle {
     {
         *self.effort_command_source.lock().unwrap() = Some(std::sync::Arc::new(source));
     }
+    /// Supply the selected route's auto-compaction state for `/autocompact`.
+    pub fn set_auto_compact_command_snapshot(
+        &self,
+        snapshot: Option<lingxi_core::host::auto_compact::AutoCompactCommandSnapshot>,
+    ) {
+        *self.auto_compact_snapshot.lock().unwrap() = snapshot;
+    }
     /// Supply an admitted default path without ambient lookup.
     pub fn set_reasoning_default_settings_path(&self, path: Option<PathBuf>) {
         *self.reasoning_default_path.lock().unwrap() = path;
@@ -1219,6 +1230,7 @@ impl MockOrchestratorHandle {
             effort: StdMutex::new(None),
             effort_session: StdMutex::new(Default::default()),
             effort_command_source: StdMutex::new(None),
+            auto_compact_snapshot: StdMutex::new(None),
             reasoning_default_path: StdMutex::new(None),
             output_style_listing: StdMutex::new(None),
             output_style_switches: StdMutex::new(Vec::new()),
@@ -1802,6 +1814,15 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             .ok_or_else(|| HandleError::Unimplemented("effort_command_snapshot".into()))?;
         let model = self.status_snapshot.lock().unwrap().model.clone();
         source(&model, self.effort_session.lock().unwrap().clone())
+    }
+    async fn auto_compact_command_snapshot(
+        &self,
+    ) -> Result<lingxi_core::host::auto_compact::AutoCompactCommandSnapshot, HandleError> {
+        self.auto_compact_snapshot
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| HandleError::Unimplemented("auto_compact_command_snapshot".into()))
     }
     async fn reasoning_default_settings_path(&self) -> Option<PathBuf> {
         self.reasoning_default_path.lock().unwrap().clone()

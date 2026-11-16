@@ -309,13 +309,6 @@ async fn long_mcp_prompt_is_summarized_as_evidence_in_a_fixed_chat_session() {
     orch.run_queued_prompt_batch(inputs, CancellationToken::new())
         .await
         .unwrap();
-    let captures = summary.0.lock().unwrap();
-    let compact_request = captures.iter().find(|r| r.messages.iter().any(|m| m.text_content().contains("END-OF-MCP-EVIDENCE"))).expect("auto compaction must receive the complete MCP evidence, including the end beyond 5,000 tokens");
-    assert!(compact_request
-        .messages
-        .iter()
-        .any(|m| m.text_content().len() / 4 > 5000));
-    drop(captures);
     orch.ensure_conversation_mode(ConversationMode::Chat)
         .await
         .unwrap();
@@ -323,6 +316,8 @@ async fn long_mcp_prompt_is_summarized_as_evidence_in_a_fixed_chat_session() {
         .ensure_conversation_mode(ConversationMode::Code)
         .await
         .is_err());
+    // Since 5f2a4641 (2.1.319) threshold auto-compaction preserves the last API
+    // round, so the MCP prompt is summarized once a later turn follows it.
     orch.run_queued_prompt_batch(
         vec![orchestrator::QueuedPromptInput {
             text: "continue task".into(),
@@ -332,14 +327,36 @@ async fn long_mcp_prompt_is_summarized_as_evidence_in_a_fixed_chat_session() {
     )
     .await
     .unwrap();
+    let captures = summary.0.lock().unwrap();
+    let compact_request = captures
+        .iter()
+        .find(|r| {
+            r.messages
+                .iter()
+                .any(|m| m.text_content().contains("END-OF-MCP-EVIDENCE"))
+        })
+        .expect(
+            "auto compaction must receive the complete MCP evidence, including the end beyond \
+             5,000 tokens",
+        );
+    assert!(compact_request
+        .messages
+        .iter()
+        .any(|m| m.text_content().len() / 4 > 5000));
+    drop(captures);
     let calls = api.captured_calls().await;
+    let last = calls.last().unwrap();
     assert!(
-        calls
-            .last()
-            .unwrap()
+        last.messages
+            .iter()
+            .any(|row| row.text_content().contains("retained for the user's task")),
+        "the summary survives mode projection"
+    );
+    assert!(
+        !last
             .messages
             .iter()
-            .any(|row| row.text_content().contains("END-OF-MCP-EVIDENCE")),
-        "the summary survives mode projection"
+            .any(|row| row.text_content().contains("substantial-source-evidence")),
+        "the raw MCP evidence was replaced by its summary"
     );
 }

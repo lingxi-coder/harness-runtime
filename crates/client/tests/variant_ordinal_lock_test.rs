@@ -1,4 +1,5 @@
-//! Positional ABI baseline for Client protocol 32.0.0.
+//! Positional ABI baseline for Client protocol 33.0.0 (re-cut with the Decision
+//! command/event variants from 9e4f7f9c).
 
 const COMMANDS_SRC: &str = include_str!("../src/protocol/commands.rs");
 const COMMAND_ORDINALS: &[&str] = &[
@@ -45,6 +46,8 @@ const COMMAND_ORDINALS: &[&str] = &[
     "UpdateWorkspaceDirectories",
     "UpsertMcpServer",
     "RemoveMcpServer",
+    "DecisionConfigurationChanged",
+    "DecisionResponse",
     "AudioResponse",
     "AttachTurn",
     "ResumeTurn",
@@ -148,6 +151,8 @@ const EVENT_ORDINALS: &[&str] = &[
     "WorkflowResumed",
     "ConversationControlsChanged",
     "FastModeChanged",
+    "DecisionRequest",
+    "DecisionCancel",
     "AudioRequest",
     "TurnRecoveryState",
     "TurnEventReplay",

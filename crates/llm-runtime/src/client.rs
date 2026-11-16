@@ -1071,6 +1071,18 @@ impl ModelRuntime {
         Ok(Arc::new(current))
     }
 
+    /// Reuse a runtime that [`Self::reconfigured_with_account_snapshot`] built
+    /// from the same configuration and account snapshot for another owner.
+    /// Routing and account identities are already frozen for that snapshot;
+    /// only the owner's credentials, account pool and client cache differ.
+    pub fn with_account_owner_state(&self, template: &Self) -> Arc<Self> {
+        let mut current = self.clone();
+        current.credentials = template.credentials.clone();
+        current.account_pool = template.account_pool.clone();
+        current.cache = template.cache.clone();
+        Arc::new(current)
+    }
+
     /// Share one host account health domain across main, auxiliary and child calls.
     pub fn with_account_pool(mut self, pool: Arc<crate::accounts::AccountPool>) -> Self {
         self.account_pool = Some(pool);
@@ -2126,12 +2138,21 @@ impl ModelRuntime {
             && self.account_pool.is_none()
         {
             if let Some(credential) = authenticator.captured_credential().await? {
-                owned
-                    .get_or_insert_with(|| request.clone())
-                    .execution
-                    .account_scope = Some(crate::computer::credential_account_scope(Some(
-                    &credential,
-                ))?);
+                // An empty captured credential has no account identity. The
+                // implicit scope is optional for a request without its own
+                // continuation, so it goes out unscoped and the provider decides
+                // on the credential; a request carrying a continuation still
+                // requires an identity.
+                match crate::computer::credential_account_scope(Some(&credential)) {
+                    Ok(account_scope) => {
+                        owned
+                            .get_or_insert_with(|| request.clone())
+                            .execution
+                            .account_scope = Some(account_scope);
+                    }
+                    Err(_) if request.input.continuation.is_none() => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
 

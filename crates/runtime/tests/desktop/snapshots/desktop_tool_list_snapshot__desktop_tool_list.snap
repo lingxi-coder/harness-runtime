@@ -25,6 +25,7 @@ expression: names
 - NotebookEdit
 - ObserverReport
 - PowerShell
+- ProposeGoal
 - PushNotification
 - Read
 - RemoteTrigger

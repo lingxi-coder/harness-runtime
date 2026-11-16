@@ -1306,7 +1306,17 @@ impl MobileLocalAppServiceHandle {
                 "authoring source changed during validation",
             ));
         }
-        Ok(source_identity)
+        // Durable source receipts carry the persistent identity (51e466be):
+        // Apple volume UUIDs survive device renumbering across remounts, and
+        // the library compares this value with `native_source_identity`.
+        rooted_fs::persistent_root_identity_pinned(&source_path, &source_identity).map_err(
+            |error| {
+                ServiceError::new(
+                    "invalidPath",
+                    format!("invalid durable authoring source: {error}"),
+                )
+            },
+        )
     }
 
     async fn start(
