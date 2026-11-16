@@ -15,7 +15,7 @@ pub(super) fn tcc_setup_result((accessibility, screen_recording): (bool, bool)) 
         if !screen_recording {
             missing.push("Screen Recording");
         }
-        format!("The user saw the permission prompt but macOS {} permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the LingXi desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.", missing.join(" and "))
+        format!("The user saw the permission prompt but macOS {} permission(s) are still not granted. Do not retry in this turn. Let the user know these permissions need to be granted in the {} desktop app on the computer where it's running. If the user grants them and sends a new request, you may call request_access again.", missing.join(" and "), branding::PRODUCT_NAME)
     };
     // Upstream deliberately marks even the newly-granted reply as an error:
     // this call performed setup, and application selection still needs a retry.

@@ -46,14 +46,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         capture.as_object_mut().unwrap().remove("base64");
         let nodes=capture["axSummary"].as_array().ok_or("missing AX summary")?;
         let point=|role:&str,title:Option<&str>|->Result<Value,Box<dyn std::error::Error>> {
-            let node=nodes.iter().find(|n|n["role"]==role && title.map_or(true,|title|n["title"]==title)).ok_or("fixture control absent from AX summary")?;
+            let node=nodes.iter().find(|n|n["role"]==role && title.is_none_or(|title|n["title"]==title)).ok_or("fixture control absent from AX summary")?;
             Ok(json!({"x":node["x"].as_f64().ok_or("x")?+node["w"].as_f64().ok_or("w")?/2.,"y":node["y"].as_f64().ok_or("y")?+node["h"].as_f64().ok_or("h")?/2.}))
         };
         let typed=call("dispatch",json!({"window_id":id,"point":point("AXTextField",None)?,"intent":{"kind":"type","text":"fixture native AX verified","mode":"replace","overwriteExisting":true}})).await?;
         if typed["outcome"]!="ok" { return Err(format!("fixture text dispatch refused: {typed}").into()); }
         let wait_state=|key:&str,expected:Value|->Result<Value,Box<dyn std::error::Error>>{
             let deadline=Instant::now()+Duration::from_secs(3);
-            loop{if let Ok(bytes)=std::fs::read(&receipt){if let Ok(state)=serde_json::from_slice::<Value>(&bytes){if state[key]==expected{return Ok(state)}}}if Instant::now()>deadline{return Err(format!("fixture state did not change: {key}").into())}std::thread::sleep(Duration::from_millis(50));}
+            loop {
+                if let Ok(bytes) = std::fs::read(&receipt) {
+                    if let Ok(state) = serde_json::from_slice::<Value>(&bytes) {
+                        if state[key] == expected {
+                            return Ok(state);
+                        }
+                    }
+                }
+                if Instant::now() > deadline {
+                    return Err(format!("fixture state did not change: {key}").into());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
         };
         let text_receipt=wait_state("text",json!("fixture native AX verified"))?;
         let clicked=call("dispatch",json!({"window_id":id,"point":point("AXButton",Some("Apply"))?,"intent":{"kind":"click","button":"left","count":1}})).await?;

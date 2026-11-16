@@ -561,7 +561,7 @@ impl ComputerTool {
         if let Some((accessibility, screen_recording)) = self.read_os_permissions(&ctx).await? {
             if !accessibility || !screen_recording {
                 if ctx.is_scheduled_turn {
-                    return Ok(protocol_result::error("macOS Accessibility / Screen Recording permissions aren't granted, and the grant prompt can't be shown during a scheduled run. Grant them in the LingXi desktop app, then re-run the task. (Retrying returns this same result.)","unattended_no_approver"));
+                    return Ok(protocol_result::error(&format!("macOS Accessibility / Screen Recording permissions aren't granted, and the grant prompt can't be shown during a scheduled run. Grant them in the {} desktop app, then re-run the task. (Retrying returns this same result.)", branding::PRODUCT_NAME),"unattended_no_approver"));
                 }
                 self.revoke_os_permissions(&ctx).await?;
                 // The explicit interactive setup request registers this application
@@ -726,7 +726,7 @@ impl ComputerTool {
                 .map_or(name.as_str(), |a| a.display_name.as_str());
             if self.is_own_app(id) {
                 return Ok(protocol_result::error(
-                    &constant("Xt").replace("Claude", "LingXi"),
+                    &constant("Xt").replace("Claude", branding::PRODUCT_NAME),
                     "self_app_denied",
                 ));
             }
@@ -1180,7 +1180,7 @@ mod tests {
                 },
                 AppInfo {
                     bundle_id: branding::MANAGED_PREFERENCES_DOMAIN.into(),
-                    display_name: "LingXi".into(),
+                    display_name: branding::PRODUCT_NAME.into(),
                 },
             ])
         }
@@ -1240,7 +1240,9 @@ mod tests {
         let own = tool
             .call_grant_protocol(
                 "request_access",
-                super::super::test_projection(&json!({"reason":"inspect","apps":["LingXi"]})),
+                super::super::test_projection(
+                    &json!({"reason":"inspect","apps":[branding::PRODUCT_NAME]}),
+                ),
                 context,
                 tool_api::test_support::fresh_tx(),
             )

@@ -435,6 +435,12 @@ G1	crates/platforms/common/src/mcp_ws.rs	LingXi
 G1	crates/platforms/common/src/worktree_create_guard.rs	\.lingxi
 G1	crates/platforms/common/src/worktree_include.rs	\.lingxi
 G1	crates/platforms/common/tests/mcp_sse_test.rs	LingXi
+G1	crates/platforms/macos-computer-control/examples/app_scoped_acceptance.rs	\.lingxi
+G1	crates/platforms/macos-computer-control/examples/fixtures/AppScopedFixture.swift	LingXi
+G1	crates/platforms/macos-computer-control/examples/fixtures/native-capture/Reference.swift	\.lingxi
+G1	crates/platforms/macos-computer-control/examples/fixtures/raw-background/RawFixture.swift	\.lingxi
+G1	crates/platforms/macos-computer-control/examples/fixtures/raw-background/fixture.py	\.lingxi
+G1	crates/platforms/macos-computer-control/src/macos/jpeg.rs	LINGXI
 G1	crates/platforms/posix/src/mcp.rs	LingXi
 G1	crates/platforms/posix/src/process/runner.rs	LINGXI
 G1	crates/platforms/posix/src/process/wrap.rs	LINGXI
@@ -652,6 +658,10 @@ G1	crates/tools/agent/src/contract_319_test.rs	CLAUDE\.md
 G1	crates/tools/agent/src/contract_319_test.rs	LINGXI
 G1	crates/tools/agent/tests/fixtures/agent_contract_319.json	CLAUDE\.md
 G1	crates/tools/computer-use/examples/desktop_acceptance.rs	\.lingxi
+G1	crates/tools/computer-use/fixtures/tcc-2.1.325.json	LingXi
+G1	crates/tools/computer-use/src/device_policy_tests.rs	LingXi
+G1	crates/tools/computer-use/src/native_acceptance_tests.rs	LINGXI
+G1	crates/tools/computer-use/src/native_acceptance_tests.rs	\.lingxi
 G1	crates/tools/cron/src/remote_trigger.rs	LingXi
 G1	crates/tools/cron/src/wakeup.rs	LINGXI
 G1	crates/tools/cron/tests/fixtures/cron_contracts.json	LingXi
@@ -767,6 +777,7 @@ G1	scripts/tests/agents_md_oracle_286.py	\.lingxi
 G1	scripts/tests/bash_prompt_319_oracle.mjs	LingXi
 G1	scripts/tests/computer_desktop_acceptance.py	LingXi
 G1	scripts/tests/computer_desktop_acceptance.py	\.lingxi
+G1	scripts/tests/computer_use_tcc_325_oracle.mjs	LingXi
 G1	scripts/tests/context_prompts_319_oracle.mjs	CLAUDE\.md
 G1	scripts/tests/context_prompts_319_oracle.mjs	LINGXI
 G1	scripts/tests/context_prompts_319_oracle.mjs	LingXi

@@ -883,8 +883,11 @@ mod tests {
         use lingxi_core::host::computer_control::ComputerControl;
         use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
         let root = std::path::PathBuf::from(
-            std::env::var_os("LINGXI_NATIVE_CAPTURE_REFERENCE_DIR")
-                .expect("supply controlled reference directory"),
+            std::env::var_os(format!(
+                "{}NATIVE_CAPTURE_REFERENCE_DIR",
+                branding::ENV_PREFIX
+            ))
+            .expect("supply controlled reference directory"),
         );
         let config: Value =
             serde_json::from_slice(&std::fs::read(root.join("config.json")).unwrap()).unwrap();
@@ -1747,7 +1750,7 @@ impl ComputerTool {
                 Ok(value) => adapted["bundle_id"] = json!(value),
                 Err(message) => return Ok(error(&message, "bad_args")),
             },
-            "switch_display" => return self.protocol_switch_display(input, ctx, tx).await,
+            "switch_display" => return self.protocol_switch_display(input, ctx).await,
             "read_clipboard" => {}
             "write_clipboard" => {
                 if !self
@@ -2375,7 +2378,6 @@ impl ComputerTool {
         &self,
         input: &Value,
         ctx: &ToolUseContext,
-        tx: &ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let revision = self.sync_policy(ctx).await?;
         self.check_live_os_permissions(ctx).await?;
@@ -2618,7 +2620,7 @@ impl ComputerTool {
                     .map_err(|e| super::map_err(&e))?,
                 None => None,
             };
-            let jpeg = match native {
+            match native {
                 Some(jpeg) => jpeg,
                 None => {
                     let mut jpeg = Vec::new();
@@ -2627,8 +2629,7 @@ impl ComputerTool {
                         .map_err(|e| ToolError::Internal(e.to_string()))?;
                     jpeg
                 }
-            };
-            jpeg
+            }
         };
         let encoded = base64::engine::general_purpose::STANDARD.encode(jpeg);
         let mut content = Vec::new();

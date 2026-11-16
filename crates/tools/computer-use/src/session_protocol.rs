@@ -514,7 +514,6 @@ fn validate_teach_step(step: &Value, label: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::execution_tests::{ctx, make_tool, RecordingBackend};
-    use lingxi_core::host::computer_control::ComputerControl;
     use std::sync::Arc;
 
     #[derive(Default)]
