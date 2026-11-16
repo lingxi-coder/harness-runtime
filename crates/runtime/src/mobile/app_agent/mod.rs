@@ -486,7 +486,8 @@ impl AppAgentFactory {
         context.mobile_git = None;
         context.mobile_git_secret = None;
         let api = Arc::new(self.api.fork_app_invocation());
-        let adapter = Arc::new(ProviderApiAdapter::new(api.clone()));
+        let adapter =
+            Arc::new(ProviderApiAdapter::new(api.clone()).with_route_refusal_api_text_facts(true));
         context.hosted_search = Some(adapter.clone());
         context.mcp_token_counter = Some(adapter.clone());
         let mut tools = ToolRegistry::new();

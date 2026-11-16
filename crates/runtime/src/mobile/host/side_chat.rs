@@ -30,7 +30,8 @@ impl SideChatFactory for MobileSideChatFactory {
         }));
         let ready_models =
             crate::side_chat::composition::credential_ready_model_refs(&api, &snapshot).await;
-        let adapter = Arc::new(ProviderApiAdapter::new(api.clone()));
+        let adapter =
+            Arc::new(ProviderApiAdapter::new(api.clone()).with_route_refusal_api_text_facts(true));
         let permission_gate =
             Arc::new(AdapterPermissionGate::new(permission_sink).with_event_sink(sink.clone()));
         permission_gate.set_session_id(Some(session_id.to_string()));

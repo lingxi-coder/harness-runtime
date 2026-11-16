@@ -24,7 +24,8 @@ use orchestrator::test_support::{
     noop_hook_executor, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{
-    ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, ProviderApiAdapter,
+    ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient, OrchestratorConfig,
+    ProviderApiAdapter,
 };
 use permission::gate::{PermissionCheckContext, PermissionOutcome};
 use permission::result::PermissionMetadata;
@@ -1408,10 +1409,13 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
             response_body,
             request_shapes: Mutex::new(Vec::new()),
         });
-        let adapter = Arc::new(ProviderApiAdapter::new(api_service(
-            transport.clone(),
-            llm_runtime::ProviderId::AnthropicFirstParty,
-        )));
+        let adapter = Arc::new(
+            ProviderApiAdapter::new(api_service(
+                transport.clone(),
+                llm_runtime::ProviderId::AnthropicFirstParty,
+            ))
+            .with_route_refusal_api_text_facts(false),
+        );
         let output = Arc::new(MockOutputStream::new());
         let orchestrator = ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig {
@@ -1421,7 +1425,7 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
                 ..OrchestratorConfig::default()
             },
             adapter.clone(),
-            adapter,
+            adapter.clone(),
             Arc::new(ToolRegistry::new()),
             noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
@@ -1510,10 +1514,40 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
                 _ => None,
             })
             .collect::<Vec<_>>();
+        // The 2.1.295 receipt pins the provider exchange; the terminal copy is
+        // Native 2.1.319 (core `refusal_api_text_2_1_319.json` owns its exact
+        // text: the obsolete Cyber Verification "Apply" clause is gone and the
+        // Request ID is rendered). Render it from the facts the Host froze for
+        // this first-party route and the live response's IDs.
+        let request_id = OrchestratorApiClient::last_request_id(adapter.as_ref());
+        let facts = OrchestratorApiClient::refusal_api_text_snapshot(adapter.as_ref(), MODEL, None)
+            .expect("first-party route resolves refusal facts")
+            .expect("the Host installs route refusal facts");
+        assert_eq!(
+            facts.provider,
+            lingxi_core::host::refusal_api_text::RefusalProviderKind::FirstParty
+        );
+        let category_units =
+            (!category.is_empty()).then(|| category.encode_utf16().collect::<Vec<u16>>());
+        let expected_319 = facts
+            .format_with_event(
+                (!category.is_empty()).then_some(category),
+                request_id.as_deref(),
+                lingxi_core::host::refusal_api_text::RefusalApiTextEvent {
+                    category_utf16: category_units.as_deref(),
+                    message_id: Some(response_id),
+                    ..Default::default()
+                },
+            )
+            .expect("route facts render the Native 2.1.319 refusal text");
+        assert!(
+            expected_319.ends_with(&format!("\n\nMessage ID: {response_id}")),
+            "Native 2.1.319 text stays linked to the provider response id: {case}"
+        );
         assert_eq!(
             text_events.last(),
-            Some(&expected_result),
-            "the real Host terminal text must match the entire Native result, including response.id: {case}"
+            Some(&expected_319.encode_utf16().collect::<Vec<u16>>()),
+            "the real Host terminal text must match the Native 2.1.319 result for the frozen route facts: {case}"
         );
 
         let rows = JsonlReader::new(transcript_path, fs)

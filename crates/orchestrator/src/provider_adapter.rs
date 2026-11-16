@@ -131,6 +131,50 @@ impl ProviderApiAdapter {
         self
     }
 
+    /// Attach the refusal-fact resolver every production host uses: facts come
+    /// from this adapter's own selected SDK route. The provider kind is the
+    /// route's provider identity (the only fact the formatter's cyber
+    /// verification gate reads) and the display label is the model's
+    /// marketing name. Facts Harness does not resolve yet stay at their
+    /// conservative values: Native `fmt` model eligibility, `zpo` help URL,
+    /// `Dw`/`v7` first-time copy, and `QA` feedback eligibility. An
+    /// unresolvable route is an error, so the query freezes no facts.
+    #[must_use]
+    pub fn with_route_refusal_api_text_facts(self, interactive: bool) -> Self {
+        use lingxi_core::host::refusal_api_text::{
+            RefusalApiTextSnapshot, RefusalBrandCopyOwned, RefusalProviderKind,
+        };
+        let service = self.service.clone();
+        self.with_refusal_api_text_snapshot_source(Arc::new(move |model, profile| {
+            let provider = if service.is_first_party_route(model, profile)? {
+                RefusalProviderKind::FirstParty
+            } else {
+                RefusalProviderKind::Other
+            };
+            Ok(RefusalApiTextSnapshot {
+                serving_model: Some(model.to_owned()),
+                model_eligible: false,
+                display_label: Some(
+                    crate::prompt::env_meta::marketing_name_for_model(model)
+                        .unwrap_or(model)
+                        .to_owned(),
+                ),
+                model_family: None,
+                fable_copy_suppressed: false,
+                opus_5_5_exception: false,
+                help_url: None,
+                provider,
+                interactive,
+                feedback_eligible: false,
+                brand: RefusalBrandCopyOwned {
+                    api_error_prefix: "API Error".to_owned(),
+                    product_name: branding::PRODUCT_NAME.to_owned(),
+                    generic_model_label: branding::PRODUCT_NAME.to_owned(),
+                },
+            })
+        }))
+    }
+
     fn resolved_refusal_api_text_snapshot(
         &self,
         model: &str,
@@ -3115,6 +3159,44 @@ mod tests {
                 ("claude-sonnet-5[1m]".to_owned(), None),
             ]
         );
+        assert!(capture.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn route_refusal_facts_take_the_provider_from_the_selected_route() {
+        use lingxi_core::host::refusal_api_text::RefusalProviderKind;
+
+        let capture = owned_request_capture();
+        let first_party = make_adapter(capture.clone()).with_route_refusal_api_text_facts(true);
+        let facts = OrchestratorApiClient::refusal_api_text_snapshot(
+            &first_party,
+            "claude-sonnet-4-20250514",
+            None,
+        )
+        .unwrap()
+        .expect("route facts are installed");
+        assert_eq!(facts.provider, RefusalProviderKind::FirstParty);
+        assert_eq!(
+            facts.serving_model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
+        assert!(facts.interactive);
+        assert!(!facts.model_eligible && !facts.feedback_eligible);
+
+        let codex =
+            make_codex_search_adapter(capture.clone()).with_route_refusal_api_text_facts(false);
+        let facts = OrchestratorApiClient::refusal_api_text_snapshot(&codex, "gpt-search", None)
+            .unwrap()
+            .expect("route facts are installed");
+        assert_eq!(facts.provider, RefusalProviderKind::Other);
+        assert!(!facts.interactive);
+
+        assert!(OrchestratorApiClient::refusal_api_text_snapshot(
+            &first_party,
+            "unknown-model",
+            None
+        )
+        .is_err());
         assert!(capture.requests.lock().unwrap().is_empty());
     }
 

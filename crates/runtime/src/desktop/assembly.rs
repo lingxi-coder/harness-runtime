@@ -1921,6 +1921,7 @@ pub async fn build_with_credential_stack(
         Arc::new(service_built.with_scope_output_quota(cfg.scope_output_quota.clone()));
     let provider_adapter = Arc::new(
         ProviderApiAdapter::new(api_service.clone())
+            .with_route_refusal_api_text_facts(interactive_session)
             .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
             .with_fast_mode(fast_flag.clone()),
     );
