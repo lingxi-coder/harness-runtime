@@ -2118,8 +2118,8 @@ fn collision_refusal(target: &Target, window_id: u32) -> Option<&'static str> {
         .and_then(|last| last.clone())
         .filter(|last| {
             last.generation > target.collision_generation
-                && last.app.as_deref().map_or(true, |app| app == target.app)
-                && (window_id == 0 || last.window_id.map_or(true, |id| id == window_id))
+                && last.app.as_deref().is_none_or(|app| app == target.app)
+                && (window_id == 0 || last.window_id.is_none_or(|id| id == window_id))
         })
         .map(|_| "user_collision")
 }

@@ -139,14 +139,15 @@ fn raise_response(response: ComputerAccessResponseDto) -> ComputerAccessResponse
     }
 }
 
-/// The connection-scoped broker driving the `computer`-tool `request_access`
-/// round-trip over the bridge-server transport. See the module doc for the
-/// full shape.
+/// One parked `request_access` exchange: the original request and its reply.
 struct PendingComputerAccess {
     request: ComputerAccessRequest,
     response_tx: oneshot::Sender<ComputerAccessResponse>,
 }
 
+/// The connection-scoped broker driving the `computer`-tool `request_access`
+/// round-trip over the bridge-server transport. See the module doc for the
+/// full shape.
 pub struct ComputerAccessBroker {
     /// Where outbound [`ComputerAccessRequestDto`]s go (the transport).
     sink: Arc<dyn ComputerAccessRequestSink>,

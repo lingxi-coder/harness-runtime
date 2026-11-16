@@ -284,7 +284,13 @@ impl ToolRegistry {
     }
 
     fn session_allows_mcp(&self, tool: &dyn Tool) -> bool {
-        self.session_allowlist.is_none()
+        // A host-owned protocol projection (in-process Computer Use) is a view
+        // of its builtin owner, not an independent server: a `--tools`
+        // selection, bare catalog or profile that excludes the owner excludes
+        // the whole family.
+        tool.computer_control_owner()
+            .is_none_or(|owner| self.builtin_allowed(owner.name()))
+            && self.session_allowlist.is_none()
             && self.session_tool_lease.as_ref().is_none_or(|lease| {
                 tool.mcp_tool_identity()
                     .is_some_and(|identity| lease.allows_mcp(identity))
@@ -1160,6 +1166,48 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             self.owner.call(input, ctx, tx).await
         }
+    }
+
+    #[test]
+    fn hosted_computer_family_follows_its_builtin_owner_selection() {
+        const NAME: &str = "mcp__computer-use__request_access";
+        let owner: Arc<dyn Tool> = Arc::new(NamedTool("computer"));
+        let hosted: Arc<dyn Tool> = Arc::new(HostedTool {
+            owner: owner.clone(),
+            enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        });
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(owner);
+        registry.register_builtin(Arc::new(NamedTool("Read")));
+        registry.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![Arc::new(NamedTool("mcp__fixture__tool"))],
+        );
+        registry.register_mcp_tools(McpConnectionId::new(), vec![hosted]);
+        let names = |registry: &ToolRegistry| {
+            registry
+                .available_tools(&ToolStaticContext::default())
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(names(&registry).iter().any(|name| name == NAME));
+
+        // An explicit selection without the owner hides the hosted family on
+        // every lookup path, while ordinary MCP servers stay visible.
+        for selection in [String::new(), "Read".to_owned()] {
+            registry.set_restricted_builtin_filter(Some(&[selection]));
+            assert!(!names(&registry).iter().any(|name| name == NAME));
+            assert!(!registry.all_names().iter().any(|name| name == NAME));
+            assert!(registry.find_by_name(NAME).is_none());
+            assert!(names(&registry)
+                .iter()
+                .any(|name| name == "mcp__fixture__tool"));
+        }
+
+        registry.set_restricted_builtin_filter(Some(&["computer,Read".into()]));
+        assert!(names(&registry).iter().any(|name| name == NAME));
+        assert!(registry.find_by_name(NAME).is_some());
     }
 
     #[test]

@@ -113,7 +113,7 @@ impl ComputerTool {
             let _ = tx.try_send(tool_api::progress::ToolProgress {
                 tool_use_id: id.clone(),
                 data: tool_api::tool_trait::generated_builtin_result(&json!({
-                    "type":"computer_use_enter", "message":message.replacen("Claude", "LingXi", 1)
+                    "type":"computer_use_enter", "message":message.replacen("Claude", branding::PRODUCT_NAME, 1)
                 })),
             });
         }
@@ -162,7 +162,7 @@ impl ComputerTool {
             let _ = tx.try_send(tool_api::progress::ToolProgress {
                 tool_use_id: id,
                 data: tool_api::tool_trait::generated_builtin_result(&json!({
-                    "type":"computer_use_exit", "message":NOTIFY_EXIT.replacen("Claude", "LingXi", 1)
+                    "type":"computer_use_exit", "message":NOTIFY_EXIT.replacen("Claude", branding::PRODUCT_NAME, 1)
                 })),
             });
         }

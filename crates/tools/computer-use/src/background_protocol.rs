@@ -204,6 +204,14 @@ fn required(input: &Value, key: &str) -> Result<String, ToolCallResult> {
         .map(str::to_owned)
         .ok_or_else(|| reply::error(&format!("\"{key}\" must be a string."), "bad_args"))
 }
+/// Native's input-monitoring refusal, with the product name in the TCC hint.
+fn input_monitoring_unavailable() -> String {
+    format!(
+        "Background input cannot verify user takeover because macOS input monitoring is unavailable. Allow {} in System Settings → Privacy & Security → Input Monitoring, then retry. Background screenshots remain available.",
+        branding::PRODUCT_NAME
+    )
+}
+
 fn error(text: impl AsRef<str>, kind: &str) -> Result<ToolCallResult, ToolError> {
     Ok(reply::error(text.as_ref(), kind))
 }
@@ -587,7 +595,10 @@ impl ComputerTool {
             .await?;
         let collision_generation = guard["collisionGeneration"].as_u64();
         if tier != AppTier::Read && guard["collisionMonitoring"] == false {
-            return Ok(Err(reply::error("Background input cannot verify user takeover because macOS input monitoring is unavailable. Allow LingXi in System Settings → Privacy & Security → Input Monitoring, then retry. Background screenshots remain available.","feature_unavailable")));
+            return Ok(Err(reply::error(
+                &input_monitoring_unavailable(),
+                "feature_unavailable",
+            )));
         }
         if guard["screenLocked"] == true
             && (tier != AppTier::Read || guard["allowWhileLocked"] == false)
@@ -1371,7 +1382,7 @@ impl ComputerTool {
         intent = Value::Null;
         let _ = intent;
         if result["reasonCode"] == "collision_monitor_unavailable" {
-            return error("Background input cannot verify user takeover because macOS input monitoring is unavailable. Allow LingXi in System Settings → Privacy & Security → Input Monitoring, then retry. Background screenshots remain available.","feature_unavailable");
+            return error(input_monitoring_unavailable(), "feature_unavailable");
         }
         if result["reasonCode"] == "user_collision" {
             let guard = self
@@ -1632,7 +1643,7 @@ impl ComputerTool {
             .await?;
         let reason = native["reasonCode"].as_str().unwrap_or("");
         if reason == "collision_monitor_unavailable" {
-            return error("Background input cannot verify user takeover because macOS input monitoring is unavailable. Allow LingXi in System Settings → Privacy & Security → Input Monitoring, then retry. Background screenshots remain available.","feature_unavailable");
+            return error(input_monitoring_unavailable(), "feature_unavailable");
         }
         if reason == "user_collision" {
             let guard = self

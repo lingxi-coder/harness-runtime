@@ -8652,20 +8652,38 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 })
             })
             .collect::<Vec<_>>();
+        // Retired activations are append-only model context: the earlier body
+        // keeps its exact bytes (cache prefix) and a later reminder retires it.
         assert_eq!(
             body_rows.len(),
-            1,
-            "reinvocation projects only the current skill body; original {body_message_id}; bounded rows:\n{}",
+            2,
+            "reinvocation keeps the retired body and appends the current one; original {body_message_id}; bounded rows:\n{}",
             bounded_request_rows_diagnostic(&calls[1].messages)
         );
-        let new_body = body_rows[0];
-        assert_ne!(new_body.id, body_message_id);
+        let old_body = body_rows
+            .iter()
+            .find(|row| row.id == body_message_id)
+            .expect("the retired body stays in model context by identity");
+        assert_eq!(old_body.text_utf16.as_deref(), Some(source_body_units.as_slice()));
+        let new_body = *body_rows
+            .iter()
+            .find(|row| row.id != body_message_id)
+            .expect("the reinvocation appends a new body");
         assert!(new_body.is_meta);
         assert_eq!(new_body.turn_companion, Some(Some(true)));
         assert_eq!(new_body.text_utf16.as_deref(), Some(source_body_units.as_slice()));
-        assert!(!second_user_rows.iter().any(|row| row.id == body_message_id));
-        // Skill reinvocation excludes only the retired body from model context,
-        // not from the durable transcript; both distinct sources survive.
+        let retired_units = format!("invocation {}", body_message_id.as_uuid())
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        assert!(
+            second_user_rows.iter().any(|row| row.text_utf16.as_deref().is_some_and(|units| {
+                units
+                    .windows(retired_units.len())
+                    .any(|window| window == retired_units.as_slice())
+            })),
+            "a skill activation update retires the earlier invocation"
+        );
+        // Both distinct sources also survive in the durable transcript.
         for body_id in [body_message_id, new_body.id] {
             let uuid = body_id.as_uuid().to_string();
             assert_eq!(transcript_uuid_count(&resumed_transcript, &uuid), 1);
