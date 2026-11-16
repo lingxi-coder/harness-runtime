@@ -1943,13 +1943,13 @@ impl ConversationOrchestrator {
         crate::request_context::project_current_tool_change_rows(messages);
         self.prepend_leading_context(messages, context_announcements)
             .await;
-        if let Some(reminder) = deferred_tools_reminder {
+        for reminder in [date_change_reminder, deferred_tools_reminder]
+            .into_iter()
+            .flatten()
+        {
             if !messages.iter().any(|message| message.id() == reminder.id()) {
-                self.prepend_transient_leading_context(messages, reminder.clone());
+                messages.push(reminder.clone());
             }
-        }
-        if let Some(reminder) = date_change_reminder {
-            self.prepend_transient_leading_context(messages, reminder.clone());
         }
         self.screen_mod_persisted_attachments(messages).await;
         self.project_dynamic_memory_context(messages).await;

@@ -420,6 +420,7 @@ mod tests {
             mcp_meta: None,
             turn_end: None,
             context: JsonProjection::parse("[]").expect("empty array is valid JSON"),
+            tool_discovery: None,
             context_state: Some(context_state),
         }
     }

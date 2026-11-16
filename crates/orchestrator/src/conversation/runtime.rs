@@ -1937,6 +1937,9 @@ impl CompactionRuntime {
 #[path = "tests/context_announcements_tests.rs"]
 mod context_announcements_tests;
 #[cfg(test)]
+#[path = "date_change_cache_tests.rs"]
+mod date_change_cache_tests;
+#[cfg(test)]
 #[path = "tests/instruction_cache_race_tests.rs"]
 mod instruction_cache_race_tests;
 #[cfg(test)]

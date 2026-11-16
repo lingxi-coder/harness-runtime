@@ -142,6 +142,7 @@ fn wrap_tool_call_error(name: &str, error: &ToolInvokerError) -> ToolInvocationR
         context_modifier: None,
         mcp_meta: None,
         context: empty_array(),
+        tool_discovery: None,
         context_state: None,
     }
 }
@@ -404,6 +405,9 @@ impl ToolInvoker for ModSubagentToolInvoker {
                 .as_ref()
                 .is_some_and(|value| value != &core.data);
             if changed_result {
+                // Replacement JSON is not the registered builtin result which
+                // accepted this discovery, even if it copies schema fields.
+                core.tool_discovery = None;
                 let raw = replacement.as_ref().expect("changed result is present");
                 let parsed = match match output_parser.as_ref() {
                     Some(parser) => parser.parse_output(raw).await,
@@ -473,6 +477,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
                 context_modifier: None,
                 mcp_meta: None,
                 context: model_context(&answer),
+                tool_discovery: None,
                 context_state: None,
             });
         }
@@ -492,6 +497,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
             context_modifier: None,
             mcp_meta: None,
             context: model_context(&answer),
+            tool_discovery: None,
             context_state: None,
         })
     }
@@ -577,6 +583,7 @@ mod tests {
     struct Core {
         calls: StdMutex<Vec<Utf16JsonProjection>>,
         dynamic_parser: std::sync::atomic::AtomicBool,
+        discovery_snapshots: std::sync::atomic::AtomicBool,
         generation: std::sync::atomic::AtomicUsize,
         entered: tokio::sync::Notify,
         resume: tokio::sync::Notify,
@@ -751,6 +758,16 @@ mod tests {
                     json!({"marker": marker}),
                 ))
             });
+            let tool_discovery = self
+                .discovery_snapshots
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| {
+                    lingxi_core::host::tool_invoker::ToolDiscoverySnapshot::from_host_result(
+                        source(&json!([])),
+                        input.clone(),
+                    )
+                })
+                .flatten();
             Ok(ToolInvocationResult {
                 is_error: false,
                 data: input,
@@ -760,6 +777,7 @@ mod tests {
                 context_modifier,
                 mcp_meta,
                 context: empty_array(),
+                tool_discovery,
                 context_state,
             })
         }
@@ -829,6 +847,7 @@ mod tests {
         let core = Arc::new(Core {
             calls: StdMutex::new(Vec::new()),
             dynamic_parser: std::sync::atomic::AtomicBool::new(false),
+            discovery_snapshots: std::sync::atomic::AtomicBool::new(false),
             generation: std::sync::atomic::AtomicUsize::new(0),
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Notify::new(),
@@ -1141,6 +1160,26 @@ mod tests {
                 0x006c, 0x006f, 0x006e, 0x0065, 0xd800, 0x002e, 0x0074, 0x0078, 0x0074
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn child_mod_preserves_only_the_selected_unchanged_host_discovery() {
+        for (script, retained, calls) in [
+            ("export function register(on) { on('tool.call', async ($, e, next) => next(e)); }", true, 1),
+            ("export function register(on) { on('tool.call', async ($, e, next) => ({ ...await next(e), result: { forged: true, tool_definitions: [] } })); }", false, 1),
+            ("export function register(on) { on('tool.call', () => ({ result: { forged: true, tool_definitions: [] } })); }", false, 0),
+        ] {
+            let (invoker, core, _session) = setup(script).await;
+            core.discovery_snapshots.store(true, std::sync::atomic::Ordering::SeqCst);
+            let result = invoker.invoke_detailed(
+                "Read", source(&json!({"file_path":"read.txt"})), child_context(AgentId::new()),
+            ).await.unwrap();
+            assert_eq!(core.calls.lock().unwrap().len(), calls);
+            assert_eq!(result.tool_discovery.is_some(), retained);
+            if let Some(snapshot) = result.tool_discovery {
+                assert!(snapshot.matches_result(&result.data));
+            }
+        }
     }
 
     #[tokio::test]

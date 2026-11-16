@@ -845,6 +845,7 @@ fn inline_pdf_read_invocation() -> lingxi_core::host::tool_invoker::ToolInvocati
         mcp_meta: None,
         turn_end: None,
         context: Utf16JsonProjection::parse("[]").unwrap(),
+        tool_discovery: None,
         context_state: None,
     }
 }
@@ -965,7 +966,9 @@ fn agent_read_result_preserves_pdf_fallback_and_extracted_page_images_on_wire() 
     )];
     for (invocation, documents, images) in [(pdf, 1, 0), (pages, 0, 1)] {
         let id = ToolUseId::new();
-        let result = successful_live_tool_result_block("Read", &id, None, &invocation);
+        let mut results = successful_live_tool_result_blocks("Read", &id, None, &invocation);
+        assert_eq!(results.len(), 1);
+        let result = results.pop().unwrap();
         let assistant = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
@@ -1071,6 +1074,7 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
             mcp_meta: None,
             turn_end: None,
             context: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]").unwrap(),
+            tool_discovery: None,
             context_state: None,
         })
     }
@@ -2900,6 +2904,7 @@ impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
             mcp_meta: None,
             turn_end: None,
             context: Utf16JsonProjection::parse("[]").expect("empty JSON array is valid"),
+            tool_discovery: None,
             context_state: Some(
                 lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(context)),
             ),
@@ -13212,6 +13217,7 @@ async fn tool_reported_error_and_context_reach_model_history() {
                     &serde_json::json!(["Contents of /tmp/AGENTS.md:\n\nNested rule"]),
                 )
                 .unwrap(),
+                tool_discovery: None,
                 context_state: None,
             })
         }
@@ -13301,6 +13307,7 @@ async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
                     &serde_json::json!(["first", "second"]),
                 )
                 .unwrap(),
+                tool_discovery: None,
                 context_state: None,
             })
         }

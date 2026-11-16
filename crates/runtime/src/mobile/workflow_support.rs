@@ -1686,6 +1686,7 @@ mod deferred_invoker_tests {
                 context_modifier: None,
                 mcp_meta: None,
                 context: source_json!([]),
+                tool_discovery: None,
                 context_state: None,
             })
         }

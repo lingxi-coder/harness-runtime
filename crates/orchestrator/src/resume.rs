@@ -814,7 +814,13 @@ fn replay_captured_session_inner(
             .map(PathBuf::from)
             .filter(|path| path.is_dir());
     let worktree_session = loaded.worktree_states.get(&sid_str).cloned();
-    let transcript_metadata = JsonlWriter::capture_session_metadata_source(source, &sid_str);
+    let mut transcript_metadata = JsonlWriter::capture_session_metadata_source(source, &sid_str);
+    transcript_metadata.extend(
+        crate::conversation::date_context_impl::metadata_from_source(
+            source,
+            SessionId::from_uuid(session_id),
+        ),
+    );
     let transcript_entries = &loaded.messages_in_order;
     let lineage_ids = messages
         .iter()
@@ -2131,6 +2137,7 @@ fn hook_attachment_message_for_api(
         }
         "environment"
         | "model"
+        | "date_change"
         | "deferred_tools_delta"
         | "mcp_dropped_tools_delta"
         | "agent_listing_delta"
@@ -2333,6 +2340,7 @@ fn mod_attachment_descriptor_from_payload(
                 | "attention_budget"
                 | "environment"
                 | "model"
+                | "date_change"
                 | "output_style_instructions"
                 | "language"
                 | "deferred_tools_delta"
@@ -4091,6 +4099,7 @@ impl ConversationOrchestrator {
     /// full runtime projection on that raw stream would let preserved
     /// pre-compaction assistant rows overwrite the normalized current usage.
     pub async fn restore_resume_prompt_metadata(&self, messages: &[JsonlMessage]) {
+        self.restore_inline_date_messages(messages).await;
         let selected = self
             .session
             .lock()
@@ -4159,6 +4168,10 @@ impl ConversationOrchestrator {
         active_epoch: u64,
     ) {
         if let Some(session) = SessionId::parse_prefixed(session_id) {
+            self.restore_inline_date_metadata(
+                session,
+                &crate::conversation::date_context_impl::metadata_from_source(source, session),
+            );
             self.restore_consumed_reminders_metadata(
                 session,
                 &JsonlWriter::capture_session_metadata_source(source, session_id),
@@ -4458,6 +4471,10 @@ impl ConversationOrchestrator {
                 replayed.runtime_metadata.context_rendering_hint;
             let history = orch.session.lock().await.history.clone();
             orch.restore_consumed_reminders_metadata(
+                SessionId::from_uuid(session_id),
+                &replayed.transcript_metadata,
+            );
+            orch.restore_inline_date_metadata(
                 SessionId::from_uuid(session_id),
                 &replayed.transcript_metadata,
             );

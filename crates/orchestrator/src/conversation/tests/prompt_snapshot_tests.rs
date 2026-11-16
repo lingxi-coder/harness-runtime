@@ -719,7 +719,15 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let session_id = warm.session.lock().await.session_id;
         let path =
             session::jsonl::session_path(&home, &cwd_string, &session_id.as_uuid().to_string());
-        let warm = warm.with_jsonl_writer(Arc::new(JsonlWriter::new(path.clone(), fs.clone())));
+        let authority = home.join("writer-authority");
+        std::fs::create_dir_all(&authority).unwrap();
+        let writer = JsonlWriter::new(path.clone(), fs.clone()).with_durable_lock(Arc::new(
+            session::jsonl::DurableTranscriptWriter::open(authority).unwrap(),
+        ));
+        writer
+            .activate_session_target(session_id, path.clone(), cwd.clone())
+            .unwrap();
+        let warm = warm.with_jsonl_writer(Arc::new(writer));
         warm.initialize_conversation_mode().await.unwrap();
         warm.run_turn("warm prompt").await.unwrap();
         let warm_requests = warm_api.captured_requests().await;

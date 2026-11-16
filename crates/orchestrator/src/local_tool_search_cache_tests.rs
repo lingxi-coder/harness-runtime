@@ -1,4 +1,7 @@
 //! Native discovery through the real provider adapter and both turn drivers.
+
+#[path = "agent_tool_search_cache_tests.rs"]
+mod agent_tests;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefinitionExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};

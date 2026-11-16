@@ -34,18 +34,33 @@ fn main_source_requires_model_carrier(
 }
 
 impl ConversationOrchestrator {
-    /// Keep request-wide App authority independent from per-source hook
-    /// authority. Both survive credential awaits and every physical retry.
+    /// Keep request-wide cancellation and App authority independent from
+    /// per-source hook authority through credential awaits and physical retry.
     pub(crate) fn main_request_dispatch_admission(
         &self,
         messages: &[ConversationMessage],
         guards: &[(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)],
         cancel: Option<&CancellationToken>,
     ) -> Option<llm_runtime::RequestDispatchAdmission> {
-        Self::with_chat_dispatch_check(
+        // The batched driver's main request has no side-query token, but its
+        // owning turn still carries cancellation in the shared turn scope.
+        // An explicit token belongs to this request and takes precedence.
+        let cancel = cancel
+            .cloned()
+            .or_else(crate::native_computer::current_turn_cancel);
+        let admission = Self::with_chat_dispatch_check(
             crate::prompt::async_hook_response::request_dispatch_admission(messages, guards),
-            self.chat_dispatch_check(cancel),
-        )
+            self.chat_dispatch_check(cancel.as_ref()),
+        );
+        let Some(cancel) = cancel else {
+            return admission;
+        };
+        Some(match admission {
+            Some(admission) => {
+                admission.with_additional_global_check(move || !cancel.is_cancelled())
+            }
+            None => llm_runtime::RequestDispatchAdmission::new(move || !cancel.is_cancelled()),
+        })
     }
 
     pub(crate) fn chat_dispatch_check(
@@ -4513,6 +4528,81 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 #[cfg(test)]
 #[path = "tests/live_permission_mode_tests.rs"]
 mod live_permission_mode_tests;
+
+#[cfg(test)]
+mod main_cancel_admission_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+
+    fn code_conversation() -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    }
+
+    #[test]
+    fn code_cancellation_remains_global_after_source_pruning_and_retry_cloning() {
+        let orch = code_conversation();
+        let cancel = CancellationToken::new();
+        let admission = orch
+            .main_request_dispatch_admission(&[], &[], Some(&cancel))
+            .expect("ordinary Code requests need the cancellation fence too");
+        let retry = admission
+            .clone()
+            .retaining_message_sources(&std::collections::HashSet::new())
+            .expect("request cancellation is not a removable message-source guard");
+        assert!(admission.is_admitted());
+        assert!(retry.is_admitted());
+        cancel.cancel();
+        assert!(!admission.is_admitted());
+        assert!(!retry.is_admitted());
+    }
+
+    #[tokio::test]
+    async fn batched_main_request_uses_its_owning_turn_cancellation() {
+        let orch = code_conversation();
+        let cancel = CancellationToken::new();
+        crate::native_computer::scope_turn_cancel(cancel.clone(), async {
+            let admission = orch
+                .main_request_dispatch_admission(&[], &[], None)
+                .expect("batched requests inherit their owning turn fence");
+            assert!(admission.is_admitted());
+            cancel.cancel();
+            assert!(!admission.is_admitted());
+        })
+        .await;
+        assert!(orch
+            .main_request_dispatch_admission(&[], &[], None)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_request_cancellation_does_not_borrow_another_turn_scope() {
+        let orch = code_conversation();
+        let outer = CancellationToken::new();
+        outer.cancel();
+        let request = CancellationToken::new();
+        crate::native_computer::scope_turn_cancel(outer, async {
+            let admission = orch
+                .main_request_dispatch_admission(&[], &[], Some(&request))
+                .unwrap();
+            assert!(admission.is_admitted());
+            request.cancel();
+            assert!(!admission.is_admitted());
+        })
+        .await;
+    }
+}
 
 #[cfg(test)]
 mod prompt_suggestion_tests {

@@ -1686,9 +1686,9 @@ struct FrozenPromptSourceVector {
 /// The oracle keeps two things: `LGe = Vr(wcs)`, the local date memoized when
 /// the session started (the same date the env-context `currentDate` entry was
 /// first built from), and the delivered `date_change` attachment itself.
-/// Reminders are outgoing-only, so the delivered date is carried here and must
-/// survive compaction; otherwise a long-lived session would receive the same
-/// midnight reminder again after every compact. The whole struct is re-seeded
+/// The memo and accepted notification date survive compaction and cold resume.
+/// Typed host checkpoints retain them independently of model history. The
+/// whole struct is re-seeded
 /// One `tool_result` SDK frame held until the collection point releases it.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingToolFrame {
@@ -1711,6 +1711,9 @@ pub(crate) struct DateChangeState {
     session_date: String,
     /// `newDate` of the reminder last DELIVERED to the model in this session.
     delivered_date: Option<String>,
+    checkpoint_id: Option<MessageId>,
+    checkpoint_persisted: bool,
+    pending: Option<date_context_impl::PendingDateChange>,
 }
 
 /// `plan_mode` attachment cadence — 2.1.238 `X4T` @296525982 with
@@ -2424,6 +2427,8 @@ pub(crate) use transcript_impl::{
 #[path = "conversation/wiring.rs"]
 mod wiring_impl;
 
+#[path = "conversation/date_context.rs"]
+pub(crate) mod date_context_impl;
 #[path = "conversation/output_accounting.rs"]
 mod output_accounting_impl;
 #[path = "conversation/runtime.rs"]

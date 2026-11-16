@@ -124,6 +124,7 @@ impl lingxi_core::host::ToolInvoker for TurnEndInvoker {
             context_modifier: None,
             mcp_meta: None,
             context: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]").unwrap(),
+            tool_discovery: None,
             context_state: None,
         })
     }

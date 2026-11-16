@@ -373,6 +373,7 @@ impl RegistryToolInvoker {
         supplied: Option<Arc<dyn crate::Tool>>,
         output_parser_capture: Option<lingxi_core::host::tool_invoker::ToolOutputParserCapture>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        let registered = supplied.is_none();
         let tool = supplied
             .or_else(|| self.registry.find_by_name(name))
             .ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
@@ -921,7 +922,7 @@ impl RegistryToolInvoker {
                 }
             }
         };
-        let result = if let Some(original) = memory_scope_source.as_ref() {
+        let mut result = if let Some(original) = memory_scope_source.as_ref() {
             lingxi_core::host::memory_tool_scope::with_normalized_memory_tool_scope(
                 name,
                 original,
@@ -945,6 +946,9 @@ impl RegistryToolInvoker {
             result.is_error,
             result.mcp_meta.as_ref(),
         );
+        let tool_discovery = registered
+            .then(|| crate::tool_discovery::take_builtin_snapshot(tool.as_ref(), &mut result))
+            .flatten();
         Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
             is_error: result.is_error,
             data: result.data,
@@ -954,6 +958,7 @@ impl RegistryToolInvoker {
                 ToolInvocationContextModifier::new::<crate::context::ToolUseContext, _>(modifier)
             }),
             mcp_meta: result.mcp_meta,
+            tool_discovery,
             turn_end,
             context: Utf16JsonProjection::parse("[]").expect("empty JSON array is valid"),
             context_state: Some(context_state),

@@ -2041,18 +2041,9 @@ impl ConversationOrchestrator {
     /// `LGe()` = the memoized session-start date; equal ⇒ no attachment, and an
     /// already-DELIVERED reminder for the same `newDate` dedupes.
     ///
-    /// PURE — the dedupe is advanced by [`Self::commit_date_change_reminder`]
-    /// once the request carrying the reminder has actually been issued. The
-    /// oracle can latch on produce because it materialises the attachment as a
-    /// real message (`Va(c,o)`) and pushes it into the message array BEFORE the
-    /// call, so its dedupe reads the same fact it delivered; the port's
-    /// reminder lives only in the outgoing snapshot, so a step that ends before
-    /// the call (blocking-limit preempt, stream error, abort) must not consume
-    /// it.
-    ///
-    /// Rendered through `pm([zr({content, isMeta:!0})])` = `<system-reminder>`
-    /// wrap + meta user message, appended to THIS turn's OUTGOING snapshot only
-    /// (never `session.history` / JSONL).
+    /// Pure rendering. The Inline calendar commit persists and publishes the
+    /// same row before advancing dedupe, so cancelled or failed admission can
+    /// retry it without rewriting the historical model prefix.
     pub(crate) fn date_change_reminder_message(
         &self,
         session_id: lingxi_core::types::SessionId,
@@ -2340,6 +2331,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
                 session_id: Some(session_id),
                 session_date: today,
                 delivered_date: None,
+                ..Default::default()
             };
         }
         state.session_date.clone()
@@ -2348,6 +2340,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// Mark the current local date's `date_change` reminder as DELIVERED — the
     /// commit half of [`Self::date_change_reminder_message`]. Called once the
     /// request carrying this turn's outgoing snapshot has actually been issued.
+    #[cfg(test)]
     pub(crate) fn commit_date_change_reminder(&self) {
         self.prompt_runtime
             .date_change

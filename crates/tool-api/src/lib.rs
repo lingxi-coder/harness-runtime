@@ -41,6 +41,7 @@ pub mod sandbox_runner;
 pub mod session_cwd;
 pub mod session_tool_policy;
 pub mod todo_tools_gate;
+pub mod tool_discovery;
 pub mod tool_invoker_impl;
 pub mod tool_result_media;
 pub mod tool_search_view;

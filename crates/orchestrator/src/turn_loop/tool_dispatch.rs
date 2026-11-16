@@ -8060,16 +8060,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 &result.new_messages,
             )
         });
-        // Freeze the builtin's own snapshot before hooks can replace its output.
-        let frozen_tool_definitions = (name == "ToolSearch")
-            .then(|| {
-                tool_outcome
-                    .as_ref()
-                    .ok()
-                    .filter(|result| !result.is_error)
-                    .and_then(|result| result.data.subprojection("/tool_definitions").ok())
-            })
-            .flatten();
+        // Freeze the real builtin result before hooks can replace its output.
+        let mut tool_outcome = tool_outcome;
+        let tool_discovery = tool_outcome.as_mut().ok().and_then(|result| {
+            tool_api::tool_discovery::take_builtin_snapshot(tool_handle.as_ref(), result)
+        });
         let (content, is_error, emit_payload, is_abort, tool_use_result, mcp_meta, turn_end): (
             Utf16JsonProjection,
             bool,
@@ -8079,15 +8074,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             Option<Utf16JsonProjection>,
             Option<tool_api::tool_trait::ToolResultTurnEnd>,
         ) = match tool_outcome {
-            Ok(mut result) => {
-                if name == "ToolSearch" && frozen_tool_definitions.is_some() {
-                    // Schema receipts belong to durable host metadata, not the
-                    // ordinary result text or hook/UI result projection.
-                    result
-                        .data
-                        .remove_field("tool_definitions")
-                        .expect("ToolSearch snapshot belongs to an object");
-                }
+            Ok(result) => {
                 // The 2.1.286 AGENTS plugin wraps successful Read calls, not
                 // text-read state. Its context is a durable tool.call hook
                 // attachment, rendered beside the result and retained in live
@@ -8848,20 +8835,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             content_blocks,
         });
         if !is_error && !mutated && !persistence.replaced {
-            if let Some(definitions) = frozen_tool_definitions {
-                let call_id = provider_id
-                    .clone()
-                    .unwrap_or_else(|| tool_use_id.to_string());
-                let value = Utf16JsonProjection::object(vec![
-                    ("type".into(), "lingxi_tool_discovery".into()),
-                    ("call_id".into(), call_id.into()),
-                    ("definitions".into(), definitions),
-                ])
-                .expect("host ToolSearch receipt is valid JSON");
-                results.push(ContentBlock::ProviderContent {
-                    protocol: "open_ai_responses".into(),
-                    value,
-                });
+            if let Some(snapshot) = tool_discovery {
+                results.push(tool_api::tool_discovery::receipt(
+                    &snapshot,
+                    tool_use_id,
+                    provider_id.as_deref(),
+                ));
             }
         }
 

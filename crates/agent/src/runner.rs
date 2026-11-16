@@ -1109,7 +1109,7 @@ async fn append_unmatched_stream_tool_results(
     }
 }
 
-fn live_tool_result_block(
+fn live_tool_result_blocks(
     name: &str,
     id: &lingxi_core::types::ToolUseId,
     provider_id: Option<&str>,
@@ -1117,22 +1117,22 @@ fn live_tool_result_block(
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,
     >,
-) -> Option<ContentBlock> {
+) -> Option<Vec<ContentBlock>> {
     match result {
-        Ok(invocation) => Some(successful_live_tool_result_block(
+        Ok(invocation) => Some(successful_live_tool_result_blocks(
             name,
             id,
             provider_id,
             invocation,
         )),
         Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(_)) => None,
-        Err(error) => Some(ContentBlock::ToolResult {
+        Err(error) => Some(vec![ContentBlock::ToolResult {
             tool_use_id: id.clone(),
             content: error.model_tool_result_content(),
             is_error: Some(true),
             provider_tool_use_id: provider_id.map(str::to_owned),
             content_blocks: None,
-        }),
+        }]),
     }
 }
 
@@ -1159,7 +1159,7 @@ async fn publish_live_tool_completion(
         provider_id,
         ..
     } = call;
-    let Some(block) = live_tool_result_block(&name, &id, provider_id.as_deref(), result) else {
+    let Some(content) = live_tool_result_blocks(&name, &id, provider_id.as_deref(), result) else {
         return;
     };
     let tool_use_id = id;
@@ -1169,7 +1169,7 @@ async fn publish_live_tool_completion(
         interrupted_by_shutdown: None,
         refused_message_id: None,
         id: MessageId::new(),
-        content: vec![block],
+        content,
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
@@ -1203,12 +1203,12 @@ async fn publish_live_tool_completion(
     publish_local_agent_idle_fact(ctx, idle_update).await;
 }
 
-fn successful_live_tool_result_block(
+fn successful_live_tool_result_blocks(
     name: &str,
     id: &lingxi_core::types::ToolUseId,
     provider_id: Option<&str>,
     invocation: &lingxi_core::host::tool_invoker::ToolInvocationResult,
-) -> ContentBlock {
+) -> Vec<ContentBlock> {
     let data = &invocation.data;
     let supplied_content = invocation.model_content.clone();
     let mapped_text = supplied_content.clone().unwrap_or_else(|| {
@@ -1240,13 +1240,19 @@ fn successful_live_tool_result_block(
             .and_then(|_| tool_api::tool_result_media::ephemeral_summary(data))
             .unwrap_or(mapped_text)
     });
-    ContentBlock::ToolResult {
+    let mut blocks = vec![ContentBlock::ToolResult {
         tool_use_id: id.clone(),
         content,
         is_error: Some(invocation.is_error),
         provider_tool_use_id: provider_id.map(str::to_owned),
         content_blocks,
+    }];
+    if let Some(receipt) =
+        tool_api::tool_discovery::accepted_receipt(name, invocation, id, provider_id)
+    {
+        blocks.push(receipt);
     }
+    blocks
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5824,9 +5830,9 @@ async fn run_subagent_loop(
                         };
                         match invocation {
                             Ok(invocation) => {
-                                let result_block = (!early_tool_result_ids.contains(tool_use_id))
+                                let result_blocks = (!early_tool_result_ids.contains(tool_use_id))
                                     .then(|| {
-                                        successful_live_tool_result_block(
+                                        successful_live_tool_result_blocks(
                                             name,
                                             tool_use_id,
                                             provider_id.as_deref(),
@@ -5921,8 +5927,8 @@ async fn run_subagent_loop(
                                         }
                                     }
                                 }
-                                if let Some(result_block) = result_block {
-                                    tool_results.push(result_block);
+                                if let Some(result_blocks) = result_blocks {
+                                    tool_results.extend(result_blocks);
                                 }
                                 if !early_tool_result_ids.contains(tool_use_id) {
                                     let idle_update = observe_local_tool_result(

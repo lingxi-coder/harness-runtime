@@ -623,6 +623,20 @@ impl ConversationOrchestrator {
         // this order; API text packing is a separate projection.
         snapshot.extend(context_announcements.messages.iter().cloned());
 
+        // Inline calendar updates are durable tail context. Commit before this
+        // step's deferred delta so only the new batch follows Date -> Deferred;
+        // older history retains its exact identities, bytes and positions.
+        let date_change_reminder = self.prepare_inline_date_context(user_cancel).await?;
+        if let Some(reminder) = &date_change_reminder {
+            if !snapshot.iter().any(|message| message.id() == reminder.id()) {
+                snapshot.push(reminder.clone());
+            }
+            // The date was durably appended before the still-staged NAr
+            // reminders. Include it in that same first-request projection so
+            // later steps replay the identical Date -> NAr source order.
+            turn_reminders.insert(0, reminder.clone());
+        }
+
         // Rebuilt on every model step: a ToolSearch result marks schemas as
         // discovered, so the immediately following request must include them
         // with `defer_loading:true`. Computing it ADVANCES the announced-set
@@ -1017,26 +1031,6 @@ impl ConversationOrchestrator {
                 snapshot.extend(missing_tail_rows);
             }
         }
-        // Inline `date_change`: prepended AFTER the deferred insert so the final order
-        // is [date_change, deferred_tools_delta, …], matching the oracle batch
-        // order (`Ky("date_change")` before `Ky("deferred_tools_delta")`). The
-        // dedupe is committed downstream, once the request is actually sent —
-        // not here, where it has only been computed.
-        let date_change_reminder = if persistent_app_chat || self.uses_announced_context().await {
-            None
-        } else {
-            let session_id = self.session.lock().await.session_id;
-            if let Some(reminder) = self.date_change_reminder_message(session_id) {
-                self.mod_prompt_attachment(
-                    "date_change",
-                    reminder,
-                    serde_json::json!({"kind":"engine"}),
-                )
-                .await
-            } else {
-                None
-            }
-        };
         // The one-shot unknown-command fallback has no regular-user ingress,
         // but Native still places its request-owned row after the initial NAr
         // reminders and before shared context. Later tool steps keep the
@@ -1080,11 +1074,8 @@ impl ConversationOrchestrator {
             .await;
         if let Some(reminder) = deferred_reminder.clone() {
             if !snapshot.iter().any(|message| message.id() == reminder.id()) {
-                self.prepend_transient_leading_context(&mut snapshot, reminder);
+                snapshot.push(reminder);
             }
-        }
-        if let Some(reminder) = date_change_reminder.clone() {
-            self.prepend_transient_leading_context(&mut snapshot, reminder);
         }
         self.screen_mod_persisted_attachments(&mut snapshot).await;
         let tool_result_reminder_suffixes =

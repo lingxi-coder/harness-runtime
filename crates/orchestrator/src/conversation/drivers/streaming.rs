@@ -1356,10 +1356,6 @@ impl StreamingTurnDriver<'_> {
             orch.emit_turn_terminal("blocking_limit", &cost).await;
             return Ok(PrepareStreamingOutcome::Complete(id));
         }
-        // Past the preempt: this step's snapshot WILL be sent, so the
-        // `date_change` reminder it carries counts as delivered.
-        orch.commit_date_change_reminder();
-
         // Mid-stream tool dispatch (claude-code `query.ts:562` + `837-844`):
         // create the executor + pre-allocate this turn's assistant id BEFORE
         // opening the stream, so each `tool_use` block can be `add_tool`'d and
@@ -4314,7 +4310,7 @@ impl StreamingTurnDriver<'_> {
                 })));
             }
             let (step, tokens) = result?;
-            return match orch.run_batched_round(loop_state, step, tokens).await {
+            return match orch.run_batched_round(loop_state, step, tokens).await? {
                 super::TurnEndVerdict::Continue => Ok(Some(StepExit::Continue)),
                 super::TurnEndVerdict::EndTurn(message_id) => {
                     Ok(Some(StepExit::FinishThroughEpilogue(message_id)))

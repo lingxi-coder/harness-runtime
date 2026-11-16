@@ -648,6 +648,46 @@ pub struct ToolResultTurnEnd {
     pub source: ToolResultTurnEndSource,
 }
 
+/// A by-value discovery accepted from a real host builtin invocation.
+///
+/// This is deliberately not a JSON/serde carrier. Result text, provider
+/// output and middleware replacements cannot create this host-side handoff.
+/// The result binding also invalidates a snapshot when a wrapper changes data
+/// without explicitly clearing its metadata. Execution permissions stay live.
+#[derive(Debug, Clone)]
+pub struct ToolDiscoverySnapshot {
+    definitions: Utf16JsonProjection,
+    result_data: Utf16JsonProjection,
+}
+
+impl ToolDiscoverySnapshot {
+    /// Construct at the trusted builtin-result boundary, after removing the
+    /// definitions from the ordinary result data.
+    #[must_use]
+    pub fn from_host_result(
+        definitions: Utf16JsonProjection,
+        result_data: Utf16JsonProjection,
+    ) -> Option<Self> {
+        definitions.array_len("")?;
+        Some(Self {
+            definitions,
+            result_data,
+        })
+    }
+
+    /// Exact definitions frozen by that invocation, independent of the catalog.
+    #[must_use]
+    pub fn definitions(&self) -> &Utf16JsonProjection {
+        &self.definitions
+    }
+
+    /// Whether the accepted result still belongs to this discovery handoff.
+    #[must_use]
+    pub fn matches_result(&self, result_data: &Utf16JsonProjection) -> bool {
+        self.result_data == *result_data
+    }
+}
+
 /// A tool's structured result plus its independent model-facing text.
 #[derive(Debug, Clone)]
 pub struct ToolInvocationResult {
@@ -664,6 +704,9 @@ pub struct ToolInvocationResult {
     pub context_modifier: Option<ToolInvocationContextModifier>,
     /// Opaque tool metadata retained for host-side result handling.
     pub mcp_meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Host-only frozen discovery. Only an actual registered builtin call
+    /// supplies this; generic results and replacement data leave it absent.
+    pub tool_discovery: Option<ToolDiscoverySnapshot>,
     /// Trusted host-computed control. Model input or result JSON cannot set it.
     pub turn_end: Option<ToolResultTurnEnd>,
     /// Model-only reminders attached by `tool.call` after the tool result.
@@ -806,6 +849,7 @@ pub trait ToolInvoker: Send + Sync + Any {
                 turn_end: None,
                 context: crate::types::utf16_json::Utf16JsonProjection::parse("[]")
                     .expect("empty JSON array is valid"),
+                tool_discovery: None,
                 context_state: None,
             })
     }

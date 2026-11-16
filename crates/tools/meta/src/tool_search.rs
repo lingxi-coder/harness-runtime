@@ -810,7 +810,22 @@ impl Tool for ToolSearchTool {
         }
         bus.log_event(TOOL_SEARCH_STARTED, md).await;
 
-        let snapshot = self.view.snapshot();
+        let mut snapshot = self.view.snapshot();
+        if let Some(available) = &ctx.available_tool_names {
+            // A child shares the host's view, but searches only its own query
+            // surface. Filter the by-value definitions with the same names;
+            // never mutate the shared view or let a hidden schema ride along.
+            let allowed = available
+                .iter()
+                .filter_map(|name| name.string_at(""))
+                .collect::<HashSet<_>>();
+            snapshot
+                .entries
+                .retain(|entry| allowed.contains(entry.name.as_str()));
+            snapshot
+                .definitions
+                .retain(|definition| allowed.contains(definition.name.as_str()));
+        }
         let entries = &snapshot.entries;
 
         let SearchResult {
@@ -1643,6 +1658,81 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn child_search_filters_names_and_exact_schemas_without_mutating_the_shared_catalog() {
+        use tool_api::{SharedToolSearchView, ToolSearchMode, ToolSearchSnapshot};
+        let view = Arc::new(SharedToolSearchView::new());
+        let original = frozen_definition("Read", source_text_projection_units(&[0xd800]));
+        view.set_snapshot(ToolSearchSnapshot {
+            entries: vec![entry("Read", "read"), entry("Write", "write")],
+            definitions: vec![original.clone(), frozen_definition("Write", "write".into())],
+        });
+        let defer = Arc::new(DeferralState::new(ToolSearchMode::Enabled, false));
+        let tool = ToolSearchTool::with_view_and_deferral(
+            shell_test_ctx(dummy_out()),
+            view.clone(),
+            defer.clone(),
+        );
+        let mut ctx = fresh_ctx();
+        ctx.available_tool_names = Some(vec!["ToolSearch".into(), "Read".into()]);
+        let result = Tool::call(
+            &tool,
+            generated_builtin_result(&json!({"query":"select:Write,Read"})),
+            ctx,
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result
+                .data
+                .subprojection("/matches")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"["Read"]"#
+        );
+        assert_eq!(result.data.array_len("/tool_definitions"), Some(1));
+        assert_eq!(
+            result.data.string_units("/tool_definitions/0/description"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            result
+                .data
+                .subprojection("/tool_definitions/0/input_schema")
+                .unwrap(),
+            original.input_schema
+        );
+        assert!(!defer.should_defer("Read", true));
+        assert!(
+            defer.should_defer("Write", true),
+            "a hidden match cannot load a parent capability"
+        );
+        assert_eq!(view.snapshot().entries.len(), 2);
+        assert_eq!(view.snapshot().definitions.len(), 2);
+
+        let mut empty = fresh_ctx();
+        empty.available_tool_names = Some(Vec::new());
+        let none = Tool::call(
+            &tool,
+            generated_builtin_result(&json!({"query":"select:Write,Read"})),
+            empty,
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(none.data.array_len("/matches"), Some(0));
+        assert!(none.data.subprojection("/tool_definitions").is_err());
+        let parent = call_source(&tool, "select:Write,Read").await;
+        assert_eq!(
+            parent.data.array_len("/matches"),
+            Some(2),
+            "None retains the complete ordinary catalog"
+        );
+        assert_eq!(parent.data.array_len("/tool_definitions"), Some(2));
     }
 
     #[tokio::test]

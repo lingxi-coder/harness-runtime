@@ -280,10 +280,6 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // the next step re-emits it.
         return Ok(PtlCallOutcome::BlockingLimit);
     }
-    // Past the preempt: the snapshot WILL be sent, so this step's `date_change`
-    // reminder counts as delivered.
-    orch.commit_date_change_reminder();
-
     // Context-hint negotiation (oracle `e1y`): offer the server a compact we
     // could perform, and act on a 422/424 asking us to. `None` unless BOTH the
     // route allows first-party betas and the controller's own env gate is on —

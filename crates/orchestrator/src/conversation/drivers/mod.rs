@@ -992,13 +992,22 @@ impl ConversationOrchestrator {
         state: &mut TurnLoopState,
         step: TurnStepOutcome,
         output_tokens: u64,
-    ) -> TurnEndVerdict {
+    ) -> Result<TurnEndVerdict, OrchestratorError> {
         // A3: accumulate the running per-turn output tokens (TS
         // `getTurnOutputTokens()`). No-op for accounting when budget is off.
         // One site for both entries, reached exactly once per step.
         state.global_turn_tokens = state.global_turn_tokens.saturating_add(output_tokens);
-        match step {
+        Ok(match step {
             TurnStepOutcome::Continue(transition) => {
+                // SDK human inputs join only after real tool settlement, as
+                // on the streaming path. A cancelled or exhausted turn leaves
+                // its queued followers for the next admitted turn.
+                if transition == crate::turn_loop::NativeQueryTransition::NextTurn
+                    && !token_aborted(&state.user_cancel)
+                    && (self.config.max_turns == 0 || state.turn_count < self.config.max_turns)
+                {
+                    self.drain_mid_turn_input_after_tools().await?;
+                }
                 if transition == crate::turn_loop::NativeQueryTransition::RefusalReissue {
                     state.refusal_reissue_pending = true;
                 }
@@ -1026,7 +1035,7 @@ impl ConversationOrchestrator {
                 )
                 .await
             }
-        }
+        })
     }
 
     /// Drive one user prompt through the turn loop until `end_turn` or
@@ -1241,7 +1250,7 @@ impl ConversationOrchestrator {
             .await?;
             match self
                 .run_batched_round(&mut state, step, output_tokens)
-                .await
+                .await?
             {
                 TurnEndVerdict::Continue => continue,
                 TurnEndVerdict::StopHookTerminated(outcome) => return Ok(outcome),
@@ -4027,7 +4036,7 @@ impl ConversationOrchestrator {
             let (step, output_tokens) = result?;
             match self
                 .run_batched_round(&mut state, step, output_tokens)
-                .await
+                .await?
             {
                 TurnEndVerdict::Continue => continue,
                 // `TurnOutcome` does not distinguish StopHookPrevented from

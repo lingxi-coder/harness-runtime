@@ -611,6 +611,8 @@ pub struct JsonlWriter {
     /// mutex, so A→B cannot redirect a late A append into B's transcript.
     session_targets: Arc<std::sync::RwLock<HashMap<SessionId, DurableTranscriptTarget>>>,
     lock: Mutex<()>,
+    #[cfg(test)]
+    batch_admission_observer: std::sync::Mutex<Option<BatchAdmissionObserver>>,
     /// Host-only outer-UUID index ledger cache. The durable transcript lock
     /// or rooted sidecar flock serializes each ledger mutation with its row.
     identity_store: IdentityLogStore,
@@ -647,6 +649,12 @@ pub struct JsonlWriter {
     /// boundary is written (@296794903).
     compact_backstop_bytes: AtomicU64,
 }
+
+#[cfg(test)]
+type BatchAdmissionObserver = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
 
 /// Producer-owned operations staged before a session writer is available.
 /// The writer drains this same FIFO under its normal append lease.
@@ -1091,6 +1099,8 @@ impl JsonlWriter {
             active_durable_target: Arc::new(std::sync::RwLock::new(None)),
             session_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             lock: Mutex::new(()),
+            #[cfg(test)]
+            batch_admission_observer: std::sync::Mutex::new(None),
             identity_store: Arc::new(std::sync::Mutex::new(HashMap::new())),
             bytes_since_metadata_re_append: AtomicUsize::new(0),
             metadata_states: std::sync::RwLock::new(HashMap::new()),
@@ -3207,7 +3217,17 @@ impl JsonlWriter {
                 )
             })?;
             let identity_store = self.identity_store.clone();
+            #[cfg(test)]
+            let batch_admission_observer = self.batch_admission_observer.lock().unwrap().take();
             tokio::task::spawn_blocking(move || {
+                // The owned operation has started independently of its async
+                // waiter. Tests cancel only after this boundary, never by
+                // inferring admission from an in-process mutex reservation.
+                #[cfg(test)]
+                if let Some((admitted, release)) = batch_admission_observer {
+                    let _ = admitted.send(());
+                    let _ = release.recv();
+                }
                 let mut appended = 0;
                 let result = target.writer.with_transaction(|transaction| {
                     let (root, identity, _, mut admitted) =
@@ -8501,7 +8521,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admitted_batch_finishes_after_waiter_is_cancelled() {
-        let (_root, session, path, durable, writer) = scheduled_anchor_fixture();
+        let (_root, session, path, _durable, writer) = scheduled_anchor_fixture();
         writer
             .initialize_fixed_session_mode(
                 &session.as_uuid().to_string(),
@@ -8512,31 +8532,18 @@ mod tests {
             .unwrap();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let lock_holder = tokio::task::spawn_blocking(move || {
-            durable.with_transaction(|_| {
-                entered_tx.send(()).unwrap();
-                release_rx
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-                Ok(())
-            })
-        });
-        entered_rx.await.unwrap();
+        *writer.batch_admission_observer.lock().unwrap() = Some((entered_tx, release_rx));
         let appending = {
             let writer = writer.clone();
             tokio::spawn(async move { writer.append_batch(&batch_test_rows(session)).await })
         };
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while writer.lock.try_lock().is_ok() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
         appending.abort();
         assert!(appending.await.unwrap_err().is_cancelled());
         release_tx.send(()).unwrap();
-        lock_holder.await.unwrap().unwrap();
         // The admitted batch completes on the writer's own task; a loaded
         // runner can take well over a few seconds to schedule it.
         tokio::time::timeout(std::time::Duration::from_secs(30), async {

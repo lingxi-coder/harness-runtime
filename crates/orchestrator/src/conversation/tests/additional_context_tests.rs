@@ -3758,13 +3758,13 @@ async fn runtime_message_stays_first_when_transient_context_is_reattached() {
         assert_eq!(messages.len(), 6 + turn_reminders.len());
         assert_eq!(text(&messages[0]), runtime);
         assert!(text(&messages[1]).contains("Guest workspace: /home/lingxi/lingxi/a"));
-        assert_eq!(messages[2], date);
-        assert_eq!(messages[3], deferred);
-        assert_eq!(&messages[4], captured);
-        assert_eq!(serde_json::to_vec(&messages[4]).unwrap(), captured_bytes);
-        assert!(!text(&messages[4]).contains("unrelated-later-context@example.test"));
-        assert_eq!(&messages[5..messages.len() - 1], turn_reminders.as_slice());
-        assert_eq!(messages.last(), Some(&original));
+        assert_eq!(&messages[2], captured);
+        assert_eq!(serde_json::to_vec(&messages[2]).unwrap(), captured_bytes);
+        assert!(!text(&messages[2]).contains("unrelated-later-context@example.test"));
+        assert_eq!(&messages[3..messages.len() - 3], turn_reminders.as_slice());
+        assert_eq!(messages[messages.len() - 3], original);
+        assert_eq!(messages[messages.len() - 2], date);
+        assert_eq!(messages.last(), Some(&deferred));
     }
 }
 
