@@ -6496,7 +6496,9 @@ async fn early_abort_seals_on_the_callers_effective_partial_ok_not_just_config()
 async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_partial_ok_is_true() {
     let mut config = test_config();
     config.min_successful_panels = 2;
-    config.panel_total_timeout_ms = 5_000;
+    // Far above the elapsed bound below, so only a missing early abort (not a
+    // loaded runner) can cross it.
+    config.panel_total_timeout_ms = 60_000;
     assert!(
         config.partial_ok,
         "config.partial_ok must stay at its default true so the seal below \
@@ -6521,10 +6523,10 @@ async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_par
         .expect_err("one real failure plus two host-aborted siblings leaves zero successes");
 
     assert!(
-        wall_started.elapsed() < std::time::Duration::from_millis(1_000),
+        wall_started.elapsed() < std::time::Duration::from_secs(30),
         "orch.run() took {:?}, meaning the request-level partial_ok:false \
          opt-out never reached the early-abort bar and the two hanging \
-         siblings ran out their full 5s panel_total_timeout_ms instead of \
+         siblings ran out their full 60s panel_total_timeout_ms instead of \
          being sealed the moment the first panel failed",
         wall_started.elapsed()
     );
@@ -6534,11 +6536,11 @@ async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_par
     // label the settings-level `fusion.partialOk: false` path already
     // produces for an identical shape.
     assert_eq!(error, FusionError::AllPanelsFailed);
-    for _ in 0..200 {
-        if spawner.live() == 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
+    // Dropped sibling tasks and their telemetry settle on the runtime after
+    // `run()` returns; wait under a deadline rather than a fixed yield budget.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while spawner.live() != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert_eq!(
         spawner.live(),
@@ -6546,22 +6548,28 @@ async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_par
         "both hanging sibling tasks must be dropped by the early abort"
     );
 
-    let aborted_panel_events = sink
-        .events()
-        .await
-        .iter()
-        .filter(|event| {
-            event.name == telemetry::tengu::fusion::PANEL_FAILED
-                && matches!(
-                    event.metadata.get("error_category"),
-                    Some(AnalyticsValue::String(category)) if category == "aborted"
-                )
-        })
-        .count();
+    let aborted_panel_events = loop {
+        let count = sink
+            .events()
+            .await
+            .iter()
+            .filter(|event| {
+                event.name == telemetry::tengu::fusion::PANEL_FAILED
+                    && matches!(
+                        event.metadata.get("error_category"),
+                        Some(AnalyticsValue::String(category)) if category == "aborted"
+                    )
+            })
+            .count();
+        if count >= 2 || tokio::time::Instant::now() >= deadline {
+            break count;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    };
     assert_eq!(
         aborted_panel_events, 2,
         "both hanging siblings must have been sealed by the bar as \
-         `error_category: aborted` before ever hitting their own 5s \
+         `error_category: aborted` before ever hitting their own 60s \
          panel_total_timeout_ms"
     );
 }

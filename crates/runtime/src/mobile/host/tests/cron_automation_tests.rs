@@ -206,8 +206,10 @@ async fn supervisor_reports_unknown_without_replaying_after_persistent_commit_fa
     let counted = executions.clone();
     let session_id = uuid::Uuid::new_v4().to_string();
     let result_id = session_id.clone();
+    // The persistent-commit retries run on the real clock (~16.5 s alone);
+    // leave headroom for a loaded runner while still bounding a hang.
     let dto = tokio::time::timeout(
-        std::time::Duration::from_secs(25),
+        std::time::Duration::from_secs(60),
         supervise_mobile_automation(
             fs.clone(),
             temp.path().into(),

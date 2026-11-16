@@ -5158,7 +5158,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         .await
         .unwrap()
         .unwrap();
-        let body = match tokio::time::timeout(std::time::Duration::from_secs(5), captured_rx).await
+        let body = match tokio::time::timeout(std::time::Duration::from_secs(30), captured_rx).await
         {
             Ok(Ok(body)) => body,
             Ok(Err(error)) => panic!("provider request capture channel closed: {error}"),
@@ -5172,7 +5172,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
                     )
                     .await;
                 panic!(
-                    "no provider request arrived within 5s after human-resume startup: {error}; task state: {state:?}; task output: {output:?}"
+                    "no provider request arrived within 30s after human-resume startup: {error}; task state: {state:?}; task output: {output:?}"
                 );
             }
         };
@@ -6355,14 +6355,23 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
         assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Completed));
         assert_eq!(process.commands(), ["printf no-response"]);
         assert!(pending.captured_calls().is_empty(), "false suppresses model follow-up");
-        let terminal_events = listener
-            .received
-            .lock()
-            .await
-            .iter()
-            .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
-            .cloned()
-            .collect::<Vec<_>>();
+        // `TurnEnded` is published after the durable checkpoint completes; a
+        // loaded runner can observe the checkpoint first.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let terminal_events = loop {
+            let events = listener
+                .received
+                .lock()
+                .await
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !events.is_empty() || tokio::time::Instant::now() >= deadline {
+                break events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
         assert_eq!(terminal_events.len(), 1, "one terminal event: {terminal_events:?}");
         assert!(matches!(
             terminal_events.first(),

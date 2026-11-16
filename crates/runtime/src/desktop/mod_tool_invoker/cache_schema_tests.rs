@@ -86,6 +86,10 @@ mod cached_catalog {
         }
     }
 
+    /// `MCP_DISCOVERY_CACHE` is process-global: one fixture's restore must not
+    /// disable the cache while another is between its two connects.
+    static CACHE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     struct CacheEnv(Option<std::ffi::OsString>);
     impl Drop for CacheEnv {
         fn drop(&mut self) {
@@ -100,6 +104,7 @@ mod cached_catalog {
     async fn check_cached_mod_catalog(streaming: bool, without_validator: bool) {
         use lingxi_core::types::{ContentBlock as Block, ToolUseId};
         use orchestrator::test_support::*;
+        let _serial = CACHE_ENV_LOCK.lock().await;
         let _env = CacheEnv(std::env::var_os("MCP_DISCOVERY_CACHE"));
         std::env::set_var("MCP_DISCOVERY_CACHE", "true");
         let dir = tempfile::tempdir().unwrap();

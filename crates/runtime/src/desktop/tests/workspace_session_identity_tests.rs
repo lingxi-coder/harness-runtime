@@ -967,6 +967,12 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
 async fn remount_loads_target_project_settings_but_retains_original_hook_project_root() {
     use super::{configure_session_hook_root, load_effective_settings_for_config, DesktopConfig};
 
+    // Hook execution reads the process-global managed policy (a sibling test's
+    // `disableAllHooks` drop-in would silence this hook); serialize with the
+    // tests that point `LINGXI_MANAGED_DIR` at their tempdirs.
+    let _managed_env = crate::desktop::tests::MANAGED_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let root = tempfile::tempdir().unwrap();
     let launch = root.path().join("launch");
     let target = root.path().join("target");
