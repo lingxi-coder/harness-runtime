@@ -709,7 +709,7 @@ async fn run_inner(
                     if let Some(stop) = &stop { stop.notified().await; }
                     else { std::future::pending::<()>().await; }
                 } => true,
-                result = stdin.write_all(text.as_bytes()) => {
+                result = super::runner::write_child_stdin(&mut stdin, text) => {
                     result.map_err(io_error)?;
                     false
                 }

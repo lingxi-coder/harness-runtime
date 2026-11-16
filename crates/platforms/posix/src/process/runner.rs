@@ -1295,8 +1295,7 @@ impl ProcessRunner for PosixProcess {
         };
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
+                write_child_stdin(&mut stdin, stdin_text)
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -1341,8 +1340,7 @@ impl ProcessRunner for PosixProcess {
 
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
+                write_child_stdin(&mut stdin, stdin_text)
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -1497,7 +1495,7 @@ impl ProcessRunner for PosixProcess {
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 tokio::select! {
-                    result = stdin.write_all(stdin_text.as_bytes()) => {
+                    result = write_child_stdin(&mut stdin, stdin_text) => {
                         if let Err(cause) = result {
                             let cause = ProcessError::Io(cause.to_string());
                             if stop_notify.is_some() {
@@ -2107,8 +2105,7 @@ impl ProcessRunner for PosixProcess {
         let agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
+                write_child_stdin(&mut stdin, stdin_text)
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -2475,6 +2472,21 @@ impl ProcessRunner for PosixProcess {
 
     fn is_available(&self) -> bool {
         true
+    }
+}
+
+/// Write a command's input and close its stdin. A child that exits (or closes
+/// stdin) without reading the input is not a failure — `printf ok`, `exit 0` —
+/// so `EPIPE` is swallowed and the child's own exit/output stay authoritative,
+/// as with Node's ignored stdin `EPIPE` upstream. Whether the child is gone
+/// before the write is a scheduling race, so failing here was nondeterministic.
+async fn write_child_stdin<W>(stdin: &mut W, text: &str) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    match stdin.write_all(text.as_bytes()).await {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
     }
 }
 
@@ -3313,6 +3325,51 @@ mod async_hook_tests {
             }
             HookRunOutcome::Backgrounded { .. } => panic!("normal hook must not background"),
         }
+    }
+
+    /// Input larger than a pipe buffer to a child that never reads it: the
+    /// parent's write always hits `EPIPE` once the child exits.
+    fn ignores_large_stdin(script: &str) -> SandboxedCommand {
+        let pcmd = ProcessCommand {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            timeout: Some(Duration::from_secs(30)),
+            stdin: Some("x".repeat(4 << 20)),
+        };
+        SandboxedCommand::__new_sandboxed(
+            pcmd,
+            SandboxedTag::BypassAuditedWithReason {
+                reason: HOOK_COMMAND_AUDIT_REASON.to_string(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn hook_that_ignores_stdin_keeps_its_output() {
+        let cmd = ignores_large_stdin("exec 0<&-; printf 'A-hook\\n'");
+        let outcome = PosixProcess::new()
+            .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
+            .await
+            .expect("a child that skips its input still completes");
+        match outcome {
+            HookRunOutcome::Completed(o) => {
+                assert_eq!(o.stdout, "A-hook\n");
+                assert_eq!(o.exit_code, 0);
+            }
+            HookRunOutcome::Backgrounded { .. } => panic!("normal hook must not background"),
+        }
+    }
+
+    #[tokio::test]
+    async fn command_that_ignores_stdin_keeps_its_output() {
+        let cmd = ignores_large_stdin("exec 0<&-; printf ok");
+        let output = ProcessRunner::run(&PosixProcess::new(), &cmd)
+            .await
+            .expect("a child that skips its input still completes");
+        assert_eq!(output.stdout, "ok");
+        assert_eq!(output.exit_code, 0);
     }
 
     #[tokio::test]
