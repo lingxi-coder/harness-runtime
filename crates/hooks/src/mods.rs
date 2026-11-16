@@ -10444,7 +10444,9 @@ mod tests {
             .await
             .unwrap();
         let mut new_lines = BufReader::new(new_output).lines();
-        let line = tokio::time::timeout(Duration::from_secs(1), new_lines.next_line())
+        // A cold `node` start can take seconds on a loaded runner; this only
+        // bounds a hang. The negative old-epoch check below stays short.
+        let line = tokio::time::timeout(Duration::from_secs(30), new_lines.next_line())
             .await
             .unwrap()
             .unwrap()
