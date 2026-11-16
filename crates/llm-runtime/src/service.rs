@@ -8749,6 +8749,7 @@ impl ApiService {
             let mut dispatch_callback_rejected = false;
             let mut callback_error = None;
             let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
+            let openai_cache_snapshot = crate::prompt_cache::openai_snapshot_prepared(&prepared);
             let mctc_header_sent = Self::request_beta_tokens(&prepared).iter().any(|beta| {
                 beta == lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header()
             });
@@ -8848,6 +8849,7 @@ impl ApiService {
                         }
                         any_dispatched = true;
                         crate::prompt_cache::observe_snapshot(cache_snapshot.clone());
+                        crate::prompt_cache::observe_openai_snapshot(openai_cache_snapshot.clone());
                         Ok(())
                     })
                     .await;
@@ -9122,6 +9124,9 @@ impl ApiService {
                             provider_resp.clone(),
                             crate::upstream::family(&prepared.route.protocol),
                         )?;
+                        if prepared.local_tool_search_admitted {
+                            crate::history_projection::admit_local_tool_search(&mut response)?;
+                        }
                         if let Some(prefix) = req.execution.context_usage_prefix.as_ref().filter(|prefix| prefix.matches_prompt(&req)) {
                             prefix.attach(&mut response.usage)?;
                         }
@@ -11078,6 +11083,7 @@ impl ApiService {
                 }
                 safety.inherit_if_missing(attempt.model_safety_observer());
                 let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
+                let openai_cache_snapshot = crate::prompt_cache::openai_snapshot_prepared(&prepared);
                 let mctc_header_sent = Self::request_beta_tokens(&prepared).iter().any(|beta| {
                     beta == lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header()
                 });
@@ -11141,6 +11147,7 @@ impl ApiService {
                             }
                             any_dispatched = true;
                             crate::prompt_cache::observe_snapshot(cache_snapshot.clone());
+                            crate::prompt_cache::observe_openai_snapshot(openai_cache_snapshot.clone());
                             Ok(())
                         })
                         .await
@@ -11869,6 +11876,7 @@ impl ApiService {
                         crate::upstream::family(&prepared.route.protocol),
                         response_metadata,
                     )?;
+                    decoder.local_tool_search_admitted = prepared.local_tool_search_admitted;
                     crate::history_projection::attach_output_budget(
                         &mut decoder.metadata,
                         prepared_output_budget_observation(&prepared, &req.input),
@@ -13261,6 +13269,7 @@ impl ApiService {
                 true
             });
         }
+        let local_tool_search_history = crate::local_tool_search::capture_history(&mut msgs)?;
         let tool_search_enabled = self
             .tool_search_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -13307,6 +13316,8 @@ impl ApiService {
             }
         }
         let mut req = LlmRequest::new(model);
+        req.execution.local_tool_search_history =
+            tool_search_enabled.then(|| Arc::new(local_tool_search_history));
         req.execution.isolated_query = crate::computer::uses_auxiliary_history_projection();
         if let Some(thinking) = main_thinking_config {
             req.execution.native_thinking_request_type_disabled =

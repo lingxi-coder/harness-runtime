@@ -85,7 +85,7 @@ pub use session_tool_policy::{McpToolIdentity, SessionToolGrantLease, SessionToo
 pub use todo_tools_gate::todo_tools_enabled;
 pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_search_view::{
-    SharedToolSearchView, StaticRegistryView, ToolRegistryView, ToolSearchEntry,
+    SharedToolSearchView, StaticRegistryView, ToolRegistryView, ToolSearchEntry, ToolSearchSnapshot,
 };
 pub use tool_trait::*;
 pub use worktree_session::{

@@ -20,7 +20,7 @@
 //! entries, not `HashMap`) so that order is deterministic before the sort.
 
 use crate::defer::DeferralState;
-use crate::tool_search_view::{SharedToolSearchView, ToolSearchEntry};
+use crate::tool_search_view::{SharedToolSearchView, ToolSearchEntry, ToolSearchSnapshot};
 use crate::tool_trait::{BashPrecommitSkills, Tool, ToolStaticContext};
 use crate::wire::locale_cmp;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -438,32 +438,52 @@ impl ToolRegistry {
         &self,
         wire: &[lingxi_core::host::SourceToolWireDefinition],
     ) {
-        let wire_names: std::collections::HashSet<&str> =
-            wire.iter().map(|entry| entry.name.as_str()).collect();
-        let descriptions: std::collections::HashMap<&str, &Utf16JsonProjection> = wire
+        self.refresh_tool_search_view_with_definitions(wire, wire);
+    }
+
+    /// Publish ordinary search text together with exact loaded definitions.
+    /// MCP definitions can have a larger description budget after loading;
+    /// that must not change the existing keyword-ranking corpus.
+    pub fn refresh_tool_search_view_with_definitions(
+        &self,
+        search_wire: &[lingxi_core::host::SourceToolWireDefinition],
+        definition_wire: &[lingxi_core::host::SourceToolWireDefinition],
+    ) {
+        let search: std::collections::HashMap<_, _> = search_wire
             .iter()
-            .map(|entry| (entry.name.as_str(), &entry.description))
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect();
+        let definitions: std::collections::HashMap<_, _> = definition_wire
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
             .collect();
         let ctx = ToolStaticContext::default();
-        let entries = self
+        let entries: Vec<_> = self
             .available_tools(&ctx)
             .iter()
             .filter(|tool| {
-                wire_names.contains(tool.name())
+                search.contains_key(tool.name())
                     && self.deferral.keeps_deferred_tools()
                     && self.deferral.wants_defer(tool.name(), tool.should_defer())
             })
             .map(|tool| ToolSearchEntry {
                 name: tool.name().to_string(),
-                description: descriptions
+                description: search
                     .get(tool.name())
-                    .map(|description| (*description).clone())
+                    .map(|definition| definition.description.clone())
                     .unwrap_or_else(|| Utf16JsonProjection::from("")),
                 search_hint: tool.search_hint(),
             })
             .collect();
+        let definitions = entries
+            .iter()
+            .filter_map(|entry| definitions.get(entry.name.as_str()).copied().cloned())
+            .collect();
         self.refresh_tool_search_policy();
-        self.tool_search_view.set_entries(entries);
+        self.tool_search_view.set_snapshot(ToolSearchSnapshot {
+            entries,
+            definitions,
+        });
     }
 
     fn refresh_tool_search_policy(&self) {
@@ -1951,9 +1971,56 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["Visible"]);
         assert!(!names.iter().any(|name| name == "Hidden"));
+        let snapshot = registry.tool_search_view().snapshot();
+        assert_eq!(snapshot.definitions.len(), 1);
+        assert_eq!(snapshot.definitions[0], wire[1]);
         // The ToolSearch consumer can only mark a returned view match loaded;
         // an omitted filtered tool stays unavailable to both search and wire.
         assert!(!deferral.is_loaded("Hidden"));
+    }
+
+    #[test]
+    fn tool_search_snapshot_keeps_ordinary_ranking_text_and_loaded_definition_text_separate() {
+        let mut registry = ToolRegistry::new();
+        registry.set_deferral(Arc::new(crate::defer::DeferralState::new(
+            crate::defer::ToolSearchMode::Enabled,
+            false,
+        )));
+        registry.register_builtin(Arc::new(DeferNamedTool {
+            name: "Visible",
+            defer: true,
+            hint: None,
+        }));
+        registry.register_builtin(Arc::new(DeferNamedTool {
+            name: "Hidden",
+            defer: true,
+            hint: None,
+        }));
+        let ordinary = lingxi_core::host::SourceToolWireDefinition {
+            name: "Visible".into(),
+            description: "ordinary ranking keywords".into(),
+            input_schema: source_schema_fixture(serde_json::json!({"type":"object"})),
+            strict: false,
+            defer_loading: true,
+        };
+        let mut loaded = ordinary.clone();
+        loaded.description = "expanded loaded definition text".into();
+        let mut hidden = loaded.clone();
+        hidden.name = "Hidden".into();
+        registry.refresh_tool_search_view_with_definitions(
+            std::slice::from_ref(&ordinary),
+            &[loaded.clone(), hidden],
+        );
+        let snapshot = registry.tool_search_view().snapshot();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].description, ordinary.description);
+        assert_eq!(snapshot.definitions, vec![loaded]);
+
+        registry.refresh_tool_search_view_from_wire(std::slice::from_ref(&ordinary));
+        assert_eq!(
+            registry.tool_search_view().snapshot().definitions,
+            vec![ordinary]
+        );
     }
 
     #[test]

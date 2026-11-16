@@ -319,6 +319,26 @@ fn history_fingerprint(history: &[ConversationMessage]) -> Option<String> {
 fn prompt_fingerprint(request: &crate::LlmRequest) -> Option<String> {
     let system = crate::prompt_projection::system_for_estimate(request);
     let input = &request.input;
+    let native_tools = request
+        .execution
+        .prompt_projection_profile
+        .as_ref()
+        .and_then(|profile| {
+            crate::local_tool_search::tools(
+                request,
+                profile,
+                request
+                    .execution
+                    .context_usage_wire_model
+                    .as_deref()
+                    .unwrap_or(&input.model),
+                profile.auth,
+            )
+        });
+    let (tools, hosted_tools) = native_tools
+        .as_ref()
+        .map(|(tools, hosted)| (tools, hosted))
+        .unwrap_or((&input.tools, &input.hosted_tools));
     let replaces = |field| crate::anthropic_extra_body::replaces(request, field);
     digest(&(
         &input.model,
@@ -330,8 +350,8 @@ fn prompt_fingerprint(request: &crate::LlmRequest) -> Option<String> {
             .or(request.execution.input_protocol),
         &request.execution.prompt_projection_profile,
         (!replaces("system")).then_some(system.as_ref()),
-        (!replaces("tools")).then_some(&input.tools),
-        (!replaces("tools")).then_some(&input.hosted_tools),
+        (!replaces("tools")).then_some(tools),
+        (!replaces("tools")).then_some(hosted_tools),
         &input.native_options,
         (!(replaces("output_format") || replaces("output_config"))).then_some(&input.output_format),
         (!replaces("tool_choice")).then_some(&input.tool_choice),

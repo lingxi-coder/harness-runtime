@@ -1058,10 +1058,13 @@ impl ConversationOrchestrator {
         // ordinary description above; a Mod can transform either form.
         let mut loaded_tools = Vec::new();
         let mut loaded_wire = Vec::new();
+        let mut discovery_definitions = complete_wire.clone();
         for tool in &tools {
-            if !wire
-                .iter()
-                .any(|entry| entry.name == tool.name() && entry.defer_loading)
+            if !self.tools.deferral().is_enabled()
+                || !self
+                    .tools
+                    .deferral()
+                    .wants_defer(tool.name(), tool.should_defer())
             {
                 continue;
             }
@@ -1092,7 +1095,13 @@ impl ConversationOrchestrator {
             .await;
             for loaded in loaded_wire {
                 if let Some(entry) = wire.iter_mut().find(|entry| entry.name == loaded.name) {
-                    entry.description = loaded.description;
+                    entry.description = loaded.description.clone();
+                }
+                if let Some(entry) = discovery_definitions
+                    .iter_mut()
+                    .find(|entry| entry.name == loaded.name)
+                {
+                    *entry = loaded;
                 }
             }
         }
@@ -1101,7 +1110,7 @@ impl ConversationOrchestrator {
         // view (including descriptions), then hide ToolSearch itself whenever
         // the resolved request does not support the beta.
         self.tools
-            .refresh_tool_search_view_from_wire(&complete_wire);
+            .refresh_tool_search_view_with_definitions(&complete_wire, &discovery_definitions);
         if !self.tools.deferral().is_enabled() {
             wire.retain(|tool| tool.name != "ToolSearch");
         }

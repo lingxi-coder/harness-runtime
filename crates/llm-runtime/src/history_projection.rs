@@ -345,6 +345,8 @@ fn host_block(block: wire::ContentBlock) -> Result<ContentBlock, LlmError> {
                 block_type.as_deref(),
                 Some(
                     "lingxi_computer_binding"
+                        | "lingxi_tool_search_call"
+                        | "lingxi_tool_discovery"
                         | "lingxi_computer_receipt"
                         | "lingxi_computer_continuation"
                         | "lingxi_computer_receipt_ack"
@@ -439,6 +441,49 @@ fn stop(reason: wire::StopReason) -> String {
     }
 }
 
+fn tool_search_call_receipt(call: wire::JsonPayload) -> Result<ContentBlock, LlmError> {
+    let value = wire::JsonPayload::parse(r#"{"type":"lingxi_tool_search_call"}"#)
+        .map_err(invalid)?
+        .with_object_field("call", &call)
+        .map_err(invalid)?;
+    Ok(ContentBlock::ProviderContent {
+        protocol: "open_ai_responses".into(),
+        value,
+    })
+}
+
+/// Called only after the selected physical request advertised the host's
+/// native client search. Unsolicited provider-native items remain opaque.
+pub(crate) fn admit_local_tool_search(response: &mut HistoryResponse) -> Result<(), LlmError> {
+    if response.stop_reason.as_deref() != Some("requires_action") {
+        return Ok(());
+    }
+    let mut content = Vec::new();
+    let mut seen = false;
+    for block in std::mem::take(&mut response.content) {
+        if let ContentBlock::ProviderContent { protocol, value } = &block {
+            if protocol == "open_ai_responses" {
+                if let Some((id, input)) = crate::local_tool_search::call(value) {
+                    content.push(ContentBlock::ToolCall {
+                        id,
+                        name: "ToolSearch".into(),
+                        input,
+                    });
+                    content.push(tool_search_call_receipt(value.clone())?);
+                    seen = true;
+                    continue;
+                }
+            }
+        }
+        content.push(block);
+    }
+    response.content = content;
+    if seen {
+        response.stop_reason = Some("tool_use".into());
+    }
+    Ok(())
+}
+
 // These adapters exercise the host projection against SDK wire fixtures. They
 // are unit-test code only: the test-support Cargo feature cannot expose them.
 
@@ -450,6 +495,9 @@ fn wire_block_index(block: usize) -> Result<u32, LlmError> {
 }
 
 pub(crate) struct HistoryProjector {
+    pub(crate) local_tool_search_admitted: bool,
+    local_tool_search_seen: bool,
+    pending_local_tool_search: std::collections::BTreeMap<u32, wire::JsonPayload>,
     server_lane: Option<client::providers::anthropic::fallback_request::ServerLane>,
     server_profile: String,
     request_model: String,
@@ -639,6 +687,10 @@ impl HistoryProjector {
                 self.pending_projection.insert(position);
                 continue;
             };
+            if self.pending_local_tool_search.contains_key(&index) {
+                self.pending_projection.insert(position);
+                continue;
+            }
             // Native payloads and materialized tools are already complete.
             // Text signatures must wait for their explicit block/turn boundary.
             if !self.assembly.is_terminal()
@@ -1106,6 +1158,13 @@ impl HistoryProjector {
                             continue;
                         }
                     }
+                    if self.local_tool_search_admitted
+                        && protocol == wire::ProtocolFamily::OpenAiResponses
+                        && crate::local_tool_search::call(&value).is_some()
+                    {
+                        self.pending_local_tool_search.insert(index, value);
+                        continue;
+                    }
                     let native = wire::ContentBlock::ProviderContent { protocol, value };
                     self.start(index | 0x8000_0000, host_block(native)?, &mut out);
                 }
@@ -1115,6 +1174,53 @@ impl HistoryProjector {
                     inference,
                 } => {
                     if !self.done {
+                        let requires_action = matches!(&stop_reason, wire::StopReason::Other(reason) if reason == "requires_action");
+                        for (index, value) in std::mem::take(&mut self.pending_local_tool_search) {
+                            if requires_action {
+                                let (id, input) = crate::local_tool_search::call(&value)
+                                    .expect("validated native search call");
+                                // The streaming scheduler may execute as soon
+                                // as the visible call is complete. Deliver its
+                                // durable provenance first, so cancellation in
+                                // that tool cannot retain a result without the
+                                // native call receipt needed for stable replay.
+                                let receipt_index = index | 0x8000_0000;
+                                self.start(
+                                    receipt_index,
+                                    tool_search_call_receipt(value)?,
+                                    &mut out,
+                                );
+                                if self.closed.insert(receipt_index) {
+                                    out.push(HistoryEvent::ContentBlockStop {
+                                        index: receipt_index,
+                                    });
+                                }
+                                let already_closed = self.closed.remove(&index);
+                                self.start(
+                                    index,
+                                    ContentBlock::ToolCall {
+                                        id,
+                                        name: "ToolSearch".into(),
+                                        input,
+                                    },
+                                    &mut out,
+                                );
+                                self.local_tool_search_seen = true;
+                                if already_closed {
+                                    self.closed.insert(index);
+                                    out.push(HistoryEvent::ContentBlockStop { index });
+                                }
+                            } else {
+                                self.start(
+                                    index | 0x8000_0000,
+                                    host_block(wire::ContentBlock::ProviderContent {
+                                        protocol: wire::ProtocolFamily::OpenAiResponses,
+                                        value,
+                                    })?,
+                                    &mut out,
+                                );
+                            }
+                        }
                         if let Some(model) = self.server_response_model.as_deref() {
                             set_upstream_metadata_field(
                                 &mut self.metadata,
@@ -1182,7 +1288,13 @@ impl HistoryProjector {
                         if !self.stop_delta_seen || usage_is_final {
                             out.push(HistoryEvent::MessageDelta {
                                 delta: HistoryMessageDelta {
-                                    stop_reason: (!self.stop_delta_seen).then(|| stop(stop_reason)),
+                                    stop_reason: (!self.stop_delta_seen).then(|| {
+                                        if self.local_tool_search_seen {
+                                            "tool_use".into()
+                                        } else {
+                                            stop(stop_reason)
+                                        }
+                                    }),
                                     stop_details: self
                                         .metadata
                                         .payload_at("/stop_details")
@@ -1492,6 +1604,9 @@ impl HistoryProjector {
         clear_computer_binding(&mut metadata)?;
         clear_host_projection_fields(&mut metadata)?;
         Ok(Self {
+            local_tool_search_admitted: false,
+            local_tool_search_seen: false,
+            pending_local_tool_search: Default::default(),
             server_lane: None,
             server_profile: String::new(),
             request_model: String::new(),

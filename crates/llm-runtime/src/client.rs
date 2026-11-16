@@ -147,12 +147,10 @@ fn project_route_input<'a>(
     request: &'a LlmRequest,
     protocol: ProtocolFamily,
     route: &crate::registry::ResolvedRoute,
+    profile: &lingxi_llm_client::protocol::ProviderProfile,
+    auth: AuthStrategy,
 ) -> Result<std::borrow::Cow<'a, LlmRequest>, LlmError> {
-    let mut projected = if crate::anthropic_extra_body::is_anthropic(protocol) {
-        std::borrow::Cow::Borrowed(request)
-    } else {
-        portable_local_tool_discovery(request)?
-    };
+    let mut projected = std::borrow::Cow::Borrowed(request);
     if let Some(source) = projected.execution.input_protocol.filter(|source| {
         lingxi_llm_client::replay::native_family(*source)
             != lingxi_llm_client::replay::native_family(protocol)
@@ -162,6 +160,21 @@ fn project_route_input<'a>(
             source,
             protocol,
         )?);
+    }
+    if !crate::anthropic_extra_body::is_anthropic(protocol) {
+        if let std::borrow::Cow::Owned(native) = crate::local_tool_search::project(
+            projected.as_ref(),
+            profile,
+            &route.request_model,
+            auth,
+        )? {
+            projected = std::borrow::Cow::Owned(native);
+        }
+        if let std::borrow::Cow::Owned(portable) =
+            portable_local_tool_discovery(projected.as_ref())?
+        {
+            projected = std::borrow::Cow::Owned(portable);
+        }
     }
     let reasoning_block = |block: &lingxi_llm_client::protocol::ContentBlock| {
         matches!(
@@ -1952,7 +1965,13 @@ impl ModelRuntime {
             &resolved_route.request_model,
             native_route_admitted,
         );
-        let projected = project_route_input(request, effective_protocol, &resolved_route)?;
+        let projected = project_route_input(
+            request,
+            effective_protocol,
+            &resolved_route,
+            &entry.profile,
+            entry.auth,
+        )?;
         let request = projected.as_ref();
         let host_failure = Arc::new(Mutex::new(None));
         let authenticator = Arc::new(
@@ -2401,6 +2420,7 @@ impl ModelRuntime {
         }
 
         Ok(PreparedLlmCall {
+            local_tool_search_admitted: request.execution.local_tool_search_admitted,
             request_session_id: request.execution.request_session_id.clone(),
             api_attempts_left: request.execution.api_attempts_left.clone(),
             computer_binding,
@@ -2865,7 +2885,7 @@ impl ModelRuntime {
                 return Ok(tokens);
             }
         }
-        let projected = project_route_input(request, protocol, &route)?;
+        let projected = project_route_input(request, protocol, &route, &entry.profile, entry.auth)?;
         Ok(crate::model::count_tokens::approximate_tokens_for_route(
             projected.as_ref(),
             Some(&entry.profile),
@@ -2889,6 +2909,7 @@ impl ModelRuntime {
             .ok_or(LlmError::ModelUnavailable)?;
         let protocol = entry.effective_protocol(&route);
         request.execution.context_usage_protocol = Some(protocol);
+        request.execution.context_usage_wire_model = Some(route.request_model.clone());
         request.execution.prompt_projection_profile = Some(entry.profile.clone());
         binding.bind(request);
         Ok(())
@@ -2915,7 +2936,7 @@ impl ModelRuntime {
             .ok_or(LlmError::ModelUnavailable)?;
         let protocol = entry.effective_protocol(&route);
         crate::anthropic_extra_body::validate(request, protocol)?;
-        let visible = project_route_input(request, protocol, &route)?;
+        let visible = project_route_input(request, protocol, &route, &entry.profile, entry.auth)?;
         let request = visible.as_ref();
         validate_capabilities(request, route.capabilities)?;
         if !matches!(protocol, ProtocolFamily::AnthropicMessages) {
@@ -3339,6 +3360,7 @@ impl PlannedNativeBetaContext {
 }
 
 pub struct PreparedLlmCall {
+    pub(crate) local_tool_search_admitted: bool,
     pub(crate) request_session_id: Option<String>,
     pub(crate) api_attempts_left: Option<crate::ApiAttemptsLeft>,
     pub(crate) computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
@@ -3449,8 +3471,15 @@ mod physical_input_projection_tests {
         let mut request = LlmRequest::new("claude-sonnet-4-6")
             .with_profile("projection-test")
             .with_user_text("opaque retained history ".repeat(50_000));
-        let projected =
-            project_route_input(&request, ProtocolFamily::AnthropicMessages, &route).unwrap();
+        let entry = &runtime.routes["projection-test"];
+        let projected = project_route_input(
+            &request,
+            ProtocolFamily::AnthropicMessages,
+            &route,
+            &entry.profile,
+            entry.auth,
+        )
+        .unwrap();
         assert!(matches!(projected, std::borrow::Cow::Borrowed(_)));
         assert!(std::ptr::eq(projected.as_ref(), &request));
         drop(projected);

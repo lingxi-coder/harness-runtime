@@ -61,6 +61,7 @@ mod dispatch_header;
 pub mod error;
 mod execution;
 mod execution_context;
+mod local_tool_search;
 mod scope_output_quota;
 pub use scope_output_quota::{ScopeDispatchAuthorization, ScopeOutputQuota};
 mod structured_output;

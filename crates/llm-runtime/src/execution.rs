@@ -229,6 +229,14 @@ pub(crate) async fn prepare(
             .clone()
     });
     let client = cache.get(&profile, transport)?;
+    let classifier_input = crate::classifier_cache::project_request(
+        request,
+        &profile,
+        &route.request_model,
+        body_auth_strategy,
+        mode,
+    );
+    let request = classifier_input.as_ref();
     let mut input = crate::upstream::request(request, profile.protocol)?;
     input.model.clone_from(&route.display_model);
     if let Some(layout) = &request.execution.classifier_cache_layout {

@@ -810,18 +810,19 @@ impl Tool for ToolSearchTool {
         }
         bus.log_event(TOOL_SEARCH_STARTED, md).await;
 
-        let entries = self.view.entries();
+        let snapshot = self.view.snapshot();
+        let entries = &snapshot.entries;
 
         let SearchResult {
             matches,
             query_type,
-        } = match handle_select_source(&query_source, &entries) {
+        } = match handle_select_source(&query_source, entries) {
             Some(found) => SearchResult {
                 matches: found,
                 query_type: "select",
             },
             None => SearchResult {
-                matches: search_tools_with_keywords_source(&query_source, &entries, max_results),
+                matches: search_tools_with_keywords_source(&query_source, entries, max_results),
                 query_type: "keyword",
             },
         };
@@ -924,6 +925,47 @@ impl Tool for ToolSearchTool {
                 generated_builtin_result(&json!(max_results)),
             ),
         ];
+        // Host-owned by-value metadata for provider-native discovery. Only a
+        // complete snapshot of these exact matches can author definitions;
+        // entry-only/test views preserve their existing result shape.
+        if !matches.is_empty() {
+            let definitions = matches
+                .iter()
+                .map(|name| {
+                    let mut definitions = snapshot
+                        .definitions
+                        .iter()
+                        .filter(|definition| &definition.name == name);
+                    let definition = definitions.next()?;
+                    if definitions.next().is_some() {
+                        return None;
+                    }
+                    Some(
+                        Utf16JsonProjection::object(vec![
+                            ("name".into(), definition.name.clone().into()),
+                            ("description".into(), definition.description.clone()),
+                            ("input_schema".into(), definition.input_schema.clone()),
+                            (
+                                "strict".into(),
+                                generated_builtin_result(&json!(definition.strict)),
+                            ),
+                            (
+                                "defer_loading".into(),
+                                generated_builtin_result(&json!(definition.defer_loading)),
+                            ),
+                        ])
+                        .expect("frozen tool definition retains valid source JSON"),
+                    )
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(definitions) = definitions {
+                data.push((
+                    "tool_definitions".into(),
+                    Utf16JsonProjection::array(definitions)
+                        .expect("frozen tool definitions form a source-native array"),
+                ));
+            }
+        }
         if !pending_mcp_servers.is_empty() {
             data.push((
                 "pending_mcp_servers".into(),
@@ -1577,6 +1619,182 @@ mod tests {
         assert!(defer.is_loaded("TaskUpdate"));
         assert!(!defer.should_defer("Task", true));
         assert!(!defer.should_defer("TaskUpdate", true));
+    }
+
+    fn frozen_definition(
+        name: &str,
+        description: Utf16JsonProjection,
+    ) -> lingxi_core::host::SourceToolWireDefinition {
+        lingxi_core::host::SourceToolWireDefinition {
+            name: name.into(),
+            description,
+            input_schema: Utf16JsonProjection::parse(r#"{"type":"object","properties":{"\ud800":{"type":"string","description":"\ud801"}}}"#).unwrap(),
+            strict: true,
+            defer_loading: false,
+        }
+    }
+
+    async fn call_source(tool: &ToolSearchTool, query: &str) -> ToolCallResult {
+        Tool::call(
+            tool,
+            generated_builtin_result(&json!({"query": query})),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn call_freezes_exact_matched_definitions_before_later_catalog_changes() {
+        use tool_api::{SharedToolSearchView, ToolSearchSnapshot};
+        let view = Arc::new(SharedToolSearchView::new());
+        let original = frozen_definition("Read", source_text_projection_units(&[0xD800]));
+        view.set_snapshot(ToolSearchSnapshot {
+            entries: vec![entry("Read", "read"), entry("Write", "write")],
+            definitions: vec![original.clone(), frozen_definition("Write", "write".into())],
+        });
+        let tool = ToolSearchTool::with_view(shell_test_ctx(dummy_out()), view.clone());
+        let first = call_source(&tool, "select:Read").await;
+        view.set_snapshot(ToolSearchSnapshot {
+            entries: vec![entry("Read", "replacement")],
+            definitions: vec![frozen_definition("Read", "replacement".into())],
+        });
+
+        assert_eq!(first.data.array_len("/tool_definitions"), Some(1));
+        assert_eq!(
+            first.data.string_at("/tool_definitions/0/name"),
+            Some("Read")
+        );
+        assert_eq!(
+            first.data.string_units("/tool_definitions/0/description"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(
+            first
+                .data
+                .subprojection("/tool_definitions/0/input_schema")
+                .unwrap(),
+            original.input_schema
+        );
+        assert_eq!(
+            first
+                .data
+                .at_pointer("/tool_definitions/0/strict")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            first
+                .data
+                .at_pointer("/tool_definitions/0/defer_loading")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(
+            first.model_content.is_none(),
+            "definition metadata does not replace the existing model mapper"
+        );
+        let second = call_source(&tool, "select:Read").await;
+        assert_eq!(
+            second.data.string_at("/tool_definitions/0/description"),
+            Some("replacement")
+        );
+    }
+
+    #[tokio::test]
+    async fn call_requires_complete_unambiguous_definitions_and_keeps_match_order() {
+        use tool_api::{SharedToolSearchView, ToolSearchSnapshot};
+        let view = Arc::new(SharedToolSearchView::new());
+        let entries = vec![entry("Read", "read"), entry("Write", "write")];
+        view.set_snapshot(ToolSearchSnapshot {
+            entries: entries.clone(),
+            definitions: vec![frozen_definition("Read", "read".into())],
+        });
+        let tool = ToolSearchTool::with_view(shell_test_ctx(dummy_out()), view.clone());
+        let missing = call_source(&tool, "select:Write,Read").await;
+        assert_eq!(
+            missing
+                .data
+                .subprojection("/matches")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"["Write","Read"]"#
+        );
+        assert!(missing.data.subprojection("/tool_definitions").is_err());
+        view.set_snapshot(ToolSearchSnapshot {
+            entries: entries.clone(),
+            definitions: vec![
+                frozen_definition("Read", "read".into()),
+                frozen_definition("Write", "write".into()),
+            ],
+        });
+        let complete = call_source(&tool, "select:Write,Read").await;
+        assert_eq!(
+            complete.data.string_at("/tool_definitions/0/name"),
+            Some("Write")
+        );
+        assert_eq!(
+            complete.data.string_at("/tool_definitions/1/name"),
+            Some("Read")
+        );
+        view.set_snapshot(ToolSearchSnapshot {
+            entries,
+            definitions: vec![
+                frozen_definition("Read", "first".into()),
+                frozen_definition("Read", "second".into()),
+            ],
+        });
+        let ambiguous = call_source(&tool, "select:Read").await;
+        assert!(ambiguous.data.subprojection("/tool_definitions").is_err());
+    }
+
+    #[tokio::test]
+    async fn call_uses_one_snapshot_and_does_not_capture_revoked_definitions() {
+        use tool_api::{SharedToolSearchView, ToolSearchSnapshot};
+        struct SnapshotOnlyView;
+        impl ToolRegistryView for SnapshotOnlyView {
+            fn entries(&self) -> Vec<ToolSearchEntry> {
+                panic!("ToolSearch must take one complete snapshot");
+            }
+            fn snapshot(&self) -> ToolSearchSnapshot {
+                ToolSearchSnapshot {
+                    entries: vec![entry("Read", "read")],
+                    definitions: vec![frozen_definition("Read", "read".into())],
+                }
+            }
+        }
+        let tool =
+            ToolSearchTool::with_view(shell_test_ctx(dummy_out()), Arc::new(SnapshotOnlyView));
+        let result = call_source(&tool, "select:Read").await;
+        assert_eq!(result.data.array_len("/tool_definitions"), Some(1));
+
+        let view = Arc::new(SharedToolSearchView::new());
+        view.set_snapshot(ToolSearchSnapshot {
+            entries: vec![entry("Read", "read"), entry("Write", "write")],
+            definitions: vec![
+                frozen_definition("Read", "read".into()),
+                frozen_definition("Write", "write".into()),
+            ],
+        });
+        view.set_entry_filter(Arc::new(|name| name != "Write"));
+        let tool = ToolSearchTool::with_view(shell_test_ctx(dummy_out()), view);
+        let result = call_source(&tool, "select:Write,Read").await;
+        assert_eq!(
+            result
+                .data
+                .subprojection("/matches")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"["Read"]"#
+        );
+        assert_eq!(result.data.array_len("/tool_definitions"), Some(1));
+        assert_eq!(
+            result.data.string_at("/tool_definitions/0/name"),
+            Some("Read")
+        );
     }
 
     #[tokio::test]

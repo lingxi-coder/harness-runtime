@@ -538,7 +538,12 @@ impl ConversationOrchestrator {
         );
         {
             let mut session = self.session.lock().await;
-            session.model_context_excluded_messages.extend(retired);
+            // A same-epoch restore retains the exact historical model prefix.
+            // Its durable skill updates retire registry activations separately;
+            // a real profile transition still invalidates the old context.
+            if retire || !preserve_matching_prompt {
+                session.model_context_excluded_messages.extend(retired);
+            }
             // Only host-owned envelope provenance is inspected. Identical text
             // quoted in an attachment or tool result is never reclassified.
             let obsolete = session
@@ -625,6 +630,7 @@ impl ConversationOrchestrator {
         let session_id = self.current_session_id().await.to_string();
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
         let history = self.session.lock().await.model_context_history();
+        let retired = super::skill_projection_impl::retired_skill_sources(&history, epoch);
         let attachments = self
             .transcript
             .post_compact_skill_attachments
@@ -657,6 +663,12 @@ impl ConversationOrchestrator {
                 continue;
             }
             if origin.subprojection("/skill_name").is_ok() {
+                if origin
+                    .string_units("/skill_name")
+                    .is_some_and(|name| retired.contains(&(id, name)))
+                {
+                    continue;
+                }
                 compaction::invoked_skills::register_accepted_skill_message(
                     &accepted_message,
                     scope,
@@ -664,6 +676,12 @@ impl ConversationOrchestrator {
             } else if let Some(bodies) = attachments.get(&id) {
                 for (index, body) in bodies.iter().enumerate() {
                     if let Ok(name) = origin.subprojection(&format!("/skills/{index}/name")) {
+                        if name
+                            .string_units("")
+                            .is_some_and(|name| retired.contains(&(id, name)))
+                        {
+                            continue;
+                        }
                         let path = origin
                             .string_at(&format!("/skills/{index}/path"))
                             .unwrap_or("");

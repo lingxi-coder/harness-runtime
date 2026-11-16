@@ -12,6 +12,183 @@ use lingxi_llm_client::{
     RequestMode,
 };
 
+/// Keep each classifier history line at an immutable Responses message end.
+/// Moving a breakpoint inside one growing user message cannot reuse the old
+/// line's implicit message boundary. Work on a route-local copy so fallback
+/// protocols retain their original layout and exact-string coordinates.
+pub(crate) fn project_request<'a>(
+    request: &'a crate::LlmRequest,
+    profile: &ProviderProfile,
+    wire_model: &str,
+    auth: AuthStrategy,
+    mode: RequestMode,
+) -> std::borrow::Cow<'a, crate::LlmRequest> {
+    use lingxi_llm_client::protocol::{ContentBlock, ConversationMessage, MessageRole};
+    use std::borrow::Cow;
+    use std::collections::BTreeMap;
+
+    let Some(layout) = &request.execution.classifier_cache_layout else {
+        return Cow::Borrowed(request);
+    };
+    if request.execution.enable_prompt_caching == Some(false)
+        || profile.provider_id.as_str() != "openai"
+        || profile.protocol != ProtocolFamily::OpenAiResponses
+        || !matches!(auth, AuthStrategy::ApiKey | AuthStrategy::Bearer)
+    {
+        return Cow::Borrowed(request);
+    }
+    let Some(CachePosition::Message { index: target, .. }) = layout.action.or(layout.history)
+    else {
+        return Cow::Borrowed(request);
+    };
+    let Some(message) = request.input.messages.get(target) else {
+        return Cow::Borrowed(request);
+    };
+    if message.role != MessageRole::User
+        || message.content.len() < 2
+        || !message.native_options.is_empty()
+        || !message.content.iter().all(|block| {
+            matches!(
+                block,
+                ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. }
+            )
+        })
+    {
+        return Cow::Borrowed(request);
+    }
+    // Let the selected SDK codec decide endpoint/model support. The tiny probe
+    // avoids a second full classifier clone just to check cache capability.
+    let mut probe = ChatRequest::new(wire_model);
+    probe
+        .messages
+        .push(ConversationMessage::user_text("cache boundary"));
+    probe.prompt_cache.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+        mode: Some(OpenAiPromptCacheMode::Implicit),
+        ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+    });
+    probe.prompt_cache.breakpoints.push(CacheBreakpoint {
+        position: CachePosition::Message { index: 0, block: 0 },
+        ttl: CacheTtl::ThirtyMinutes,
+        scope: None,
+    });
+    if lingxi_llm_client::codecs::openai::responses::OpenAiResponsesCodec
+        .validate_request(&probe, &CodecContext::new(profile, wire_model, mode))
+        .is_err()
+    {
+        return Cow::Borrowed(request);
+    }
+    let sources = &request.execution.request_content_source_ids;
+    if !sources.is_empty()
+        && (sources.len() != request.input.messages.len()
+            || sources
+                .iter()
+                .zip(&request.input.messages)
+                .any(|(sources, message)| sources.len() != message.content.len()))
+    {
+        return Cow::Borrowed(request);
+    }
+
+    let mut positions = BTreeMap::new();
+    let mut messages = Vec::new();
+    let mut mapped_sources = Vec::new();
+    let mut message_indices = Vec::new();
+    for (mi, message) in request.input.messages.iter().enumerate() {
+        message_indices.push(messages.len());
+        if mi == target {
+            for (bi, block) in message.content.iter().enumerate() {
+                positions.insert((mi, bi), (messages.len(), 0));
+                messages.push(ConversationMessage {
+                    role: message.role,
+                    content: vec![block.clone()],
+                    native_options: Vec::new(),
+                });
+                if !sources.is_empty() {
+                    mapped_sources.push(vec![sources[mi][bi].clone()]);
+                }
+            }
+        } else {
+            for bi in 0..message.content.len() {
+                positions.insert((mi, bi), (messages.len(), bi));
+            }
+            messages.push(message.clone());
+            if !sources.is_empty() {
+                mapped_sources.push(sources[mi].clone());
+            }
+        }
+    }
+    let remap = |position| match position {
+        CachePosition::Message { index, block } => positions
+            .get(&(index, block))
+            .map(|&(index, block)| CachePosition::Message { index, block }),
+        position => Some(position),
+    };
+    if request
+        .input
+        .prompt_cache
+        .breakpoints
+        .iter()
+        .any(|point| remap(point.position).is_none())
+        || [layout.history, layout.action]
+            .into_iter()
+            .flatten()
+            .any(|point| remap(point).is_none())
+    {
+        return Cow::Borrowed(request);
+    }
+    let mut exact = BTreeMap::new();
+    for (key, units) in &request.execution.message_json_string_overrides {
+        let Some(path) = key.strip_prefix("/messages/") else {
+            exact.insert(key.clone(), units.clone());
+            continue;
+        };
+        let Some((mi, path)) = path.split_once("/content/") else {
+            return Cow::Borrowed(request);
+        };
+        let Some((bi, field)) = path.split_once('/') else {
+            return Cow::Borrowed(request);
+        };
+        let Some(&(mi, bi)) = mi
+            .parse::<usize>()
+            .ok()
+            .zip(bi.parse::<usize>().ok())
+            .and_then(|position| positions.get(&position))
+        else {
+            return Cow::Borrowed(request);
+        };
+        exact.insert(
+            format!("/messages/{mi}/content/{bi}/{field}"),
+            units.clone(),
+        );
+    }
+    let mut projected = request.clone();
+    projected.input.messages = messages;
+    for point in &mut projected.input.prompt_cache.breakpoints {
+        point.position = remap(point.position).expect("validated cache position");
+    }
+    let projected_layout = projected
+        .execution
+        .classifier_cache_layout
+        .as_mut()
+        .unwrap();
+    projected_layout.history = layout.history.and_then(remap);
+    projected_layout.action = layout.action.and_then(remap);
+    projected.execution.message_json_string_overrides = exact;
+    projected.execution.request_content_source_ids = mapped_sources;
+    // A source spanning several new messages has no unique whole-message
+    // index. Its per-block provenance and admission membership remain intact.
+    projected
+        .execution
+        .request_message_source_indices
+        .retain(|_, index| {
+            if *index == target || *index >= message_indices.len() {
+                return false;
+            }
+            *index = message_indices[*index];
+            true
+        });
+    Cow::Owned(projected)
+}
+
 pub(crate) fn project(
     input: &mut ChatRequest,
     profile: &ProviderProfile,
@@ -801,3 +978,7 @@ mod tests {
             .all(|body| body.get("previous_response_id").is_none()));
     }
 }
+
+#[cfg(test)]
+#[path = "classifier_cache_prefix_tests.rs"]
+mod prefix_tests;

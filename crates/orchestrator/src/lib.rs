@@ -47,6 +47,8 @@ pub mod hook_attachment_sink;
 mod hook_context_source;
 pub mod hook_prompt_runner;
 pub mod image_input;
+#[cfg(test)]
+mod local_tool_search_cache_tests;
 pub mod loop_permission_classifier;
 pub mod mcp_hook_dispatcher;
 pub use hook_context_source::HookContextSource;

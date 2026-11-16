@@ -396,6 +396,7 @@ pub struct ExecutionContext {
     /// Selected physical protocol for context measurement and prompt projection.
     /// Independent of input_protocol, which identifies native replay data.
     pub context_usage_protocol: Option<lingxi_llm_client::protocol::ProtocolFamily>,
+    pub(crate) context_usage_wire_model: Option<String>,
     /// Explicit Anthropic overrides captured once before request awaits.
     /// Counting, generation and usage identity share this host-only snapshot.
     pub anthropic_extra_body: Option<crate::CapturedAnthropicExtraBody>,
@@ -456,6 +457,10 @@ pub struct ExecutionContext {
     pub classifier_attempt_timeout_ms: Option<u64>,
     /// Absent for ordinary calls; authorizes only classifier-generated hints.
     pub classifier_cache_layout: Option<ClassifierCacheLayout>,
+    /// Immutable host receipts extracted from durable discovery history.
+    pub(crate) local_tool_search_history: Option<std::sync::Arc<crate::local_tool_search::History>>,
+    /// Set only by the selected-route projection of the local ToolSearch tool.
+    pub(crate) local_tool_search_admitted: bool,
     /// Host-admitted native server fallback policy, outside provider input.
     pub server_fallback:
         Option<lingxi_llm_client::providers::anthropic::fallback_request::RequestPolicy>,

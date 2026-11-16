@@ -1,4 +1,4 @@
-//! Request-local cache diagnostics over the SDK's finalized Anthropic body.
+//! Request-local cache diagnostics over finalized provider bodies.
 //!
 //! This observes an already prepared request; it never encodes or changes one.
 //! Only hashes, tool names, and character counts survive the observation.
@@ -43,6 +43,16 @@ pub struct RequestSnapshot {
 struct CapturedRequest {
     snapshot: Option<RequestSnapshot>,
     request_anchor_at_ms: Option<u64>,
+    // Separate from the Anthropic TTL ledger: Responses diagnostics must not
+    // change idle compaction or pretend that an OpenAI cache has a 5m TTL.
+    openai_prefix: Arc<Mutex<Option<OpenAiPrefixSnapshot>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OpenAiPrefixSnapshot {
+    session_id: Option<String>,
+    continuation: Option<Fingerprint>,
+    snapshot: RequestSnapshot,
 }
 
 /// One owner per main conversation, explicitly scoped around each API call.
@@ -65,6 +75,14 @@ impl RequestCapture {
         let request = Self(Arc::new(Mutex::new(CapturedRequest {
             snapshot: None,
             request_anchor_at_ms: Some(anchor_at_ms),
+            // Publish physical evidence at dispatch even if this future is
+            // later cancelled. Nested captures retain their own baseline.
+            openai_prefix: self
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .openai_prefix
+                .clone(),
         })));
         let output = CAPTURE.scope(request.clone(), Box::pin(future)).await;
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -102,6 +120,59 @@ pub(crate) fn snapshot_prepared(prepared: &crate::PreparedLlmCall) -> Option<Req
             &prepared.route.resolved_route.request_model,
         ))
     })
+}
+
+pub(crate) fn openai_snapshot_prepared(
+    prepared: &crate::PreparedLlmCall,
+) -> Option<OpenAiPrefixSnapshot> {
+    (prepared.route.protocol == crate::ProtocolFamily::OpenAiResponses
+        && prepared.route.resolved_route.provider_id == crate::ProviderId::OpenAI
+        && CAPTURE.try_with(|_| ()).is_ok())
+    .then(|| OpenAiPrefixSnapshot {
+        session_id: prepared.request_session_id.clone(),
+        continuation: prepared
+            .provider_request
+            .body_json
+            .payload_at("/previous_response_id")
+            .map(|value| fingerprint(&value)),
+        snapshot: RequestSnapshot::from_openai_request(&prepared.provider_request),
+    })
+}
+
+pub(crate) fn observe_openai_snapshot(current: Option<OpenAiPrefixSnapshot>) {
+    let _ = CAPTURE.try_with(|capture| {
+        let baseline = capture.0.lock().unwrap_or_else(|e| e.into_inner()).openai_prefix.clone();
+        let mut baseline = baseline.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::mem::replace(&mut *baseline, current.clone());
+        let Some(current) = current else { return };
+        let previous = previous.filter(|previous| previous.session_id == current.session_id);
+        let now = &current.snapshot;
+        // Different continuation parents give delta input indexes different
+        // origins; comparing them would label normal continuation a rewrite.
+        let comparable = previous.as_ref().filter(|previous| previous.continuation == current.continuation);
+        let first_changed_input = comparable.and_then(|previous| {
+            previous.snapshot.messages.iter().enumerate()
+                .find_map(|(index, hash)| (now.messages.get(index) != Some(hash)).then_some(index))
+        });
+        // Hashes and structural indexes only. Never emit prompt text, call
+        // arguments, credential scope, session ids, or account identifiers.
+        tracing::info!(
+            target: "lingxi::prompt_cache",
+            input_count = now.messages.len(),
+            previous_input_count = previous.as_ref().map(|p| p.snapshot.messages.len()),
+            continuation = current.continuation.is_some(),
+            input_comparable = comparable.is_some(),
+            first_changed_input,
+            system_changed = previous.as_ref().is_some_and(|p| p.snapshot.system != now.system),
+            tools_changed = previous.as_ref().is_some_and(|p| p.snapshot.tools != now.tools),
+            model_changed = previous.as_ref().is_some_and(|p| p.snapshot.model != now.model),
+            options_changed = previous.as_ref().is_some_and(|p| p.snapshot.extra_body != now.extra_body),
+            system_hash = ?now.system,
+            tools_hash = ?now.tools,
+            input_hash = ?fingerprint(&now.messages),
+            "Responses physical cache prefix"
+        );
+    });
 }
 
 fn inherit_request_anchor(mut snapshot: RequestSnapshot) -> RequestSnapshot {
@@ -261,6 +332,74 @@ fn clean_extra_body(
 }
 
 impl RequestSnapshot {
+    fn from_openai_request(request: &crate::ProviderRequest) -> Self {
+        let body = &request.body_json;
+        let instructions = body
+            .payload_at("/instructions")
+            .unwrap_or_else(|| empty_json("null"));
+        let tools = body
+            .payload_at("/tools")
+            .unwrap_or_else(|| empty_json("[]"));
+        let mut extra = body.clone();
+        for field in [
+            "input",
+            "instructions",
+            "tools",
+            "model",
+            "stream",
+            "max_output_tokens",
+            "metadata",
+            "previous_response_id",
+        ] {
+            extra = extra
+                .without_object_field(field)
+                .expect("prepared body is an object");
+        }
+        let input = body
+            .payload_at("/input")
+            .unwrap_or_else(|| empty_json("[]"));
+        let messages = if let Some(length) = input.array_len("") {
+            (0..length)
+                .filter_map(|index| input.array_item(index).map(|item| (index, item)))
+                .map(|(index, item)| {
+                    part_hash(
+                        &openai_without_breakpoints(&item, request.json_encoding),
+                        request,
+                        &format!("/input/{index}"),
+                    )
+                })
+                .collect()
+        } else {
+            vec![part_hash(&input, request, "/input")]
+        };
+        let unused = fingerprint(&());
+        Self {
+            request_anchor_at_ms: None,
+            at_ms: 0,
+            system: part_hash(&instructions, request, "/instructions"),
+            system_chars: 0,
+            tools: part_hash(&tools, request, "/tools"),
+            tool_names: BTreeSet::new(),
+            model: part_hash(
+                &body
+                    .payload_at("/model")
+                    .unwrap_or_else(|| empty_json("null")),
+                request,
+                "/model",
+            ),
+            cache_policy: unused,
+            ttl_1h: false,
+            betas: unused,
+            effort: unused,
+            fast_mode: false,
+            thinking_mode: "",
+            thinking_display: unused,
+            extra_body: fingerprint(&extra),
+            defer_loading: false,
+            messages,
+        }
+    }
+
     fn from_request(request: &crate::ProviderRequest, resolved_model: &str) -> Self {
         let body = &request.body_json;
         let system = body
@@ -402,6 +541,32 @@ impl RequestSnapshot {
     }
 }
 
+fn openai_without_breakpoints(
+    value: &JsonPayload,
+    encoding: lingxi_llm_client::exact_json::JsonEncoding,
+) -> JsonPayload {
+    let mut clean = value
+        .without_object_field("prompt_cache_breakpoint")
+        .expect("input items are objects");
+    if let Some(length) = value.array_len("/content") {
+        let blocks: Vec<_> = (0..length)
+            .filter_map(|index| value.array_item_at("/content", index))
+            .map(|block| {
+                block
+                    .without_object_field("prompt_cache_breakpoint")
+                    .expect("content blocks are objects")
+            })
+            .collect();
+        clean = clean
+            .with_object_field(
+                "content",
+                &JsonPayload::array_from_items(&blocks, encoding).expect("valid blocks"),
+            )
+            .expect("input item is an object");
+    }
+    clean
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +577,77 @@ mod tests {
 
     fn request(source: &str) -> crate::ProviderRequest {
         crate::ProviderRequest::post_json("unused", payload(source))
+    }
+
+    #[test]
+    fn responses_observation_distinguishes_append_from_removed_transient_input() {
+        let first = RequestSnapshot::from_openai_request(&request(
+            r#"{"input":[{"role":"developer","content":[{"type":"input_text","text":"private reminder"}]},{"role":"user","content":[{"type":"input_text","text":"task","prompt_cache_breakpoint":{"mode":"explicit"}}]}]}"#,
+        ));
+        let appended = RequestSnapshot::from_openai_request(&request(
+            r#"{"input":[{"role":"developer","content":[{"type":"input_text","text":"private reminder"}]},{"role":"user","content":[{"type":"input_text","text":"task"}]},{"role":"assistant","content":[{"type":"output_text","text":"answer","prompt_cache_breakpoint":{"mode":"explicit"}}]}]}"#,
+        ));
+        assert_eq!(first.messages, appended.messages[..2]);
+        assert_eq!(first.extra_body, appended.extra_body);
+        let removed = RequestSnapshot::from_openai_request(&request(
+            r#"{"input":[{"role":"user","content":[{"type":"input_text","text":"task"}]},{"role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}"#,
+        ));
+        assert_ne!(first.messages[0], removed.messages[0]);
+        // A snapshot contains only hashes and counts, even in Debug output.
+        assert!(!format!("{first:?}").contains("private reminder"));
+    }
+
+    #[test]
+    fn responses_observation_hashes_exact_utf16_and_preserves_schema_marker_properties() {
+        let mut request = request(
+            r#"{"input":[{"role":"user","content":[{"type":"input_text","text":"�"}]}],"tools":[{"type":"function","name":"t","parameters":{"properties":{"prompt_cache_breakpoint":{"type":"string"}}}}]}"#,
+        );
+        let first = RequestSnapshot::from_openai_request(&request);
+        request
+            .json_string_overrides
+            .insert("/input/0/content/0/text".into(), vec![0xd800]);
+        let second = RequestSnapshot::from_openai_request(&request);
+        assert_ne!(first.messages, second.messages);
+        request.body_json = payload(
+            r#"{"input":[{"role":"user","content":[{"type":"input_text","text":"�"}]}],"tools":[{"type":"function","name":"t","parameters":{"properties":{"prompt_cache_breakpoint":{"type":"number"}}}}]}"#,
+        );
+        assert_ne!(
+            second.tools,
+            RequestSnapshot::from_openai_request(&request).tools
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_dispatch_evidence_survives_cancellation_without_changing_ttl_ledger() {
+        let capture = RequestCapture::default();
+        let physical = RequestSnapshot::from_openai_request(&request(
+            r#"{"input":[{"role":"user","content":"task"}]}"#,
+        ));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            capture.scope(async {
+                observe_openai_snapshot(Some(OpenAiPrefixSnapshot {
+                    session_id: Some("test".into()),
+                    continuation: None,
+                    snapshot: physical.clone(),
+                }));
+                std::future::pending::<()>().await;
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let state = capture.0.lock().unwrap();
+        assert_eq!(
+            state
+                .openai_prefix
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .snapshot,
+            physical
+        );
+        assert!(state.snapshot.is_none());
     }
 
     #[test]
