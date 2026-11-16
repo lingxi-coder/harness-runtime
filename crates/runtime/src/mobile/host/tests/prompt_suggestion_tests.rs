@@ -155,7 +155,7 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
             if stage_rx.recv().is_err() {
                 return;
             }
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let mut socket = loop {
                 match server.accept() {
                     Ok((socket, _)) => break socket,

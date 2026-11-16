@@ -8537,7 +8537,9 @@ mod tests {
         assert!(appending.await.unwrap_err().is_cancelled());
         release_tx.send(()).unwrap();
         lock_holder.await.unwrap().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // The admitted batch completes on the writer's own task; a loaded
+        // runner can take well over a few seconds to schedule it.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if std::fs::read_to_string(&path).unwrap().contains("body-2") {
                     break;

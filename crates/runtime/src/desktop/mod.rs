@@ -2751,12 +2751,6 @@ pub struct DesktopRuntime {
     /// picker's Connect badge (a sibling map, NOT a field on the frozen
     /// `ModelListing`). The tui joins it by provider/profile name.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
-    /// Set when the boot-time connected-provider fallback rerouted the session
-    /// default model (its configured provider was definitively disconnected).
-    /// Hosts surface it: the CLI prints a stderr notice pre-alt-screen; the
-    /// bridge relies on the `tracing::warn!` `build()` already emitted. `None`
-    /// ⟶ the configured default booted unchanged.
-    pub default_model_fallback: Option<DefaultModelFallbackNotice>,
     /// Provenance of the model that the engine selected for the session's
     /// initial/default row. Provider-neutral so managed policy is not inferred
     /// from an Anthropic-specific auth or profile name.
@@ -3639,130 +3633,6 @@ fn anthropic_models_for(
             capabilities: caps,
         })
         .collect()
-}
-
-/// One `settings.recentModels` entry threaded in by the host (the CLI reads the
-/// file; F2-01 keeps `build()` off the filesystem for host config): a prior
-/// `/model` pick, most-recent-first. `provider` is the catalog profile name;
-/// `model` is the BARE wire `request_model` (the on-disk schema splits them).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecentModelRef {
-    /// Catalog profile name (`ModelListing::provider_id`).
-    pub provider: String,
-    /// Bare wire model id (`ModelListing::request_model`).
-    pub model: String,
-}
-
-/// Host-facing notice that the boot-time connected-provider fallback rerouted
-/// the session default model. Surfaced on [`DesktopRuntime`]; both refs are in
-/// display form (`profile/model`-qualified for non-anthropic routes).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultModelFallbackNotice {
-    /// The configured default that did NOT boot (verbatim as configured).
-    pub from: String,
-    /// The connected-provider model the session booted on instead.
-    pub to: String,
-}
-
-/// Outcome of [`connected_provider_fallback`]: what the session boots on
-/// instead of the configured (disconnected-provider) default model.
-struct DefaultModelFallback {
-    /// Bare wire id of the fallback model.
-    model: String,
-    /// Provider profile the fallback routes to — ALWAYS set (anthropic
-    /// included), so the `switch_model` seeding at the end of `build()` scopes
-    /// the session and a wire id that exists under several providers (e.g.
-    /// `claude-sonnet-5` on anthropic AND github-copilot) resolves
-    /// unambiguously instead of failing every turn with "ambiguous across
-    /// profiles".
-    profile: String,
-}
-
-/// Boot-time connected-provider default-model fallback (`LingXi` multi-provider
-/// divergence — upstream claude-code is Anthropic-only and has no analog):
-/// when the configured default model's provider is DEFINITIVELY disconnected
-/// (`availability[provider] == false`; an ABSENT entry means the probe is
-/// blind to that provider, so the default is conservatively kept) and at least
-/// one other provider IS connected, boot on that provider instead of into
-/// guaranteed first-turn auth failures.
-///
-/// Preference: (1) the most recent `/model` pick (`settings.recentModels`) on
-/// a connected provider whose model still exists in the catalog; (2) the first
-/// connected provider in [`lingxi_core::host::provider_fallback_order`], on its
-/// [`lingxi_core::host::provider_default_model`]; (3) any remaining connected provider
-/// (user-defined — no curated default), on its first listed model. Every
-/// candidate is validated against the live `listings` so the reroute can never
-/// select an id `switch_model`/the wire would reject.
-///
-/// `anthropic_probe_definitive` is `false` on gateway installs (a custom
-/// `api_base` / `ANTHROPIC_AUTH_TOKEN` serves Claude WITHOUT a local key or
-/// OAuth): there `availability["anthropic"] == false` is probe-blindness, not
-/// disconnection — an anthropic-routed default is then kept as-is (the same
-/// protection the TUI `/model` picker's `connected_model_rows` gives the
-/// current model's provider).
-fn connected_provider_fallback(
-    default_model_id: &str,
-    default_model_profile: Option<&str>,
-    anthropic_probe_definitive: bool,
-    model_providers: &std::collections::BTreeMap<String, (String, String)>,
-    availability: &std::collections::BTreeMap<String, bool>,
-    listings: &[lingxi_core::host::ModelListing],
-    recents: &[RecentModelRef],
-) -> Option<DefaultModelFallback> {
-    // Effective provider of the configured default — the same resolution the
-    // session_provider_first_party gate uses (explicit profile, else the
-    // model_providers grouping, else the native anthropic route).
-    let default_provider = default_model_profile
-        .map(str::to_string)
-        .or_else(|| {
-            model_providers
-                .get(default_model_id)
-                .map(|(p, _)| p.clone())
-        })
-        .unwrap_or_else(|| "anthropic".to_string());
-    if default_provider == "anthropic" && !anthropic_probe_definitive {
-        return None; // gateway/auth-override install — the probe can't see its auth
-    }
-    if availability.get(default_provider.as_str()) != Some(&false) {
-        return None; // connected — or the probe doesn't know this provider
-    }
-    let connected = |p: &str| availability.get(p) == Some(&true);
-    let in_listings = |p: &str, m: &str| {
-        listings
-            .iter()
-            .any(|l| l.provider_id == p && l.request_model == m)
-    };
-    let route = |model: String, provider: &str| DefaultModelFallback {
-        model,
-        profile: provider.to_string(),
-    };
-    // (1) The most recent /model pick on a connected provider.
-    for r in recents {
-        if connected(&r.provider) && in_listings(&r.provider, &r.model) {
-            return Some(route(r.model.clone(), &r.provider));
-        }
-    }
-    // (2) Deterministic provider order, each on its curated boot default.
-    for p in lingxi_core::host::provider_fallback_order() {
-        if !connected(p) {
-            continue;
-        }
-        if let Some(m) = lingxi_core::host::provider_default_model(p) {
-            if in_listings(p, m) {
-                return Some(route(m.to_string(), p));
-            }
-        }
-    }
-    // (3) Any remaining connected provider (user-defined): first listed model.
-    for (p, on) in availability {
-        if !on {
-            continue;
-        }
-        if let Some(l) = listings.iter().find(|l| &l.provider_id == p) {
-            return Some(route(l.request_model.clone(), p));
-        }
-    }
-    None
 }
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
@@ -6846,10 +6716,6 @@ mod legacy_opening_balance_test;
 #[cfg(test)]
 #[path = "tests/tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "tests/connected_fallback_tests.rs"]
-mod connected_fallback_tests;
 
 /// Round-5 review item 11's class member (1), handed to the gate by that
 /// fixer's `needs_other_file`: the connect LOOP inside

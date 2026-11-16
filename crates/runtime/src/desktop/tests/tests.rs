@@ -1718,11 +1718,8 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         cwd: cwd.clone(),
         lingxi_home,
         default_model: "claude-sonnet-4-20250514".to_string(),
-        // Boot tests must stay deterministic across HOST machines: a dev
-        // keychain with real provider keys would otherwise trigger the
-        // connected-provider fallback and change the booted model.
+        // Boot tests pin the model explicitly so they stay deterministic.
         default_model_explicit: true,
-        recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),
         flag_settings: None,
@@ -2331,6 +2328,9 @@ async fn worktree_launch_flag_creates_and_enters_worktree_at_boot() {
 /// existed.
 #[tokio::test]
 async fn no_worktree_flag_leaves_boot_cwd_untouched_at_boot() {
+    // `build()` reads the process-global managed policy dir; a sibling test
+    // that points `LINGXI_MANAGED_DIR` at its tempdir must not be observed.
+    let _managed_env = MANAGED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (tmp, cfg) = test_config(true);
     assert!(
         cfg.worktree_launch.is_none(),
@@ -3452,6 +3452,9 @@ impl command_api::BuiltinCommandHandler for CountedModCoreCommand {
 async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
     use lingxi_core::host::{SlashCommandDispatcher as _, SlashDispatchResult};
 
+    // `build()` reads the process-global managed policy dir; a sibling test
+    // that points `LINGXI_MANAGED_DIR` at its tempdir must not be observed.
+    let _managed_env = MANAGED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_tmp, mut cfg) = test_config(true);
     cfg.host_workspace_trusted = Some(true);
     cfg.mod_render_surface = Some(crate::desktop::ModRenderSurface::Desktop);
@@ -4024,7 +4027,6 @@ async fn build_keeps_explicit_model_despite_disconnected_provider() {
     let rt = build(cfg, output, perm_sink).await.expect("build() failed");
     std::env::remove_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT");
 
-    assert!(rt.default_model_fallback.is_none());
     assert_eq!(rt.orchestrator.default_model(), "claude-sonnet-4-20250514");
 }
 
@@ -4061,10 +4063,6 @@ async fn build_keeps_env_pinned_model_despite_disconnected_provider() {
     let rt = build(cfg, output, perm_sink).await.expect("build() failed");
     std::env::remove_var("LINGXI_TEST_REROUTE_KEY_ENVPIN");
 
-    assert!(
-        rt.default_model_fallback.is_none(),
-        "an ANTHROPIC_MODEL env pin must not be rerouted"
-    );
     assert_eq!(rt.orchestrator.default_model(), "claude-sonnet-4-20250514");
 }
 

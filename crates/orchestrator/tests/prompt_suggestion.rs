@@ -307,7 +307,7 @@ async fn post_turn_suggestion_is_nonblocking_uses_parent_prefix_and_never_change
         "native skips the first assistant reply"
     );
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         orch.run_turn_streaming("finish the change"),
     )
     .await

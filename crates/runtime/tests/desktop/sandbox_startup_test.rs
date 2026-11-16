@@ -90,11 +90,9 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     // FD-inherited key.
     cfg.cwd = cwd.clone();
     cfg.lingxi_home = lingxi_home;
-    // Deterministic across host machines: a dev keychain with real provider
-    // keys must not trigger the connected-provider fallback mid-test.
+    // Deterministic across host machines: pin the boot model explicitly.
     cfg.default_model = "claude-sonnet-4-20250514".to_string();
     cfg.default_model_explicit = true;
-    cfg.recent_models = Vec::new();
     cfg.fallback_model = None;
     cfg.custom_betas = Vec::new();
     cfg.flag_settings = None;

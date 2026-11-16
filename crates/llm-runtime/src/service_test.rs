@@ -15554,8 +15554,14 @@ mod tests {
         let _guard = CACHE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // CLAUDE_CODE_EXTRA_BODY writers hold THINKING_ENV_LOCK; a sibling's
+        // `{"betas":{"toString":null}}` must not reach this capture.
+        let _thinking_env = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let _env = CacheEnvRestore::clear(&[
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
             "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
             "DISABLE_INTERLEAVED_THINKING",
         ]);
@@ -15620,8 +15626,14 @@ mod tests {
         let _guard = CACHE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // CLAUDE_CODE_EXTRA_BODY writers hold THINKING_ENV_LOCK; a sibling's
+        // `{"betas":{"toString":null}}` must not reach this capture.
+        let _thinking_env = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let _env = CacheEnvRestore::clear(&[
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
             "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
             "DISABLE_INTERLEAVED_THINKING",
         ]);

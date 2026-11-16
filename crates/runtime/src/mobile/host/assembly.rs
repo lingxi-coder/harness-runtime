@@ -1302,8 +1302,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         }),
     );
     let fast_flag = Arc::new(AtomicBool::new(saved_fast_mode.unwrap_or(false)));
-    let provider_adapter =
-        Arc::new(ProviderApiAdapter::new(api_service.clone()).with_fast_mode(fast_flag.clone()));
+    let provider_adapter = Arc::new(
+        ProviderApiAdapter::new(api_service.clone())
+            .with_route_refusal_api_text_facts(interactive_launch)
+            .with_fast_mode(fast_flag.clone()),
+    );
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
         streaming_override.unwrap_or(provider_adapter.clone() as Arc<dyn StreamingApiClient>);

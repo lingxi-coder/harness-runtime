@@ -41,7 +41,8 @@ impl SideChatFactory for DesktopSideChatFactory {
             let id = request_session_id.clone();
             Box::pin(async move { Some(id) })
         }));
-        let adapter = Arc::new(ProviderApiAdapter::new(api.clone()));
+        let adapter =
+            Arc::new(ProviderApiAdapter::new(api.clone()).with_route_refusal_api_text_facts(true));
         let permission_gate = Arc::new(
             AdapterPermissionGate::new(permission_sink)
                 .with_timeout(self.permission_timeout)

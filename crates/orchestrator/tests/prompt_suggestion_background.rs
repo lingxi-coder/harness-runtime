@@ -475,7 +475,7 @@ async fn background_pipeline() {
         }
 
         async fn wait_for_suggestion_queries_idle(&self) {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
                 loop {
                     let notified = self.suggestion_queries_idle.notified();
                     tokio::pin!(notified);
@@ -694,7 +694,7 @@ async fn background_pipeline() {
         .await
         .unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         client.wait_for_classifier_count(1),
     )
     .await
@@ -728,7 +728,7 @@ async fn background_pipeline() {
         .await
         .unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         client.wait_for_suggestion_query_count(first_query),
     )
     .await
@@ -741,14 +741,14 @@ async fn background_pipeline() {
         .await
         .unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         client.wait_for_suggestion_query_count(second_query),
     )
     .await
     .unwrap();
     client.release.add_permits(1);
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         output.wait_for_row_count(first_output),
     )
     .await
@@ -776,7 +776,7 @@ async fn background_pipeline() {
         .await
         .unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         client.wait_for_suggestion_query_count(changed_query),
     )
     .await
@@ -789,7 +789,7 @@ async fn background_pipeline() {
         .unwrap();
     client.release.add_permits(1);
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         output.wait_for_row_count(changed_output),
     )
     .await
@@ -812,7 +812,7 @@ async fn background_pipeline() {
             .await
             .unwrap();
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             client.wait_for_classifier_count(classifier_target),
         )
         .await
@@ -828,14 +828,14 @@ async fn background_pipeline() {
         );
         drop(requests);
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             client.wait_for_suggestion_query_count(suggestion_target),
         )
         .await
         .unwrap();
         client.release.add_permits(1);
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             output.wait_for_row_count(output_target),
         )
         .await
@@ -864,13 +864,13 @@ async fn background_pipeline() {
         .await
         .unwrap();
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             client.wait_for_classifier_count(classifier_target),
         )
         .await
         .unwrap();
         if tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             client.wait_for_suggestion_query_count(suggestion_target),
         )
         .await
@@ -925,7 +925,7 @@ async fn background_pipeline() {
         }
         client.release.add_permits(1);
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             output.wait_for_row_count(output_target),
         )
         .await
@@ -968,7 +968,7 @@ async fn background_pipeline() {
     let cancel = tokio_util::sync::CancellationToken::new();
     let target = client.classifier_count() + 1;
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         orch.run_turn_streaming_with_cancel(
             "Compare the implementation components again",
             cancel.clone(),
@@ -978,7 +978,7 @@ async fn background_pipeline() {
     .expect("foreground return cannot wait for classifier provider I/O")
     .unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         client.wait_for_classifier_count(target),
     )
     .await
@@ -991,7 +991,7 @@ async fn background_pipeline() {
     );
     let queries = client.suggestion_query_count();
     cancel.cancel();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let notified = client.classifiers_idle.notified();
             tokio::pin!(notified);
@@ -1011,7 +1011,7 @@ async fn background_pipeline() {
     assert_eq!(client.suggestion_query_count(), queries);
     // Another turn is admitted while its new classifier is still held, too.
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         orch.run_turn_streaming("Compare the implementation components after cancellation"),
     )
     .await

@@ -1647,13 +1647,11 @@ pub async fn build_with_credential_stack(
         profile_auto_mode_provider,
         first_party_environment_provider,
         provider_availability,
-        default_model_fallback,
         model_provenance,
         session_model_restriction,
         main_model_setting,
         main_model_source,
         main_model_setting_provenance,
-        model_setting_for_spawns,
         model_resolution_context_provider,
         session_auto_mode_provider,
         llm_runtime,
@@ -1923,6 +1921,7 @@ pub async fn build_with_credential_stack(
         Arc::new(service_built.with_scope_output_quota(cfg.scope_output_quota.clone()));
     let provider_adapter = Arc::new(
         ProviderApiAdapter::new(api_service.clone())
+            .with_route_refusal_api_text_facts(interactive_session)
             .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
             .with_fast_mode(fast_flag.clone()),
     );
@@ -2509,7 +2508,7 @@ pub async fn build_with_credential_stack(
         // #15: the parent model handed to the spawner must be the RESOLVED
         // main-loop wire id (claude `getMainLoopModel()`), NOT the raw alias —
         // `orch_cfg.model` is `cfg.default_model` with only a `profile/` prefix
-        // stripped (or the connected-provider fallback's rerouted id), so an
+        // stripped, so an
         // `opusplan`/`sonnet` install leaves it a bare alias. An
         // `AgentModel::Inherit` spawn in DEFAULT mode returns the parent verbatim,
         // which would be a bogus wire id that fails at the provider. Resolve it
@@ -2524,11 +2523,8 @@ pub async fn build_with_credential_stack(
         // in plan mode resolves the subagent to Opus (not the resolved Sonnet
         // main-loop model). Without these the Inherit branch returns the parent
         // model unchanged (default mode → byte-identical to before this seam).
-        // `model_setting_for_spawns` = `cfg.default_model` unless the
-        // connected-provider fallback rerouted the session (then the plan-mode
-        // swap must not resurrect the disconnected anthropic route).
         .with_permission_mode(cfg.permission_mode)
-        .with_model_setting(model_setting_for_spawns.clone())
+        .with_model_setting(main_model_setting.clone())
         // (parity 2.1.207 H-BIN-08) Managed availableModels restriction: a
         // subagent whose explicitly-requested model is policy-barred inherits the
         // parent/runtime model (binary `Qly`), and the plan-mode `opusplan`→Opus /
@@ -4280,11 +4276,9 @@ pub async fn build_with_credential_stack(
     // #15: thread the live permission mode + the RAW user model setting (the
     // un-resolved alias, e.g. "opusplan") so the teammate's `Inherit` resolution
     // gets the same `getRuntimeMainLoopModel` plan-mode swap as the spawner above
-    // (opusplan + plan → Opus). Default mode → byte-identical to before. Uses
-    // the post-fallback `model_setting_for_spawns` (same reasoning as the
-    // spawner seam).
+    // (opusplan + plan → Opus). Default mode → byte-identical to before.
     .with_permission_mode(cfg.permission_mode)
-    .with_model_setting(model_setting_for_spawns.clone())
+    .with_model_setting(main_model_setting.clone())
     .with_session_interactive(interactive_session)
     .with_new_diagnostics_source_factory(Arc::new({
         let diagnostics = lsp_diagnostics_cell.clone();
@@ -8387,7 +8381,6 @@ pub async fn build_with_credential_stack(
         plugin_runtime,
         hook_registry: hook_registry.clone(),
         provider_availability,
-        default_model_fallback,
         model_provenance,
         provider_auth_methods,
         model_providers,

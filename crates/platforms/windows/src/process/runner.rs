@@ -118,8 +118,7 @@ impl ProcessRunner for WindowsProcess {
             lingxi_core::host::agent_processes::register(cmd.process_owner(), child.id());
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
+                write_child_stdin(&mut stdin, stdin_text)
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -160,8 +159,7 @@ impl ProcessRunner for WindowsProcess {
         let mut tree_guard = StreamingProcessTreeGuard(Some(pid));
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
+                write_child_stdin(&mut stdin, stdin_text)
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -353,4 +351,18 @@ pub(super) fn generate_task_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("local_bash_{nanos:x}")
+}
+
+/// Write a command's input and close its stdin. A child that exits (or closes
+/// stdin) without reading the input is not a failure, so a closed pipe
+/// (`ERROR_NO_DATA`/`ERROR_BROKEN_PIPE` → `BrokenPipe`) is swallowed and the
+/// child's own exit/output stay authoritative. Mirrors the posix runner.
+pub(super) async fn write_child_stdin<W>(stdin: &mut W, text: &str) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    match stdin.write_all(text.as_bytes()).await {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
 }

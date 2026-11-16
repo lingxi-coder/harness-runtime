@@ -599,7 +599,6 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     // The host has resolved an explicit qualified model. Ambient routing rules
     // must not silently send an app's input to another provider on failure.
     config.routing = None;
-    config.recent_models.clear();
     config.max_turns = Some(profile.max_turns);
     config.max_structured_output_retries = config.max_structured_output_retries.clamp(1, 5);
     if let Some(chat) = profile.app_chat.as_ref() {
