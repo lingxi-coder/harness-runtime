@@ -14,6 +14,18 @@ pub struct ClientTextDto {
     pub code_units: Vec<u16>,
 }
 
+/// Decode retained assistant text with the same exact parser as live events.
+/// Native JSON parsers can reject a fragment ending in an isolated surrogate.
+/// Other or invalid events remain the caller's responsibility.
+#[must_use]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn retained_text_delta(event_json: String) -> Option<ClientTextDto> {
+    match serde_json::from_str::<super::events::ClientEvent>(&event_json).ok()? {
+        super::events::ClientEvent::TextDelta { text } => Some(text),
+        _ => None,
+    }
+}
+
 impl ClientTextDto {
     /// Build exact units from ordinary UTF-8 text.
     #[must_use]
@@ -188,6 +200,32 @@ pub(crate) fn encode_json_string(code_units: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_deltas_keep_each_exact_fragment_without_changing_the_wire_shape() {
+        let units = [0x4e2d, 0xd83d, 0xde00, 0xd800, 0x61, 0xdc00];
+        for split in 0..=units.len() {
+            let mut restored = Vec::new();
+            for fragment in [&units[..split], &units[split..]] {
+                let event = super::super::events::ClientEvent::TextDelta {
+                    text: ClientTextDto::from_code_units(fragment.to_vec()),
+                };
+                let json = serde_json::to_string(&event).unwrap();
+                let text = retained_text_delta(json).unwrap();
+                assert_eq!(text.code_units, fragment);
+                restored.extend(text.code_units);
+            }
+            assert_eq!(restored, units);
+        }
+        for other in [
+            r#"{"type":"turn_started","turn_id":1}"#,
+            r#"{"type":"text_delta"}"#,
+            r#"{"type":"text_delta","text":4}"#,
+            r#"{"type":"unknown","text":"ignored"}"#,
+        ] {
+            assert!(retained_text_delta(other.into()).is_none());
+        }
+    }
 
     #[test]
     fn exact_utf16_text_round_trips_as_a_plain_json_string() {

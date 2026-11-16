@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_llm_client::exact_text::Utf16DisplayStream;
 use serde_json::json;
 
 /// Sink for CLI output. Implementations live in this module.
@@ -32,6 +33,9 @@ pub trait OutputSink: Send + Sync {
     async fn source_text(&self, text: &Utf16JsonProjection) {
         self.text(&display_projection(text)).await;
     }
+    /// Finish a display fragment at a message boundary. Exact JSON sinks need
+    /// no extra frame and retain their established source representation.
+    async fn text_boundary(&self) {}
     /// Emit a `turn_start` marker. No-op in plain mode.
     async fn turn_start(&self);
     /// Emit a `turn_end` marker with stop reason + cost. No-op in plain
@@ -78,6 +82,7 @@ pub struct PlainSink {
 struct PlainTextState {
     wrote_text: bool,
     ends_with_newline: bool,
+    decoder: Utf16DisplayStream,
 }
 
 impl PlainSink {
@@ -93,8 +98,23 @@ impl PlainSink {
 
     async fn write_line(&self, line: &str) {
         let mut state = self.text_state.lock().await;
+        self.flush_pending(&mut state).await;
         if self.out.write_line(line).await.is_ok() {
             state.ends_with_newline = true;
+        }
+    }
+
+    async fn write_text(&self, state: &mut PlainTextState, text: &str) {
+        if self.out.write_record(text.as_bytes()).await.is_ok() && !text.is_empty() {
+            state.wrote_text = true;
+            state.ends_with_newline = text.ends_with('\n');
+        }
+    }
+
+    async fn flush_pending(&self, state: &mut PlainTextState) {
+        let text = state.decoder.finish();
+        if !text.is_empty() {
+            self.write_text(state, &text).await;
         }
     }
 }
@@ -103,16 +123,29 @@ impl PlainSink {
 impl OutputSink for PlainSink {
     async fn text(&self, s: &str) {
         let mut state = self.text_state.lock().await;
-        if self.out.write_record(s.as_bytes()).await.is_ok() && !s.is_empty() {
-            state.wrote_text = true;
-            state.ends_with_newline = s.ends_with('\n');
-        }
+        self.flush_pending(&mut state).await;
+        self.write_text(&mut state, s).await;
+    }
+    async fn source_text(&self, text: &Utf16JsonProjection) {
+        let units = text
+            .string_units("")
+            .expect("assistant text is a root string");
+        let mut state = self.text_state.lock().await;
+        let display = state.decoder.push(&units);
+        self.write_text(&mut state, &display).await;
+    }
+    async fn text_boundary(&self) {
+        let mut state = self.text_state.lock().await;
+        self.flush_pending(&mut state).await;
     }
     async fn turn_start(&self) {
-        *self.text_state.lock().await = PlainTextState::default();
+        let mut state = self.text_state.lock().await;
+        self.flush_pending(&mut state).await;
+        *state = PlainTextState::default();
     }
     async fn turn_end(&self, _r: &str, _u: f64, _i: u64, _o: u64) {
         let mut state = self.text_state.lock().await;
+        self.flush_pending(&mut state).await;
         if state.wrote_text && !state.ends_with_newline {
             let _ = self.out.write_record(b"\n").await;
         }
@@ -143,6 +176,8 @@ impl OutputSink for PlainSink {
             .await;
     }
     async fn error(&self, _code: &str, message: &str) {
+        let mut state = self.text_state.lock().await;
+        self.flush_pending(&mut state).await;
         let _ = self.err.write_line(&format!("lingxi-cli: {message}")).await;
     }
 }
@@ -340,6 +375,56 @@ mod tests {
             Output::new(tokio::io::sink()),
         );
         sink.command_output("clear", "Conversation cleared.").await;
+    }
+
+    fn exact(units: &[u16]) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn plain_source_text_matches_whole_and_streamed_unicode() {
+        let source: Vec<u16> = "中文😀e\u{301}".encode_utf16().collect();
+        for fragments in [vec![source.as_slice()], vec![&source[..3], &source[3..]]] {
+            let (writer, mut reader) = tokio::io::duplex(256);
+            let sink = PlainSink::new(Output::new(writer), Output::new(tokio::io::sink()));
+            sink.turn_start().await;
+            for fragment in fragments {
+                sink.source_text(&exact(fragment)).await;
+            }
+            sink.turn_end("end_turn", 0.0, 0, 0).await;
+            drop(sink);
+            let mut output = String::new();
+            reader.read_to_string(&mut output).await.unwrap();
+            assert_eq!(output, "中文😀e\u{301}\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_text_flushes_before_notices_and_never_joins_messages_or_resumed_turns() {
+        for boundary in ["notice", "message", "next_turn"] {
+            let (writer, mut reader) = tokio::io::duplex(256);
+            let sink = PlainSink::new(Output::new(writer), Output::new(tokio::io::sink()));
+            sink.turn_start().await;
+            sink.source_text(&exact(&[0xd83d])).await;
+            match boundary {
+                "notice" => sink.command_output("changed_file", "changed a.rs").await,
+                "message" => sink.text_boundary().await,
+                _ => sink.turn_start().await,
+            }
+            sink.source_text(&exact(&[0xde00])).await;
+            sink.turn_end("end_turn", 0.0, 0, 0).await;
+            drop(sink);
+            let mut output = String::new();
+            reader.read_to_string(&mut output).await.unwrap();
+            assert_eq!(
+                output,
+                if boundary == "notice" {
+                    "�changed a.rs\n�\n"
+                } else {
+                    "��\n"
+                }
+            );
+        }
     }
 
     #[tokio::test]

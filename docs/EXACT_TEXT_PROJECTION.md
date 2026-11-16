@@ -66,6 +66,31 @@ changed-file, file-authority, filesystem and stream/nonstream recovery suites
 remain acceptance gates. Test logs and the final immutable cache baseline are
 recorded in the delivery evidence, not inferred from component tests alone.
 
+## Native and CLI display sinks
+
+The common runtime and message projection map also serve Android, iOS and CLI.
+Clients retain exact units until the live text has been assembled: Kotlin uses
+its native UTF-16 String, while Swift keeps a Foundation mutable UTF-16 buffer
+owned by the live row's UUID. Authoritative snapshots replace that state;
+message completion and cancellation retire it. Moving an unrelated row does
+not retire the current row's unfinished pair.
+
+The CLI bridge keeps isolated units in an internal event. Both its reducer and
+actual terminal cell use `ExactText`; incremental display edits replace only a
+pending boundary scalar. Normal scalar fragments retain the existing path.
+Append-only plain stdout uses `Utf16DisplayStream`, holding at most one high
+surrogate until the next fragment or an explicit message/turn boundary. It
+flushes before notices and tool output so their order is unchanged. Structured
+JSON/stream-JSON output continues to carry the original exact source units.
+
+Retained native text events reuse the Rust protocol's exact event decoder via
+one additive UniFFI helper, because Foundation rejects an isolated surrogate in
+a JSON string. Event and DTO serialization stay unchanged.
+
+These buffers are display projections. They are not model input, transcript
+storage, cache keys, permission inputs, file identities or notification IDs.
+No message DTO or JSONL format is added by this adapter stage.
+
 ## Later stages
 
 The generic JSON containers, their parsers, public DTO formats, and legacy

@@ -35,6 +35,9 @@ impl OutputStream for SinkAdapter {
     async fn emit_text(&self, text: &Utf16JsonProjection) {
         self.sink.source_text(text).await;
     }
+    async fn emit_message_boundary(&self, _stop_reason: Option<&str>, _request_id: Option<&str>) {
+        self.sink.text_boundary().await;
+    }
     async fn emit_system_notice(&self, body: &Utf16JsonProjection, is_error: bool) {
         if is_error {
             self.sink
