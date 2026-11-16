@@ -464,15 +464,20 @@ fn make_handler_with_sink(
 
 /// Yield until the sink reports a terminal status, or the budget runs out.
 async fn await_terminal(sink: &Arc<RecordingSink>) -> Option<TaskStatus> {
-    for _ in 0..400 {
+    // The teammate loop settles on the runtime; a fixed yield budget can run
+    // out on a loaded runner before the terminal status lands.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         if let Some(s) = sink.last_status() {
             if s.is_terminal() {
                 return Some(s);
             }
         }
-        tokio::task::yield_now().await;
+        if tokio::time::Instant::now() >= deadline {
+            return sink.last_status();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
-    sink.last_status()
 }
 
 fn ctx(fs: Arc<dyn FileSystem>, runtime: Arc<MockRuntimeSpawner>) -> TaskContext {
