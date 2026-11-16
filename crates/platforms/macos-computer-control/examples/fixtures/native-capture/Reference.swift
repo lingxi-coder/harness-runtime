@@ -25,6 +25,11 @@ func budget(_ w:Int,_ h:Int)->(Int,Int){
  while low+1 != high {let mid=low+(high-low)/2;let height=max(1,Int((Double(mid)/ratio).rounded()));if mid<=1568 && tiles(mid,height)<=1568{low=mid}else{high=mid}}
  return(low,max(1,Int((Double(low)/ratio).rounded())))
 }
+// Native driver R rounds logical dimensions times the backing scale before
+// passing their integer pixel dimensions into the budget function.
+func nativeBudget(_ width:Double,_ height:Double,_ scale:Double)->(Int,Int){
+ budget(Int((width*scale).rounded(.toNearestOrAwayFromZero)),Int((height*scale).rounded(.toNearestOrAwayFromZero)))
+}
 func resolve(_ original:pid_t)->String?{
  var pid=original
  for _ in 0..<8 {
@@ -59,13 +64,16 @@ Task { @MainActor in
  do {
   let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:false)
   guard let display=content.displays.first(where:{$0.displayID==displayID}) else{fatalError("selected owned display absent")}
-  let pw=Int(CGDisplayPixelsWide(displayID)),ph=Int(CGDisplayPixelsHigh(displayID))
-  let (fw,fh)=budget(pw,ph)
+  guard let mode=CGDisplayCopyDisplayMode(displayID) else{fatalError("display mode unavailable")}
+  let pw=mode.pixelWidth,ph=mode.pixelHeight
+  let backingScale=Double(pw)/display.frame.width
+  guard backingScale.isFinite,backingScale>0,abs(Double(ph)/display.frame.height-backingScale)<1e-9 else{fatalError("inconsistent backing pixel geometry")}
+  let (fw,fh)=nativeBudget(display.frame.width,display.frame.height,backingScale)
   let logical=config["logicalRegion"] as! [Double]
   let region=[logical[0]/display.frame.width*Double(fw),logical[1]/display.frame.height*Double(fh),logical[2]/display.frame.width*Double(fw),logical[3]/display.frame.height*Double(fh)]
   let dx=display.frame.width/Double(fw),dy=display.frame.height/Double(fh)
   let crop=CGRect(x:region[0]*dx,y:region[1]*dy,width:(region[2]-region[0])*dx,height:(region[3]-region[1])*dy)
-  let (zw,zh)=budget(Int((crop.width*Double(pw)/display.frame.width).rounded()),Int((crop.height*Double(ph)/display.frame.height).rounded()))
+  let (zw,zh)=nativeBudget(crop.width,crop.height,backingScale)
   func capture(_ allowed:Set<String>,_ rect:CGRect?,_ w:Int,_ h:Int) async throws->CGImage {
    let filter=SCContentFilter(display:display,excludingApplications:content.applications.filter{excluded($0,allowed)},exceptingWindows:[])
    let cfg=SCStreamConfiguration();cfg.width=w;cfg.height=h;cfg.showsCursor=false;cfg.capturesAudio=false
@@ -82,7 +90,7 @@ Task { @MainActor in
    let data=encode(cg);try data.write(to:root.appendingPathComponent(name+".jpg"))
    cases.append(["name":name,"width":cg.width,"height":cg.height,"jpegSha256":sha(data),"bytes":data.count,"colorSpace":cg.colorSpace?.name as String? ?? "unknown"])
   }
-  try JSONSerialization.data(withJSONObject:["reference":"2.1.325 independent SCK/AppKit reconstruction","cases":cases,"sourceRect":[crop.minX,crop.minY,crop.width,crop.height],"scope":"owned fixtures only; static zoom full bytes; screenshot stable owned/foreign marker pixel patches"],options:[.prettyPrinted,.sortedKeys]).write(to:root.appendingPathComponent("reference.json"))
+  try JSONSerialization.data(withJSONObject:["reference":"2.1.325 independent SCK/AppKit reconstruction","cases":cases,"sourceRect":[crop.minX,crop.minY,crop.width,crop.height],"logicalDisplaySize":[display.frame.width,display.frame.height],"backingPixelSize":[pw,ph],"backingScale":backingScale,"dimensionRule":"round(logicalDimension * backingScale), then native budget","scope":"owned fixtures only; static zoom full bytes; screenshot stable owned/foreign marker pixel patches"],options:[.prettyPrinted,.sortedKeys]).write(to:root.appendingPathComponent("reference.json"))
   print("Generated independent owned-fixture SCK references")
   CFRunLoopStop(CFRunLoopGetMain())
  }catch{fputs("SCK reference failed: \(error)\n",stderr);exit(1)}

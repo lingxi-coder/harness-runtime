@@ -31,14 +31,23 @@ def display_geometry():
     cg.CGMainDisplayID.restype = ctypes.c_uint32
     cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
     cg.CGDisplayBounds.restype = Rect
-    for name in ["CGDisplayPixelsWide", "CGDisplayPixelsHigh"]:
+    cg.CGDisplayCopyDisplayMode.argtypes = [ctypes.c_uint32]
+    cg.CGDisplayCopyDisplayMode.restype = ctypes.c_void_p
+    cg.CGDisplayModeRelease.argtypes = [ctypes.c_void_p]
+    for name in ["CGDisplayModeGetPixelWidth", "CGDisplayModeGetPixelHeight"]:
         function = getattr(cg, name)
-        function.argtypes = [ctypes.c_uint32]
+        function.argtypes = [ctypes.c_void_p]
         function.restype = ctypes.c_size_t
     display = cg.CGMainDisplayID()
     bounds = cg.CGDisplayBounds(display)
     values = [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height]
-    pixels = [cg.CGDisplayPixelsWide(display), cg.CGDisplayPixelsHigh(display)]
+    mode = cg.CGDisplayCopyDisplayMode(display)
+    if not mode:
+        raise RuntimeError("cannot query the main display mode")
+    try:
+        pixels = [cg.CGDisplayModeGetPixelWidth(mode), cg.CGDisplayModeGetPixelHeight(mode)]
+    finally:
+        cg.CGDisplayModeRelease(mode)
     if (not display or not all(math.isfinite(v) for v in values)
             or min(values[2:]) <= 0 or min(pixels) <= 0):
         raise RuntimeError("cannot query the main fixture display")

@@ -1007,10 +1007,21 @@ mod tests {
         assert!(!result.is_error, "{}", wire(&result));
         let zoom = image_bytes(&result);
         std::fs::write(root.join("actual-zoom.jpg"), &zoom).unwrap();
-        assert_eq!(
-            zoom,
-            std::fs::read(root.join("zoom.jpg")).unwrap(),
-            "static owned zoom must match independent SCK/AppKit bytes"
+        let expected_zoom = std::fs::read(root.join("zoom.jpg")).unwrap();
+        use sha2::{Digest, Sha256};
+        let comparison = json!({
+            "actualSha256": format!("{:x}", Sha256::digest(&zoom)),
+            "expectedSha256": format!("{:x}", Sha256::digest(&expected_zoom)),
+            "actualBytes": zoom.len(),
+            "expectedBytes": expected_zoom.len(),
+            "firstDifferentByte": zoom.iter().zip(&expected_zoom).position(|(a,b)| a!=b),
+            "exactBytesEqual": zoom == expected_zoom,
+            "region": config["region"],
+        });
+        std::fs::write(root.join("comparison.json"), comparison.to_string()).unwrap();
+        assert!(
+            zoom == expected_zoom,
+            "static owned zoom must match independent SCK/AppKit bytes: {comparison}"
         );
         owner.cleanup_computer_inputs(&context).await.unwrap();
     }

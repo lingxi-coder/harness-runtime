@@ -41,19 +41,30 @@ final class Canvas: NSView {
  override func mouseUp(with event:NSEvent){ups += 1}
  override func draw(_ r:NSRect){NSColor.systemTeal.setFill();bounds.fill()}
 }
+final class FixtureWindow:NSWindow {
+ override var canBecomeKey: Bool { true }
+ override var canBecomeMain: Bool { true }
+}
 final class Fixture:NSObject,NSApplicationDelegate,NSWindowDelegate {
- let root:URL;let shadow:Bool;var window:NSWindow!;let canvas=Canvas();let text=NSTextView();var activations=0;var primary:NSWindow?;var phase="ready";var observer:NSObjectProtocol?
+ let root:URL;let shadow:Bool;var window:NSWindow!;let canvas=Canvas();let text=NSTextView();var activations=0;var primary:NSWindow?;var phase="ready";var observer:NSObjectProtocol?;var keysDown=0;var keysUp=0;var lastKey:[String:Any]=[:]
  init(_ p:String,_ s:Bool){root=URL(fileURLWithPath:p);shadow=s}
  func applicationDidFinishLaunching(_ n:Notification){
-  NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.leftMouseUp,.leftMouseDragged]) { e in
+  NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.leftMouseUp,.leftMouseDragged,.keyDown,.keyUp]) { e in
+    if e.type == .keyDown || e.type == .keyUp {
+      if e.type == .keyDown {self.keysDown += 1} else {self.keysUp += 1}
+      self.lastKey=["code":e.keyCode,"window":e.windowNumber,"flags":e.modifierFlags.rawValue,"type":e.type.rawValue]
+      self.persist()
+      return e
+    }
     fputs("mouse type=\(e.type.rawValue) window=\(e.windowNumber) local=\(e.locationInWindow)\n",stderr)
     return e
   }
   NSApp.setActivationPolicy(.regular)
-  window=NSWindow(contentRect:NSRect(x:shadow ? 850:150,y:200,width:500,height:300),styleMask:[.titled,.closable],backing:.buffered,defer:false)
+  window=FixtureWindow(contentRect:NSRect(x:shadow ? 850:150,y:200,width:500,height:300),styleMask:[.titled,.closable],backing:.buffered,defer:false)
   window.title=shadow ? "Owned raw probe shadow":"Owned raw probe target";window.isReleasedWhenClosed=false
   canvas.frame=NSRect(x:20,y:20,width:460,height:120);text.frame=NSRect(x:20,y:170,width:460,height:80);text.string="seed"
   window.contentView!.addSubview(canvas);window.contentView!.addSubview(text)
+  let menu=NSMenu();let appItem=NSMenuItem(title:"Owned fixture",action:nil,keyEquivalent:"");appItem.submenu=NSMenu(title:"Owned fixture");menu.addItem(appItem);let edit=NSMenu(title:"Edit");let select=NSMenuItem(title:"Select All",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a");select.keyEquivalentModifierMask=[.command];select.target=text;edit.addItem(select);let editItem=NSMenuItem(title:"Edit",action:nil,keyEquivalent:"");editItem.submenu=edit;menu.addItem(editItem);NSApp.mainMenu=menu
   window.orderFront(nil);window.makeFirstResponder(text)
   if shadow {window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
   observer=NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didActivateApplicationNotification,object:nil,queue:.main){_ in self.activations += 1;self.persist()}
@@ -68,9 +79,9 @@ final class Fixture:NSObject,NSApplicationDelegate,NSWindowDelegate {
  }
  func windowDidEnterFullScreen(_ n:Notification){
    let previous=window!;let content=previous.contentView!;previous.contentView=nil;previous.close()
-   window=NSWindow(contentRect:NSRect(x:150,y:200,width:500,height:300),styleMask:[.titled,.closable],backing:.buffered,defer:false)
+   window=FixtureWindow(contentRect:NSRect(x:150,y:200,width:500,height:300),styleMask:[.titled,.closable],backing:.buffered,defer:false)
    window.title="Owned movable auxiliary target";window.isReleasedWhenClosed=false;window.collectionBehavior=[.fullScreenAuxiliary];window.contentView=content
-   window.makeKeyAndOrderFront(nil);window.makeFirstResponder(text);phase="space-ready";persist()
+   window.makeKeyAndOrderFront(nil);window.makeMain();window.makeKey();window.makeFirstResponder(text);phase="space-ready";persist()
  }
  func spaceState()->[String:Any]{Spaces.shared.state(window:window.windowNumber)}
  func persist(){let rect=window.frame;let loc=CGEvent(source:nil)!.location
@@ -81,6 +92,10 @@ final class Fixture:NSObject,NSApplicationDelegate,NSWindowDelegate {
   }
 
   var d:[String:Any]=["phase":phase,"pid":ProcessInfo.processInfo.processIdentifier,"window":window.windowNumber,"frame":[rect.minX,rect.minY,rect.width,rect.height],"canvasScreen": [rect.minX+100,NSScreen.screens[0].frame.height-(rect.minY+80)],"canvasLocal":[100,80],"downs":canvas.downs,"drags":canvas.drags,"ups":canvas.ups,"text":text.string,"selection":[text.selectedRange().location,text.selectedRange().length],"frontmost":NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,"activations":activations,"cursor":[loc.x,loc.y],"firstResponder":String(describing:type(of:window.firstResponder!)),"textStartWindow":textPoint(0),"textEndWindow":textPoint(3)]
+  d["keysDown"]=keysDown;d["keysUp"]=keysUp;d["lastKey"]=lastKey
+  d["keyWindow"]=NSApp.keyWindow.map{$0.windowNumber} as Any? ?? NSNull()
+  d["mainWindow"]=NSApp.mainWindow.map{$0.windowNumber} as Any? ?? NSNull()
+  d["windowIsKey"]=window.isKeyWindow;d["windowIsMain"]=window.isMainWindow
   d.merge(spaceState()){_,v in v}
   try? JSONSerialization.data(withJSONObject:d,options:[.sortedKeys]).write(to:root,options:.atomic)
  }
@@ -96,8 +111,8 @@ if args.contains("--running-fixtures") {
 }
 if args.count==4 && args[1]=="--activate-owned-shadow" {
  guard let pid=Int32(args[2]),let app=NSRunningApplication(processIdentifier:pid),app.bundleIdentifier=="org.lingxi.raw-probe.shadow",app.executableURL?.resolvingSymlinksInPath().path==args[3] else {exit(2)}
- emit(["activated":app.activate(options:[])]);exit(0)
+ // Fixture preparation only: reveal this exact owned window across Spaces.
+ emit(["activated":app.activate(options:[.activateAllWindows])]);exit(0)
 }
 guard args.count>=2 else {fputs("expected output JSON path or read-only --probe-state/--running-fixtures\n",stderr);exit(2)}
 let fixture=Fixture(args[1],args.contains("shadow"));NSApplication.shared.delegate=fixture;NSApplication.shared.run()
-

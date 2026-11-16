@@ -7,8 +7,9 @@ onto the shadow's desktop. Keep the fixtures running until this comparison
 finishes; use the raw-background launcher's exact-identity cleanup afterwards.
 Run that cleanup even if reference generation or a comparison fails.
 
-After following [the raw-background instructions](../raw-background/README.md),
-retain that run's `OUT` as `FIXTURE_OUT`, and run from the SDK root:
+Follow [the raw-background instructions](../raw-background/README.md) through
+the test command, postponing its final cleanup until this comparison finishes.
+Retain that run's `OUT` as `FIXTURE_OUT`, and run from the SDK root:
 
 ```sh
 SOURCE="$PWD/crates/platforms/macos-computer-control/examples/fixtures/native-capture"
@@ -38,3 +39,10 @@ the complete static fractional-zoom JPEG. Dynamic desktop pixels are outside
 that byte comparison. This is an independent reconstruction, not execution of
 the proprietary addon. Generated images and receipts stay in `CAPTURE_OUT`;
 never add real screen captures, executables, or generated module caches to Git.
+
+The backing pixel size comes from `CGDisplayCopyDisplayMode` and its pixel
+dimensions. Do not assume `CGDisplayPixelsWide` supplies that size for a HiDPI
+mode: the measured Retina case reported 1512x982 there and 3024x1964 in the
+display mode. The native driver rounds each logical crop dimension times its
+backing scale before applying the image budget. A full-display budget can hide
+the wrong scale because its aspect ratio is unchanged; a small zoom exposes it.

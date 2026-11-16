@@ -1431,6 +1431,7 @@ fn dispatch_raw(
     }
     out["outcome"] = json!("ok");
     out["reasonCode"] = Value::Null;
+    out["path"] = json!("cgevent");
     Ok(out)
 }
 fn complete_mouse_delivery(

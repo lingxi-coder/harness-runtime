@@ -141,6 +141,33 @@ CARGO_INCREMENTAL=0 cargo test --offline -p platform-macos-computer-control -p t
 CARGO_INCREMENTAL=0 cargo test --offline -p tool-api -p orchestrator --lib image
 ```
 
+## Final source validation
+
+After integration with upstream `a9ef128d`, the focused native and tool suites
+pass 43 and 205 tests respectively; the explicit GUI cases remain ignored in
+ordinary CI. Registry/invoker checks pass 31 tests. The UniFFI-enabled client
+checks pass 35 tests across Computer Access, snapshots, enum ordinals and the
+version/contract index.
+
+The final real fixture run establishes the full 42-tool host profile, an actual
+window move from its disposable full-screen Space to the current desktop, text
+selection by background drag, raw Command-A selection and four balanced raw
+mouse presses/releases. Foreground, cursor, current Space, activation count and
+fixture content remain unchanged during tool effects.
+
+Actual registered MCP screenshot/zoom calls also pass exact owned/foreign 8x8
+RGBA patches and geometry checks. The static fractional zoom JPEG matches the
+independent same-host reference byte for byte: 8,679 bytes, SHA-256
+`232ad19b4849bba507c76f530fdd8e521c2a58c24e300c8a7b07b6086adb6bde`.
+This comparison uses the display mode's backing pixel dimensions; on HiDPI,
+`CGDisplayPixelsWide` may instead report Quartz logical dimensions and is not a
+valid substitute. Eight synthetic sRGB/P3/alpha PNG inputs independently match
+both recovered AppKit encoder chains.
+
+The portable fixtures and independent source references are checked in under
+[`examples/fixtures`](../../crates/platforms/macos-computer-control/examples/fixtures/).
+Generated JPEGs, real screen images, binaries and receipts stay outside Git.
+
 ## Evidence limits
 
 Exact descriptor and selected model-result bytes are established by the pinned
