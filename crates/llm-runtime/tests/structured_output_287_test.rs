@@ -677,12 +677,23 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
             );
         }
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"betas":{"toString":null}}"#);
+        // ApiService alone owns CLAUDE_CODE_EXTRA_BODY (6cb56623): its capture
+        // rejects the invalid coercion before dispatch, while a raw
+        // ModelRuntime preparation uses only explicit request input.
         assert!(matches!(
-            client
-                .prepare(&policy_request_with_budget("claude-sonnet-4-6", "hi"))
+            service
+                .execute_non_stream_request(
+                    policy_request_with_budget("claude-sonnet-4-6", "hi"),
+                    llm_runtime::NonStreamingRequestClass::Auxiliary,
+                    Default::default(),
+                )
                 .await,
             Err(llm_runtime::LlmError::InvalidRequest { .. })
         ));
+        assert!(client
+            .prepare(&policy_request_with_budget("claude-sonnet-4-6", "hi"))
+            .await
+            .is_ok());
         assert_eq!(
             capture.0.lock().unwrap().len(),
             1,

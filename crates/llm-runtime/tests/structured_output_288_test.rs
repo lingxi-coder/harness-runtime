@@ -237,11 +237,24 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
             } else {
                 &row["expected"]["main"]
             };
-            let expected_format_type = if !side && input["explicit"] == true {
-                // `ModelRuntime::prepare` evaluates the caller extra-body
-                // format for admission but does not merge it onto the body.
-                // `explicit_fixture` is asserted at the physical wire below.
+            // ApiService alone owns CLAUDE_CODE_EXTRA_BODY (6cb56623): a raw
+            // `ModelRuntime::prepare` is identical with and without it, and
+            // `explicit_fixture` is asserted at the physical wire below.
+            let environment_free = if !side && input["explicit"] == true {
+                std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+                let without = client.prepare(&request).await.unwrap();
+                Some(
+                    without
+                        .provider_request
+                        .body_json
+                        .string_at("/output_config/format/type")
+                        .map(|value| value.to_string()),
+                )
+            } else {
                 None
+            };
+            let expected_format_type = if let Some(format) = &environment_free {
+                format.as_deref()
             } else if source_identity_is_equivalent {
                 expected["config"]["format"]["type"].as_str()
             } else {
