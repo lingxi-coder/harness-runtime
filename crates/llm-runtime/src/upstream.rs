@@ -203,27 +203,40 @@ pub(crate) fn adapt_request(
     let mut adapted = request.clone();
     adapted.input = projection.request;
     adapted.execution.input_protocol = Some(target);
-    adapted.execution.message_json_string_overrides.clear();
-    for (path, units) in &request.execution.message_json_string_overrides {
-        let Some(path) = path.strip_prefix("/messages/") else {
-            continue;
-        };
-        let Some((message, path)) = path.split_once("/content/") else {
-            continue;
-        };
-        let Some((block, field)) = path.split_once('/') else {
-            continue;
-        };
-        let (Ok(message), Ok(block)) = (message.parse::<usize>(), block.parse::<usize>()) else {
-            continue;
-        };
-        if let Some((message, block)) = projection.block_positions.get(&(message, block)) {
-            adapted.execution.message_json_string_overrides.insert(
-                format!("/messages/{message}/content/{block}/{field}"),
-                units.clone(),
-            );
+    let mut positions = client::message_projection::MessageProjectionMap::default();
+    let same_family =
+        client::replay::native_family(source) == client::replay::native_family(target);
+    let mut next_message = 0;
+    for (mi, message) in request.input.messages.iter().enumerate() {
+        let mut retained = false;
+        for bi in 0..message.content.len() {
+            let outputs = projection
+                .block_positions
+                .get(&(mi, bi))
+                .copied()
+                .into_iter()
+                .collect::<Vec<_>>();
+            retained |= !outputs.is_empty();
+            positions.insert((mi, bi), outputs).map_err(error)?;
         }
+        let messages = if same_family {
+            vec![mi]
+        } else if retained || !message.native_options.is_empty() {
+            let index = next_message;
+            next_message += 1;
+            vec![index]
+        } else {
+            Vec::new()
+        };
+        positions.insert_message(mi, messages).map_err(error)?;
     }
+    crate::request_projection::apply(request, &mut adapted, &positions)?;
+    // Non-message overrides belong to the source wire family. Preserve the
+    // existing retry policy: only portable content coordinates cross families.
+    adapted
+        .execution
+        .message_json_string_overrides
+        .retain(|path, _| path.starts_with("/messages/"));
     Ok(adapted)
 }
 

@@ -3042,9 +3042,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-exact-text"
+version = "0.1.0"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=13e8a5e9b18a1237f528838cd9ce92e189317218#13e8a5e9b18a1237f528838cd9ce92e189317218"
+
+[[package]]
 name = "lingxi-hyper"
 version = "1.9.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2406dc1044e7b44f89af37ddd88c52e35976634a#2406dc1044e7b44f89af37ddd88c52e35976634a"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=13e8a5e9b18a1237f528838cd9ce92e189317218#13e8a5e9b18a1237f528838cd9ce92e189317218"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3063,7 +3068,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-rustls"
 version = "0.27.5"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2406dc1044e7b44f89af37ddd88c52e35976634a#2406dc1044e7b44f89af37ddd88c52e35976634a"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=13e8a5e9b18a1237f528838cd9ce92e189317218#13e8a5e9b18a1237f528838cd9ce92e189317218"
 dependencies = [
  "futures-util",
  "http",
@@ -3080,7 +3085,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-util"
 version = "0.1.21"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2406dc1044e7b44f89af37ddd88c52e35976634a#2406dc1044e7b44f89af37ddd88c52e35976634a"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=13e8a5e9b18a1237f528838cd9ce92e189317218#13e8a5e9b18a1237f528838cd9ce92e189317218"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3102,7 +3107,7 @@ dependencies = [
 [[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2406dc1044e7b44f89af37ddd88c52e35976634a#2406dc1044e7b44f89af37ddd88c52e35976634a"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=13e8a5e9b18a1237f528838cd9ce92e189317218#13e8a5e9b18a1237f528838cd9ce92e189317218"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3112,6 +3117,7 @@ dependencies = [
  "futures",
  "hmac",
  "jsonschema",
+ "lingxi-exact-text",
  "lingxi-reqwest",
  "regex",
  "ring",
@@ -3130,7 +3136,7 @@ dependencies = [
 [[package]]
 name = "lingxi-reqwest"
 version = "0.12.29"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2406dc1044e7b44f89af37ddd88c52e35976634a#2406dc1044e7b44f89af37ddd88c52e35976634a"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=13e8a5e9b18a1237f528838cd9ce92e189317218#13e8a5e9b18a1237f528838cd9ce92e189317218"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4186,9 +4192,9 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74b7c5390f477482f001bc354d6571a70db7e4f8d5288e860c45521fbce11394"
 dependencies = [
- "libc",
  "block2 0.6.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-graphics",

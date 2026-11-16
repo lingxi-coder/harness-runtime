@@ -272,9 +272,12 @@ pub(crate) fn project<'a>(
     let Some(history) = request.execution.local_tool_search_history.as_ref() else {
         return Ok(Cow::Owned(projected));
     };
-    let mut position_map = BTreeMap::new();
+    let mut position_map = lingxi_llm_client::message_projection::MessageProjectionMap::default();
     let mut text_results = BTreeMap::new();
     for (mi, message) in projected.input.messages.iter_mut().enumerate() {
+        position_map
+            .insert_message(mi, vec![mi])
+            .map_err(crate::upstream::error)?;
         let previous = std::mem::take(&mut message.content);
         for (bi, block) in previous.into_iter().enumerate() {
             let start = message.content.len();
@@ -336,61 +339,36 @@ pub(crate) fn project<'a>(
                 }
                 block => message.content.push(block),
             }
-            position_map.insert((mi, bi), (start, message.content.len() - 1));
-        }
-    }
-    for point in &mut projected.input.prompt_cache.breakpoints {
-        if let wire::CachePosition::Message { index, block } = &mut point.position {
-            if let Some((_, last)) = position_map.get(&(*index, *block)) {
-                *block = *last;
+            let last = message.content.len() - 1;
+            position_map
+                .insert((mi, bi), (start..=last).map(|block| (mi, block)).collect())
+                .map_err(crate::upstream::error)?;
+            if text_results.contains_key(&(mi, bi)) {
+                position_map
+                    .map_field((mi, bi), "content", Some(((mi, last), "text".into())))
+                    .map_err(crate::upstream::error)?;
             }
         }
     }
-    let mut exact = BTreeMap::new();
-    for (key, units) in &request.execution.message_json_string_overrides {
-        let Some(path) = key.strip_prefix("/messages/") else {
-            exact.insert(key.clone(), units.clone());
-            continue;
-        };
-        let Some((mi, path)) = path.split_once("/content/") else {
-            continue;
-        };
-        let Some((bi, field)) = path.split_once('/') else {
-            continue;
-        };
-        let Some((mi, bi)) = mi.parse::<usize>().ok().zip(bi.parse::<usize>().ok()) else {
-            continue;
-        };
-        if let Some((start, last)) = position_map.get(&(mi, bi)) {
-            if let Some(projected_units) = text_results.get(&(mi, bi)) {
-                if field == "content" {
-                    exact.insert(
-                        format!("/messages/{mi}/content/{last}/text"),
-                        projected_units.clone(),
-                    );
-                }
-            } else {
-                exact.insert(
-                    format!("/messages/{mi}/content/{start}/{field}"),
-                    units.clone(),
-                );
-            }
+    crate::request_projection::apply(request, &mut projected, &position_map)?;
+    // This transform can append a retry hint to a result. Its exact override
+    // must describe the newly constructed text, not only the old source suffix.
+    for ((mi, bi), units) in text_results {
+        if request
+            .execution
+            .message_json_string_overrides
+            .contains_key(&format!("/messages/{mi}/content/{bi}/content"))
+        {
+            let &(mi, bi) = position_map
+                .outputs((mi, bi))
+                .map_err(crate::upstream::error)?
+                .last()
+                .expect("expanded result has text");
+            projected
+                .execution
+                .message_json_string_overrides
+                .insert(format!("/messages/{mi}/content/{bi}/text"), units);
         }
-    }
-    projected.execution.message_json_string_overrides = exact;
-    let sources = &request.execution.request_content_source_ids;
-    if sources.len() == request.input.messages.len() {
-        let mut mapped = Vec::new();
-        for (mi, message) in request.input.messages.iter().enumerate() {
-            let mut row = Vec::new();
-            for bi in 0..message.content.len() {
-                let (first, last) = position_map[&(mi, bi)];
-                let source = sources[mi].get(bi).cloned().unwrap_or_default();
-                row.extend(std::iter::repeat_n(source, last - first + 1));
-            }
-            mapped.push(row);
-        }
-        projected.execution.request_content_source_ids = mapped;
     }
     Ok(Cow::Owned(projected))
 }

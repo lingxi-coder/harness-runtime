@@ -15,6 +15,7 @@
 use super::StreamingError;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ToolUseId};
+use lingxi_llm_client::exact_text::ExactText;
 use lingxi_llm_client::protocol::{JsonPayload, JsonPayloadFragment};
 use std::collections::HashMap;
 
@@ -111,16 +112,58 @@ pub enum CompletedBlock {
     Skipped,
 }
 
+// Preserve the legacy start-event display until the first delta. The shared
+// builder then owns all mutation; protocol snapshots and event lifetimes stay
+// with this accumulator. In particular, a no-delta block is not normalized.
+#[derive(Debug)]
+enum TextBuffer {
+    Initial(String, Option<Vec<u16>>),
+    Active(ExactText),
+}
+impl TextBuffer {
+    fn display(&self) -> &str {
+        match self {
+            Self::Initial(text, _) => text,
+            Self::Active(text) => text.display(),
+        }
+    }
+    fn units(&self) -> Option<&[u16]> {
+        match self {
+            Self::Initial(_, units) => units.as_deref(),
+            Self::Active(text) => text.carried_units(),
+        }
+    }
+    fn builder(&mut self) -> &mut ExactText {
+        if matches!(self, Self::Initial(..)) {
+            let Self::Initial(text, units) =
+                std::mem::replace(self, Self::Initial(String::new(), None))
+            else {
+                unreachable!()
+            };
+            *self = Self::Active(match units {
+                Some(units) => ExactText::from_units(units),
+                None => ExactText::from_text(text),
+            });
+        }
+        let Self::Active(text) = self else {
+            unreachable!()
+        };
+        text
+    }
+    fn into_parts(self) -> (String, Option<Vec<u16>>) {
+        match self {
+            Self::Initial(text, units) => (text, units),
+            Self::Active(text) => text.into_parts(),
+        }
+    }
+}
+
 /// Per-block state held during accumulation.
 #[derive(Debug)]
 struct BlockState {
     kind: BlockKind,
     /// Used for `Text` and `Thinking`.
-    text_buf: String,
-    /// Preserved provider text can carry lone UTF-16 units outside Rust String.
-    text_utf16_code_units: Option<Vec<u16>>,
-    /// Normalize a caller-supplied initial display only on its first delta.
-    text_display_synced: bool,
+    text_buf: TextBuffer,
     /// Whether accumulated deltas should replace the source block's text field.
     preserved_text_dirty: bool,
     /// Used for `ToolUse` (raw `partial_json` concat).
@@ -169,9 +212,7 @@ impl BlockAccumulator {
             index,
             BlockState {
                 kind,
-                text_buf,
-                text_utf16_code_units,
-                text_display_synced: false,
+                text_buf: TextBuffer::Initial(text_buf, text_utf16_code_units),
                 preserved_text_dirty: false,
                 json_buf: Vec::new(),
                 signature: None,
@@ -196,7 +237,7 @@ impl BlockAccumulator {
 
     pub(crate) fn thinking_text(&self, index: u32) -> Option<&str> {
         let state = self.blocks.get(&index)?;
-        matches!(state.kind, BlockKind::Thinking).then_some(state.text_buf.as_str())
+        matches!(state.kind, BlockKind::Thinking).then_some(state.text_buf.display())
     }
 
     /// Append `text` to the `Text` or `Thinking` buffer of the block at
@@ -212,38 +253,12 @@ impl BlockAccumulator {
             .get_mut(&index)
             .ok_or(StreamingError::BlockNotFound { index })?;
         match &mut state.kind {
-            BlockKind::Text {
-                utf16_code_units, ..
-            } => {
-                if let Some(utf16_code_units) = utf16_code_units {
-                    sync_initial_display(
-                        &mut state.text_buf,
-                        utf16_code_units,
-                        &mut state.text_display_synced,
-                    );
-                    utf16_code_units.extend(text.encode_utf16());
-                    state.text_buf.push_str(text);
-                } else {
-                    state.text_buf.push_str(text);
-                }
-                Ok(())
-            }
-            BlockKind::Thinking => {
-                state.text_buf.push_str(text);
+            BlockKind::Text { .. } | BlockKind::Thinking => {
+                state.text_buf.builder().push_str(text);
                 Ok(())
             }
             BlockKind::PreservedText(_) => {
-                if let Some(units) = &mut state.text_utf16_code_units {
-                    sync_initial_display(
-                        &mut state.text_buf,
-                        units,
-                        &mut state.text_display_synced,
-                    );
-                    units.extend(text.encode_utf16());
-                    state.text_buf.push_str(text);
-                } else {
-                    state.text_buf.push_str(text);
-                }
+                state.text_buf.builder().push_str(text);
                 state.preserved_text_dirty = true;
                 Ok(())
             }
@@ -267,21 +282,12 @@ impl BlockAccumulator {
             .get_mut(&index)
             .ok_or(StreamingError::BlockNotFound { index })?;
         match &mut state.kind {
-            BlockKind::Text {
-                utf16_code_units: units,
-                ..
-            } => {
-                let units = units.get_or_insert_with(|| state.text_buf.encode_utf16().collect());
-                sync_initial_display(&mut state.text_buf, units, &mut state.text_display_synced);
-                append_exact_text(&mut state.text_buf, units, utf16_code_units);
+            BlockKind::Text { .. } => {
+                state.text_buf.builder().push_units(utf16_code_units);
                 Ok(())
             }
             BlockKind::PreservedText(_) => {
-                let units = state
-                    .text_utf16_code_units
-                    .get_or_insert_with(|| state.text_buf.encode_utf16().collect());
-                sync_initial_display(&mut state.text_buf, units, &mut state.text_display_synced);
-                append_exact_text(&mut state.text_buf, units, utf16_code_units);
+                state.text_buf.builder().push_units(utf16_code_units);
                 state.preserved_text_dirty = true;
                 Ok(())
             }
@@ -397,9 +403,10 @@ impl BlockAccumulator {
                 protocol,
                 value: current,
             }) if protocol == "anthropic_messages" => {
-                state.text_buf = value.string_at("/text").unwrap_or_default().to_owned();
-                state.text_utf16_code_units = value.string_units("/text");
-                state.text_display_synced = false;
+                state.text_buf = TextBuffer::Initial(
+                    value.string_at("/text").unwrap_or_default().to_owned(),
+                    value.string_units("/text"),
+                );
                 state.preserved_text_dirty = false;
                 *current = value;
                 Ok(())
@@ -450,18 +457,15 @@ impl BlockAccumulator {
             .blocks
             .remove(&index)
             .ok_or(StreamingError::DoubleStop { index })?;
+        let (text, exact_units) = state.text_buf.into_parts();
         let completed = match state.kind {
-            BlockKind::Text {
+            BlockKind::Text { citations, .. } => CompletedBlock::Text {
+                text,
                 citations,
-                utf16_code_units,
-                ..
-            } => CompletedBlock::Text {
-                text: state.text_buf,
-                citations,
-                utf16_code_units,
+                utf16_code_units: exact_units,
             },
             BlockKind::Thinking => CompletedBlock::Thinking {
-                thinking: state.text_buf,
+                thinking: text,
                 signature: state.signature,
             },
             BlockKind::ToolUse {
@@ -493,10 +497,7 @@ impl BlockAccumulator {
             BlockKind::PreservedText(mut block) => {
                 if state.preserved_text_dirty {
                     if let ContentBlock::ProviderContent { value, .. } = &mut block {
-                        let units = state.text_utf16_code_units.as_deref().map_or_else(
-                            || state.text_buf.encode_utf16().collect::<Vec<_>>(),
-                            <[u16]>::to_vec,
-                        );
+                        let units = exact_units.unwrap_or_else(|| text.encode_utf16().collect());
                         replace_provider_text(value, &units)
                             .map_err(|error| StreamingError::JsonPayload(error.to_string()))?;
                     }
@@ -549,12 +550,12 @@ impl BlockAccumulator {
         blocks
             .into_iter()
             .filter_map(|(index, state)| match &state.kind {
-                BlockKind::PreservedText(block) if !state.text_buf.is_empty() => {
+                BlockKind::PreservedText(block) if !state.text_buf.display().is_empty() => {
                     let mut block = block.clone();
                     if state.preserved_text_dirty {
                         if let ContentBlock::ProviderContent { value, .. } = &mut block {
-                            let units = state.text_utf16_code_units.as_deref().map_or_else(
-                                || state.text_buf.encode_utf16().collect::<Vec<_>>(),
+                            let units = state.text_buf.units().map_or_else(
+                                || state.text_buf.display().encode_utf16().collect::<Vec<_>>(),
                                 <[u16]>::to_vec,
                             );
                             replace_provider_text(value, &units)
@@ -563,24 +564,22 @@ impl BlockAccumulator {
                     }
                     Some((*index, block))
                 }
-                BlockKind::Text {
-                    citations,
-                    utf16_code_units,
-                    ..
-                } if !state.text_buf.is_empty() => Some((
-                    *index,
-                    match utf16_code_units {
-                        Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
-                            text: state.text_buf.clone(),
-                            utf16_code_units: utf16_code_units.clone(),
-                            citations: citations_to_core(citations.clone()),
+                BlockKind::Text { citations, .. } if !state.text_buf.display().is_empty() => {
+                    Some((
+                        *index,
+                        match state.text_buf.units() {
+                            Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
+                                text: state.text_buf.display().to_owned(),
+                                utf16_code_units: utf16_code_units.to_vec(),
+                                citations: citations_to_core(citations.clone()),
+                            },
+                            None => ContentBlock::Text {
+                                text: state.text_buf.display().to_owned(),
+                                citations: citations_to_core(citations.clone()),
+                            },
                         },
-                        None => ContentBlock::Text {
-                            text: state.text_buf.clone(),
-                            citations: citations_to_core(citations.clone()),
-                        },
-                    },
-                )),
+                    ))
+                }
                 _ => None,
             })
             .collect()
@@ -640,33 +639,6 @@ fn append_payload_array(
     source.push_str(value.as_json_source());
     source.push(']');
     JsonPayload::parse(&source).map_err(|error| StreamingError::JsonPayload(error.to_string()))
-}
-
-// Decode only the appended suffix. A trailing high surrogate was displayed as
-// U+FFFD; replace that single scalar when the next frame completes its pair.
-fn append_exact_text(text: &mut String, units: &mut Vec<u16>, delta: &[u16]) {
-    let joins_pair = units
-        .last()
-        .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
-        && delta
-            .first()
-            .is_some_and(|unit| (0xdc00..=0xdfff).contains(unit));
-    if joins_pair {
-        text.pop();
-        let start = units.len() - 1;
-        units.extend_from_slice(delta);
-        text.push_str(&String::from_utf16_lossy(&units[start..]));
-    } else {
-        units.extend_from_slice(delta);
-        text.push_str(&String::from_utf16_lossy(delta));
-    }
-}
-
-fn sync_initial_display(text: &mut String, units: &[u16], synced: &mut bool) {
-    if !*synced {
-        *text = String::from_utf16_lossy(units);
-        *synced = true;
-    }
 }
 
 #[cfg(test)]
@@ -757,6 +729,26 @@ mod utf16_text_tests {
         accumulator.append_text_utf16(0, &[0xde00]).unwrap();
         assert!(
             matches!(accumulator.stop_block(0).unwrap(), CompletedBlock::Text { text, .. } if text == "😀")
+        );
+    }
+
+    #[test]
+    fn start_without_a_delta_retains_the_existing_display_and_exact_shape() {
+        let mut accumulator = BlockAccumulator::new();
+        accumulator
+            .start_block(
+                0,
+                BlockKind::Text {
+                    citations: None,
+                    utf16_code_units: Some(vec![0xd800]),
+                    initial_text: "initial display".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(accumulator.stop_block(0).unwrap(), CompletedBlock::Text {
+            text, utf16_code_units: Some(units), ..
+        } if text == "initial display" && units == [0xd800])
         );
     }
 

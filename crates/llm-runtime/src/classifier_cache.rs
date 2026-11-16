@@ -23,9 +23,9 @@ pub(crate) fn project_request<'a>(
     auth: AuthStrategy,
     mode: RequestMode,
 ) -> std::borrow::Cow<'a, crate::LlmRequest> {
+    use lingxi_llm_client::message_projection::MessageProjectionMap;
     use lingxi_llm_client::protocol::{ContentBlock, ConversationMessage, MessageRole};
     use std::borrow::Cow;
-    use std::collections::BTreeMap;
 
     let Some(layout) = &request.execution.classifier_cache_layout else {
         return Cow::Borrowed(request);
@@ -77,115 +77,39 @@ pub(crate) fn project_request<'a>(
     {
         return Cow::Borrowed(request);
     }
-    let sources = &request.execution.request_content_source_ids;
-    if !sources.is_empty()
-        && (sources.len() != request.input.messages.len()
-            || sources
-                .iter()
-                .zip(&request.input.messages)
-                .any(|(sources, message)| sources.len() != message.content.len()))
-    {
-        return Cow::Borrowed(request);
-    }
-
-    let mut positions = BTreeMap::new();
+    let mut positions = MessageProjectionMap::default();
     let mut messages = Vec::new();
-    let mut mapped_sources = Vec::new();
-    let mut message_indices = Vec::new();
+
     for (mi, message) in request.input.messages.iter().enumerate() {
-        message_indices.push(messages.len());
+        let first = messages.len();
         if mi == target {
             for (bi, block) in message.content.iter().enumerate() {
-                positions.insert((mi, bi), (messages.len(), 0));
+                positions
+                    .insert((mi, bi), vec![(messages.len(), 0)])
+                    .expect("unique source block");
                 messages.push(ConversationMessage {
                     role: message.role,
                     content: vec![block.clone()],
                     native_options: Vec::new(),
                 });
-                if !sources.is_empty() {
-                    mapped_sources.push(vec![sources[mi][bi].clone()]);
-                }
             }
         } else {
             for bi in 0..message.content.len() {
-                positions.insert((mi, bi), (messages.len(), bi));
+                positions
+                    .insert((mi, bi), vec![(messages.len(), bi)])
+                    .expect("unique source block");
             }
             messages.push(message.clone());
-            if !sources.is_empty() {
-                mapped_sources.push(sources[mi].clone());
-            }
         }
-    }
-    let remap = |position| match position {
-        CachePosition::Message { index, block } => positions
-            .get(&(index, block))
-            .map(|&(index, block)| CachePosition::Message { index, block }),
-        position => Some(position),
-    };
-    if request
-        .input
-        .prompt_cache
-        .breakpoints
-        .iter()
-        .any(|point| remap(point.position).is_none())
-        || [layout.history, layout.action]
-            .into_iter()
-            .flatten()
-            .any(|point| remap(point).is_none())
-    {
-        return Cow::Borrowed(request);
-    }
-    let mut exact = BTreeMap::new();
-    for (key, units) in &request.execution.message_json_string_overrides {
-        let Some(path) = key.strip_prefix("/messages/") else {
-            exact.insert(key.clone(), units.clone());
-            continue;
-        };
-        let Some((mi, path)) = path.split_once("/content/") else {
-            return Cow::Borrowed(request);
-        };
-        let Some((bi, field)) = path.split_once('/') else {
-            return Cow::Borrowed(request);
-        };
-        let Some(&(mi, bi)) = mi
-            .parse::<usize>()
-            .ok()
-            .zip(bi.parse::<usize>().ok())
-            .and_then(|position| positions.get(&position))
-        else {
-            return Cow::Borrowed(request);
-        };
-        exact.insert(
-            format!("/messages/{mi}/content/{bi}/{field}"),
-            units.clone(),
-        );
+        positions
+            .insert_message(mi, (first..messages.len()).collect())
+            .expect("unique source message");
     }
     let mut projected = request.clone();
     projected.input.messages = messages;
-    for point in &mut projected.input.prompt_cache.breakpoints {
-        point.position = remap(point.position).expect("validated cache position");
+    if crate::request_projection::apply(request, &mut projected, &positions).is_err() {
+        return Cow::Borrowed(request);
     }
-    let projected_layout = projected
-        .execution
-        .classifier_cache_layout
-        .as_mut()
-        .unwrap();
-    projected_layout.history = layout.history.and_then(remap);
-    projected_layout.action = layout.action.and_then(remap);
-    projected.execution.message_json_string_overrides = exact;
-    projected.execution.request_content_source_ids = mapped_sources;
-    // A source spanning several new messages has no unique whole-message
-    // index. Its per-block provenance and admission membership remain intact.
-    projected
-        .execution
-        .request_message_source_indices
-        .retain(|_, index| {
-            if *index == target || *index >= message_indices.len() {
-                return false;
-            }
-            *index = message_indices[*index];
-            true
-        });
     Cow::Owned(projected)
 }
 
