@@ -254,7 +254,14 @@ fn append_additional_workspace_mounts(
             .and_then(std::path::Path::parent)
             .ok_or_else(|| "primary workspace mount has no user-home parent".to_string())?
             .to_path_buf();
-        let expected_primary = home.join(&profile.config_dir_name).join("projects");
+        // Same layout as Desktop and Android: projects, apps and mode
+        // workspaces live in `<home>/<config>-workspaces`, beside the
+        // protected brand config tree.
+        let container = profile.workspace_container_guest_path();
+        let container_name = container
+            .file_name()
+            .ok_or_else(|| "brand workspace container has no name".to_string())?;
+        let expected_primary = home.join(container_name).join("projects");
         if canonical_primary != expected_primary {
             return Err(
                 "primary workspace host path does not match the selected brand home".into(),
@@ -265,6 +272,7 @@ fn append_additional_workspace_mounts(
     let guest_home = profile.guest_home();
     let config_guest = profile.config_guest_path();
     let apps_guest = profile.apps_guest_path();
+    let scheduled_guest = profile.workspace_container_guest_path().join("scheduled");
     let primary_guest_path = primary_guest
         .as_deref()
         .map(|path| std::path::Path::new(path));
@@ -292,33 +300,17 @@ fn append_additional_workspace_mounts(
         if relative.as_os_str().is_empty() {
             return Err("additional project mount may not expose the whole user home".into());
         }
-        let is_local_app_source = guest.starts_with(&apps_guest) && guest != apps_guest;
-        let is_mode_workspace = ["chat", "code", "scheduled"].iter().any(|name| {
-            let root = config_guest.join(name);
-            guest.strip_prefix(&root).is_ok_and(|relative| {
-                if *name == "scheduled" && relative.as_os_str().is_empty() {
-                    return false;
-                }
-                let components = relative
-                    .components()
-                    .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
-                    .collect::<Vec<_>>();
-                components.iter().all(|value| {
-                    value != &profile.config_dir_name && value != "provider" && value != "providers"
-                }) && !components
-                    .windows(2)
-                    .any(|pair| pair[0] == "library" && pair[1] == "preferences")
-            })
-        });
+        if guest == scheduled_guest {
+            return Err(
+                "additional project mount may not expose the scheduled controller root".into(),
+            );
+        }
         if guest == apps_guest || apps_guest.starts_with(guest) {
             return Err(
                 "additional project mount may not expose the Local App root or its parent".into(),
             );
         }
-        if paths_overlap(&mount.guest_path, &config_guest.to_string_lossy())
-            && !is_local_app_source
-            && !is_mode_workspace
-        {
+        if paths_overlap(&mount.guest_path, &config_guest.to_string_lossy()) {
             return Err("additional project mount overlaps the protected brand config tree".into());
         }
         if primary_guest_path
@@ -647,7 +639,9 @@ mod tests {
     #[test]
     fn workspace_mount_uses_selected_brand_profile() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let workspace_host_path = temp.path().join("persistent/atlas_guest/.atlas/projects");
+        let workspace_host_path = temp
+            .path()
+            .join("persistent/atlas_guest/.atlas-workspaces/projects");
         let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
         let mounts = build_mobile_linux_mounts(
             Some(workspace_host_path.clone()),
@@ -669,11 +663,9 @@ mod tests {
         profile: &mobile_linux_api::BrandRuntimeProfile,
     ) -> (PathBuf, PathBuf) {
         let home = root.join("persistent").join(&profile.linux_user);
-        let primary_host = home.join(&profile.config_dir_name).join("projects");
-        let app_host = home
-            .join(&profile.config_dir_name)
-            .join(".apps")
-            .join("calorie-a1b2c3d4");
+        let container = home.join(format!("{}-workspaces", profile.config_dir_name));
+        let primary_host = container.join("projects");
+        let app_host = container.join("apps").join("calorie-a1b2c3d4");
         std::fs::create_dir_all(&primary_host).expect("create primary workspace");
         std::fs::create_dir_all(&app_host).expect("create Local App source");
         (primary_host, app_host)
@@ -699,7 +691,7 @@ mod tests {
             Some("projects".into()),
             &profile,
         );
-        let app_guest = "/home/atlas_guest/.atlas/.apps/calorie-a1b2c3d4";
+        let app_guest = "/home/atlas_guest/.atlas-workspaces/apps/calorie-a1b2c3d4";
         let mounts = append_additional_workspace_mounts(
             primary,
             vec![external_mount(app_host.clone(), app_guest)],
@@ -794,13 +786,16 @@ mod tests {
                 let root = host.parent().unwrap().canonicalize().unwrap();
                 assert!(append_additional_workspace_mounts(
                     primary.clone(),
-                    vec![external_mount(root, "/home/atlas_guest/.atlas/scheduled")],
+                    vec![external_mount(
+                        root,
+                        "/home/atlas_guest/.atlas-workspaces/scheduled"
+                    )],
                     &profile,
                 )
                 .is_err());
             }
             let host = host.canonicalize().unwrap();
-            let guest = format!("/home/atlas_guest/.atlas/{name}/chosen");
+            let guest = format!("/home/atlas_guest/.atlas-workspaces/{name}/chosen");
             let only_primary =
                 append_additional_workspace_mounts(primary.clone(), Vec::new(), &profile).unwrap();
             assert_eq!(only_primary.len(), 1);
@@ -817,19 +812,19 @@ mod tests {
                 primary.clone(),
                 vec![external_mount(
                     host,
-                    format!("/home/atlas_guest/.atlas/{name}/wrong")
+                    format!("/home/atlas_guest/.atlas-workspaces/{name}/wrong")
                 )],
                 &profile
             )
             .is_err());
         }
-        let protected = primary_host.parent().unwrap().join("chat/providers");
+        let protected = temp.path().join("persistent/atlas_guest/.atlas/chat");
         std::fs::create_dir_all(&protected).unwrap();
         assert!(append_additional_workspace_mounts(
             primary,
             vec![external_mount(
                 protected.canonicalize().unwrap(),
-                "/home/atlas_guest/.atlas/chat/providers"
+                "/home/atlas_guest/.atlas/chat"
             )],
             &profile
         )
@@ -848,22 +843,26 @@ mod tests {
             &profile,
         );
         let guest_home = "/home/atlas_guest";
-        let apps_guest = "/home/atlas_guest/.atlas/.apps";
+        let apps_guest = "/home/atlas_guest/.atlas-workspaces/apps";
         let cases = [
             external_mount(temp.path().join("outside"), "/tmp/outside"),
             external_mount(home.clone(), guest_home),
-            external_mount(home.join(".atlas/.apps"), apps_guest),
+            external_mount(home.join(".atlas-workspaces/apps"), apps_guest),
+            external_mount(
+                home.join(".atlas-workspaces"),
+                "/home/atlas_guest/.atlas-workspaces",
+            ),
             external_mount(
                 home.join(".atlas/private"),
                 "/home/atlas_guest/.atlas/private",
             ),
             external_mount(
                 primary_host.join("subdir"),
-                "/home/atlas_guest/.atlas/projects/subdir",
+                "/home/atlas_guest/.atlas-workspaces/projects/subdir",
             ),
             external_mount(
                 app_host.join(".."),
-                "/home/atlas_guest/.atlas/.apps/../calorie-a1b2c3d4",
+                "/home/atlas_guest/.atlas-workspaces/apps/../calorie-a1b2c3d4",
             ),
         ];
         for invalid in cases {
@@ -876,7 +875,7 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let alias = home.join(".atlas/.apps/alias");
+            let alias = home.join(".atlas-workspaces/apps/alias");
             std::os::unix::fs::symlink(&app_host, &alias).expect("create app alias symlink");
             assert!(append_additional_workspace_mounts(
                 primary,
@@ -899,8 +898,8 @@ mod tests {
         let nested = nested.canonicalize().expect("canonical nested source");
         let primary =
             build_mobile_linux_mounts(Some(primary_host), Some("projects".into()), &profile);
-        let parent_guest = "/home/atlas_guest/.atlas/.apps/team";
-        let nested_guest = "/home/atlas_guest/.atlas/.apps/team/nested";
+        let parent_guest = "/home/atlas_guest/.atlas-workspaces/apps/team";
+        let nested_guest = "/home/atlas_guest/.atlas-workspaces/apps/team/nested";
         let app = external_mount(parent.clone(), parent_guest);
         assert!(append_additional_workspace_mounts(
             primary.clone(),
