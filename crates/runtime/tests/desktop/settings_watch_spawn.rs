@@ -10,7 +10,7 @@
 //!   - dropping the returned handle aborts the watch task (clean teardown).
 
 use async_trait::async_trait;
-use harness_runtime::desktop::settings_watch::{ConfigChangeFirer, SettingsWatcher};
+use harness_runtime::desktop::settings_watch::{ConfigChangeFirer, SettingsPaths, SettingsWatcher};
 use hooks::events::ConfigChangeSource;
 use lingxi_core::host::filesystem::{
     FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError,
@@ -137,14 +137,12 @@ async fn spawn_fires_config_change_for_observed_settings_paths() {
     assert!(handle.task_count() >= 1, "at least one dir is watched");
 
     // Drive the spawned task to completion: the synthetic stream is finite, so
-    // the loop exits on its own. Poll the recorded fires deterministically
-    // (yield to the runtime until all three settings fires land) rather than
-    // sleeping on a wall clock.
-    for _ in 0..1000 {
-        if firer.fired.lock().unwrap().len() >= 3 {
-            break;
-        }
-        tokio::task::yield_now().await;
+    // the loop exits on its own. Each event also re-reads the managed policy
+    // inputs off the runtime, so a fixed yield budget can run out on a loaded
+    // runner; wait for all three fires under a generous deadline instead.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while firer.fired.lock().unwrap().len() < 3 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 
     let recorded = firer.fired.lock().unwrap().clone();
@@ -162,20 +160,30 @@ async fn spawn_fires_config_change_for_observed_settings_paths() {
 }
 
 #[tokio::test]
-async fn spawn_with_no_existing_dirs_watches_nothing() {
-    // Point at non-existent roots: `spawn` skips every dir (the `is_dir()`
-    // gate), so no task is spawned and nothing fires.
+async fn spawn_skips_missing_settings_dirs() {
+    // Point the user and project roots at non-existent paths: `spawn` skips
+    // every missing dir (the `is_dir()` gate). The OS policy roots are not
+    // test-owned (macOS hosts commonly have `/Library/Managed Preferences`),
+    // so only the policy dirs that exist on this machine may be watched.
     let firer: Arc<RecordingFirer> = Arc::new(RecordingFirer::default());
     let fs = Arc::new(FakeFs::new(vec![ev(PathBuf::from(
         "/no/such/.lingxi/settings.json",
     ))])) as Arc<dyn FileSystem>;
+    let lingxi_home = std::path::Path::new("/no/such/home/.lingxi");
+    let cwd = std::path::Path::new("/no/such/project");
+    let existing_policy_dirs = SettingsPaths::resolve(lingxi_home, cwd)
+        .watch_dirs()
+        .into_iter()
+        .filter(|dir| dir.is_dir())
+        .inspect(|dir| assert!(!dir.starts_with("/no/such"), "{dir:?}"))
+        .count();
 
-    let watcher = SettingsWatcher::new(
-        std::path::Path::new("/no/such/home/.lingxi"),
-        std::path::Path::new("/no/such/project"),
-        firer.clone(),
-    );
+    let watcher = SettingsWatcher::new(lingxi_home, cwd, firer.clone());
     let handle = watcher.spawn(fs).await;
-    assert_eq!(handle.task_count(), 0, "no existing dir ⇒ no watch task");
+    assert_eq!(
+        handle.task_count(),
+        existing_policy_dirs,
+        "missing user/project dirs ⇒ only existing policy dirs are watched"
+    );
     assert!(firer.fired.lock().unwrap().is_empty());
 }
