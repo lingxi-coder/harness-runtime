@@ -1718,11 +1718,8 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         cwd: cwd.clone(),
         lingxi_home,
         default_model: "claude-sonnet-4-20250514".to_string(),
-        // Boot tests must stay deterministic across HOST machines: a dev
-        // keychain with real provider keys would otherwise trigger the
-        // connected-provider fallback and change the booted model.
+        // Boot tests pin the model explicitly so they stay deterministic.
         default_model_explicit: true,
-        recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),
         flag_settings: None,
@@ -4024,7 +4021,6 @@ async fn build_keeps_explicit_model_despite_disconnected_provider() {
     let rt = build(cfg, output, perm_sink).await.expect("build() failed");
     std::env::remove_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT");
 
-    assert!(rt.default_model_fallback.is_none());
     assert_eq!(rt.orchestrator.default_model(), "claude-sonnet-4-20250514");
 }
 
@@ -4061,10 +4057,6 @@ async fn build_keeps_env_pinned_model_despite_disconnected_provider() {
     let rt = build(cfg, output, perm_sink).await.expect("build() failed");
     std::env::remove_var("LINGXI_TEST_REROUTE_KEY_ENVPIN");
 
-    assert!(
-        rt.default_model_fallback.is_none(),
-        "an ANTHROPIC_MODEL env pin must not be rerouted"
-    );
     assert_eq!(rt.orchestrator.default_model(), "claude-sonnet-4-20250514");
 }
 

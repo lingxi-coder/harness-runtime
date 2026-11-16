@@ -17,8 +17,7 @@ use super::{
     effective_model_source_for_config, filter_fusion_catalog, load_effective_settings_for_config,
     managed_model_policy_source, managed_model_setting_for_config, model_provenance_for_config,
     provider_profile_label, register_fusion_catalog_refresher, ApiProvider, BuildError,
-    DefaultModelFallbackNotice, DesktopConfig, FusionCatalogModelSource, FusionCatalogRefresher,
-    FusionCatalogRegistry,
+    DesktopConfig, FusionCatalogModelSource, FusionCatalogRefresher, FusionCatalogRegistry,
 };
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -158,8 +157,6 @@ pub struct LlmStack {
     pub first_party_environment_provider: String,
     /// See [`build`] for the resolution rules behind `provider_availability`.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
-    /// See [`build`] for the resolution rules behind `default_model_fallback`.
-    pub default_model_fallback: Option<DefaultModelFallbackNotice>,
     /// See [`build`] for the resolution rules behind `model_provenance`.
     pub model_provenance: lingxi_core::host::ModelProvenance,
     /// See [`build`] for the resolution rules behind `session_model_restriction`.
@@ -171,10 +168,8 @@ pub struct LlmStack {
     /// the UTF-8 route selector so valid JavaScript strings with lone UTF-16
     /// units and uncatalogued Native model ids are not replaced by a default.
     pub main_model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-    /// Provenance of the raw setting before any connected-provider fallback.
+    /// Provenance of the raw main-model setting.
     pub main_model_setting_provenance: lingxi_core::host::ModelProvenance,
-    /// See [`build`] for the resolution rules behind `model_setting_for_spawns`.
-    pub model_setting_for_spawns: String,
     /// Resolved provider tag for the session's boot auto-mode gate.
     pub session_auto_mode_provider: String,
     /// See [`build`] for the resolution rules behind `llm_runtime`.
@@ -714,7 +709,6 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .into_iter()
         .map(|a| (a.profile_name, a.available))
         .collect();
-    let default_model_fallback: Option<DefaultModelFallbackNotice> = None;
 
     // ── Managed availableModels / enforceAvailableModels constraint ─────────
     // (parity 2.1.207 H-BIN-08.) When a MANAGED (`policySettings`) tier owns an
@@ -796,16 +790,6 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .context_for_route(&default_model_id, default_model_profile.as_deref())
         .map_err(|error| BuildError::ApiBase(format!("selected model route: {error}")))?;
     default_model_profile = selected_model_context.route.profile.clone();
-
-    // The raw "user model setting" seam (the opusplan/haiku plan-mode swap
-    // anchor threaded into subagent/teammate model resolution). When the
-    // fallback rerouted the session, the persisted alias no longer describes
-    // the booted main loop — thread the rerouted ref instead so a plan-mode
-    // `AgentModel::Inherit` spawn cannot swap back onto the provider the
-    // fallback just declared disconnected.
-    let model_setting_for_spawns = default_model_fallback
-        .as_ref()
-        .map_or_else(|| configured_model.clone(), |n| n.to.clone());
 
     // Resolve the selected route from the actual ModelRuntime registry after
     // fallback/managed selection. Provider identity is not inferred from a
@@ -948,13 +932,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         profile_auto_mode_provider,
         first_party_environment_provider: first_party_environment_provider.to_string(),
         provider_availability,
-        default_model_fallback,
         model_provenance,
         session_model_restriction,
         main_model_setting,
         main_model_source,
         main_model_setting_provenance,
-        model_setting_for_spawns,
         session_auto_mode_provider,
         llm_runtime,
         model_resolution_context_provider,

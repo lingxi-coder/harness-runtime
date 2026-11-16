@@ -8,7 +8,7 @@ use platform_windows::process::supervisor as shell_supervisor;
 use platform_windows::WindowsMcpTransport;
 use std::sync::Arc;
 
-use super::{DesktopAudio, RecentModelRef};
+use super::DesktopAudio;
 
 /// API provider, mirroring `APIProvider` (`utils/model/providers.ts:4`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -444,14 +444,8 @@ pub struct DesktopConfig {
     pub default_model: String,
     /// `true` when [`Self::default_model`] is an EXPLICIT per-session choice
     /// (`--model` flag) rather than the built-in default or the persisted
-    /// `settings.model`. An explicit choice is never overridden by the
-    /// boot-time connected-provider fallback ([`connected_provider_fallback`]).
+    /// `settings.model`.
     pub default_model_explicit: bool,
-    /// `settings.recentModels` (most-recent-first), read by the host — `build()`
-    /// itself stays off host config files (F2-01). Feeds the connected-provider
-    /// fallback's preference pass. Empty ⟶ no recents (fallback uses the static
-    /// provider order only).
-    pub recent_models: Vec<RecentModelRef>,
     /// Fallback model id (`OrchestratorConfig.fallback_model`). `None` ⟶ no
     /// fallback, so the 529-overload interception in `turn_loop` stays a strict
     /// no-op. Mirrors `Argv::fallback_model`, which claude-code only HONORS in
@@ -756,9 +750,8 @@ pub struct DesktopConfig {
     /// built-in default or the persisted `settings.model`. Kept SEPARATE from
     /// [`Self::default_model_explicit`] (which stays `--model`-only, matching the
     /// binary's `userSpecifiedModel` = the `--model` flag) so the `--agent`
-    /// model-override gate is unaffected; it ONLY exempts an env-pinned model
-    /// from the boot connected-provider fallback (the user pinned exactly that
-    /// model via env, so a reroute would defeat the pin). `false` (the default).
+    /// model-override gate is unaffected; it only marks the model provenance
+    /// as user/env-owned. `false` (the default).
     pub default_model_env_pinned: bool,
     /// Boot SESSION thinking configuration, resolved host-side from the
     /// `MAX_THINKING_TOKENS` env var + the `--max-thinking-tokens` flag +
@@ -1318,7 +1311,6 @@ impl Default for DesktopConfig {
             lingxi_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
             default_model_explicit: false,
-            recent_models: Vec::new(),
             fallback_model: None,
             custom_betas: Vec::new(),
             flag_settings: None,
