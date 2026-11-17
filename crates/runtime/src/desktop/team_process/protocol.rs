@@ -39,6 +39,9 @@ pub(super) struct Bootstrap {
     /// Register the shared-list tools for this process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_list: Option<super::TeamSharedList>,
+    /// Register the no-reply tool for this process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub may_decline: bool,
 }
 impl Bootstrap {
     pub fn limits(&self) -> Result<TeamInvocationLimits, TeamProcessError> {
@@ -150,7 +153,11 @@ pub(super) fn validate_result(result: &TeamProcessResult) -> Result<(), TeamProc
     if result.version != 3 || result.text.len() > 8192 || result.finished_at == 0 {
         return Err(TeamProcessError::Protocol);
     }
-    if result.outcome == super::TeamProcessOutcome::Waiting && !result.text.is_empty() {
+    if matches!(
+        result.outcome,
+        super::TeamProcessOutcome::Waiting | super::TeamProcessOutcome::Declined
+    ) && !result.text.is_empty()
+    {
         return Err(TeamProcessError::Protocol);
     }
     if let super::TeamUsage::Complete { currency, .. } = &result.usage {

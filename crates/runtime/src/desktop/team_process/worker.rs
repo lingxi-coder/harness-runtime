@@ -131,11 +131,15 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         }
         None => None,
     };
+    let no_reply = bootstrap
+        .may_decline
+        .then(|| Arc::new(super::decline_tool::NoReply::default()));
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
         ask: ask.clone(),
         list: list.clone(),
+        no_reply: no_reply.clone(),
     }));
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
@@ -151,7 +155,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,no_reply).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -241,6 +245,7 @@ async fn run(
     protocol: lingxi_llm_client::protocol::ProtocolFamily,
     ask: Option<Arc<super::ask_tool::AskRequester>>,
     list: Option<Arc<super::list_tools::TeamListTools>>,
+    no_reply: Option<Arc<super::decline_tool::NoReply>>,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
         return Err(TeamProcessError::RouteUnsupported);
@@ -390,6 +395,11 @@ async fn run(
         .as_ref()
         .map_or(0, |state| state.checkpoint.dispatches_observed);
     let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
+    let input = if no_reply.is_some() {
+        format!("{input} Nobody asked you for this message: if no reply from you is wanted, call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL)
+    } else {
+        input
+    };
     let finish_only = resumed
         .as_ref()
         .is_some_and(|state| state.final_answer.is_some());
@@ -491,8 +501,16 @@ async fn run(
         let _ = rt.shutdown().await;
         return Err(TeamProcessError::Cancelled);
     }
+    // Silence is the Bot's choice, made by a tool call that is durable before
+    // the turn can end: this process saw it, or an earlier process of the task
+    // left it on the transcript. What the model wrote afterwards is not a reply.
+    let declined = no_reply.as_ref().is_some_and(|choice| {
+        choice.chosen() || resumed.as_ref().is_some_and(|state| state.declined)
+    });
     let (outcome, text) = if output.overflow.load(Ordering::Acquire) {
         (TeamProcessOutcome::OutputLimit, String::new())
+    } else if declined && matches!(&outcome, Ok(TurnOutcome::EndTurn | TurnOutcome::MaxTurns)) {
+        (TeamProcessOutcome::Declined, String::new())
     } else if output.failed.load(Ordering::Acquire)
         || outcome.is_err()
         || (matches!(&outcome, Ok(TurnOutcome::EndTurn)) && text.trim().is_empty())
@@ -754,7 +772,9 @@ impl BoundedOutput {
     ) -> bool {
         matches!(
             outcome,
-            TeamProcessOutcome::Completed | TeamProcessOutcome::MaxTurns
+            TeamProcessOutcome::Completed
+                | TeamProcessOutcome::MaxTurns
+                | TeamProcessOutcome::Declined
         ) && dispatched_requests == recorded_responses
             && !self.compaction_failed.load(Ordering::Acquire)
             && !self.request_retried.load(Ordering::Acquire)

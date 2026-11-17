@@ -72,6 +72,8 @@ struct Task {
     ask: bool,
     /// Offer the shared-list tools.
     list: Option<TeamSharedList>,
+    /// Nobody asked the Bot: offer the no-reply tool.
+    may_decline: bool,
 }
 impl Task {
     fn new() -> Self {
@@ -82,6 +84,7 @@ impl Task {
             input: batch(0, 2, 0),
             ask: false,
             list: None,
+            may_decline: false,
         }
     }
     /// Same task and batch; a fresh invocation identity, like a new host permit.
@@ -119,6 +122,7 @@ impl Task {
             model,
             deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
             ask_requester: self.ask,
+            may_decline: self.may_decline,
             shared_list: self.list.clone(),
         }
     }
@@ -202,6 +206,8 @@ struct Captured {
 enum Reply {
     Text(String),
     Tool(&'static str, Value),
+    /// One response that calls several tools.
+    Tools(Vec<(&'static str, Value)>),
     /// Send a text delta and keep the response open until the worker dies.
     Partial(String),
     /// Accept the request and never answer.
@@ -262,6 +268,14 @@ impl Server {
                     Reply::Tool(name, input) => sse(vec![
                         chunk(
                             json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("call_fixture_{index}"),"type":"function","function":{"name":name,"arguments":input.to_string()}}]}),
+                            None,
+                        ),
+                        chunk(json!({}), Some("tool_calls")),
+                        usage(),
+                    ]),
+                    Reply::Tools(calls) => sse(vec![
+                        chunk(
+                            json!({"role":"assistant","tool_calls":calls.iter().enumerate().map(|(n,(name,input))|json!({"index":n,"id":format!("call_fixture_{index}_{n}"),"type":"function","function":{"name":name,"arguments":input.to_string()}})).collect::<Vec<_>>()}),
                             None,
                         ),
                         chunk(json!({}), Some("tool_calls")),
@@ -1659,4 +1673,163 @@ async fn an_approved_list_needs_the_durable_wait() {
         "approval without a wait is refused before any process starts"
     );
     assert_eq!(server.count(), 0);
+}
+
+fn stay_silent() -> Reply {
+    Reply::Tool("TeamNoReply", json!({}))
+}
+fn unasked_task() -> Task {
+    Task {
+        may_decline: true,
+        ..Task::new()
+    }
+}
+
+#[tokio::test]
+async fn a_bot_nobody_asked_may_stay_silent_and_the_next_task_is_unaffected() {
+    let (_temp, root) = root();
+    let task = unasked_task();
+    let server = Server::new(vec![
+        stay_silent(),
+        Reply::Text("Nothing to add here.".into()),
+        Reply::Text("Asked answer".into()),
+    ])
+    .await;
+    let result = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Declined);
+    assert_eq!(
+        result.text, "",
+        "what the model wrote after choosing silence is not a reply"
+    );
+    assert!(result.document.is_none());
+    assert_eq!(result.dispatched_requests, 2);
+    let first = server.requests.lock().unwrap()[0].body.clone();
+    assert!(tool_names(&first).contains(&"TeamNoReply".to_owned()));
+    assert_legal_sequence(&server.requests.lock().unwrap()[1].body);
+    let recorded = checkpoint(&root, &task);
+    assert_eq!(recorded.phase, TeamTaskPhase::ResultRecorded);
+
+    // A task somebody did ask for runs in the same session afterwards, without the tool.
+    let mut next = Task::new();
+    next.input = batch(2, 3, 1);
+    let after = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            next.request(&root, next.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(after.text, "Asked answer");
+    let third = server.requests.lock().unwrap()[2].body.clone();
+    assert_eq!(tool_names(&third), ["TeamChatHistory", "TeamKnowledge"]);
+    assert_legal_sequence(&third);
+}
+
+#[tokio::test]
+async fn the_choice_to_stay_silent_survives_a_killed_worker() {
+    let (_temp, root) = root();
+    let task = unasked_task();
+    let server = Server::new(vec![
+        stay_silent(),
+        Reply::Hang,
+        Reply::Text("Understood.".into()),
+    ])
+    .await;
+    let (handle, cancel) = first_run(&task, &root, &server.endpoint, Arc::new(Broker::default()));
+    // The call and its result are durable before the second request is built.
+    server.wait_held(1).await;
+    kill(handle, cancel).await;
+
+    let inspected = checkpoint(&root, &task);
+    assert_eq!(inspected.phase, TeamTaskPhase::InFlight);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    assert!(inspected.pending_tool_calls.is_empty());
+    assert!(inspected.wait.is_none());
+
+    let result = run_to_end(
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Declined);
+    assert_eq!(result.text, "");
+    assert!(result.document.is_none());
+    assert_eq!(server.count(), 3);
+    assert_legal_sequence(&server.requests.lock().unwrap()[2].body);
+}
+
+#[tokio::test]
+async fn a_no_reply_call_beside_an_interrupted_read_still_declines() {
+    let (_temp, root) = root();
+    let task = unasked_task();
+    // The first response holds a read and the no-reply call. The read never
+    // returns, so the worker dies with the response's calls unfinished.
+    let server = Server::new(vec![
+        Reply::Tools(vec![
+            (
+                "TeamChatHistory",
+                json!({"kind":"before","before_seq":3,"limit":200}),
+            ),
+            ("TeamNoReply", json!({})),
+        ]),
+        Reply::Text("Understood.".into()),
+    ])
+    .await;
+    let first_broker = Arc::new(Broker::default());
+    first_broker.hang_reads.store(true, Ordering::Release);
+    let (handle, cancel) = first_run(&task, &root, &server.endpoint, first_broker.clone());
+    server.wait_requests(1).await;
+    // The read starts as soon as its own call is durable; wait until the
+    // no-reply call (the response's second, `call_fixture_0_1`) is durable too.
+    // A choice that never reached the transcript is not a choice.
+    wait_transcript(&root, "call_fixture_0_1").await;
+    while first_broker.read_calls.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    kill(handle, cancel).await;
+
+    let inspected = checkpoint(&root, &task);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    assert!(!inspected.pending_tool_calls.is_empty());
+    assert!(inspected
+        .pending_tool_calls
+        .iter()
+        .all(|call| call.read_only));
+
+    let result = run_to_end(
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Declined);
+    assert_legal_sequence(&server.requests.lock().unwrap()[1].body);
 }

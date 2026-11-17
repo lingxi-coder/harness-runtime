@@ -146,6 +146,8 @@ pub(crate) struct TeamReadTools {
     pub(super) ask: Option<Arc<super::ask_tool::AskRequester>>,
     /// Present when the Bot's publication shares a list with this Chat.
     pub(super) list: Option<Arc<super::list_tools::TeamListTools>>,
+    /// Present when nobody asked the Bot for this task and it may stay silent.
+    pub(super) no_reply: Option<Arc<super::decline_tool::NoReply>>,
 }
 impl TeamReadTools {
     /// Every tool this process offers the model, and nothing else.
@@ -157,6 +159,9 @@ impl TeamReadTools {
         if let Some(list) = &self.list {
             names.push(super::checkpoint::LIST_READ_TOOL.to_owned());
             names.push(list.write_tool().to_owned());
+        }
+        if self.no_reply.is_some() {
+            names.push(super::checkpoint::NO_REPLY_TOOL.to_owned());
         }
         names
     }
@@ -172,6 +177,9 @@ pub(crate) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamRea
     }
     if let Some(list) = &tools.list {
         super::list_tools::register(registry, list.clone());
+    }
+    if let Some(choice) = &tools.no_reply {
+        super::decline_tool::register(registry, choice.clone());
     }
     for history in [true, false] {
         let schema = if history {

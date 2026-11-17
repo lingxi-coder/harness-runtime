@@ -7,6 +7,7 @@ mod ask_tool;
 mod chat_session;
 mod checkpoint;
 mod data;
+mod decline_tool;
 mod interaction;
 pub(crate) mod list_tools;
 pub(crate) mod read_tools;
@@ -120,6 +121,9 @@ pub struct TeamProcessRequest {
     /// changes it through the Team operation ledger. Ignored on routes without
     /// continuation support, where an interrupted write could not be finished.
     pub shared_list: Option<TeamSharedList>,
+    /// Nobody asked the Bot for this task: offer it the tool that leaves the
+    /// message unanswered. The task then ends as `Declined` and posts nothing.
+    pub may_decline: bool,
 }
 
 /// The requester's reply to what a task is waiting on: the answer to its
@@ -269,6 +273,9 @@ pub enum TeamProcessOutcome {
     /// The Bot asked its requester a question. The task is not finished: no
     /// result row exists and the durable checkpoint reports the wait.
     Waiting,
+    /// The Bot chose to leave an unasked message unanswered. The task is
+    /// finished and has no text and no document.
+    Declined,
 }
 
 /// Bounded terminal text for the trusted host to settle through `completeTask`.
@@ -461,6 +468,7 @@ impl TeamProcessStart {
                 }
                 _ => None,
             },
+            may_decline: request.may_decline,
         };
         Ok(Self {
             profile,

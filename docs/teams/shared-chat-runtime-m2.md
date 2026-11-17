@@ -66,6 +66,16 @@ The question and the answer also exist as Chat messages. Source messages carry a
 
 Usage in a `waiting` result is this process's delta; the host sums it with the continuing attempts.
 
+## Staying silent (unasked tasks)
+
+A task nobody asked the Bot for (the backend admitted it because the Bot takes part in the Chat with auto-reply on) may carry `mayDecline: true` in its `run` and `continue` bootstraps. The worker then registers `TeamNoReply {}` and adds one sentence to the turn prompt saying the Bot may stay silent. Without the flag the tool does not exist for the model, and an empty final turn is still a failure.
+
+1. The call returns at once (`{"posted": false, ...}`) and the model ends its turn. The worker reports outcome `declined`; whatever the model wrote after the call is discarded. A `declined` result has empty `text` and no `document`, and its result row is recorded like any other, so `inspect_result` recovers it.
+2. The choice is durable: `inspect_task` treats a task whose rows hold a `TeamNoReply` call as declined. An unfinished call is replayed like a read (it is in the read-only set; `pendingToolCalls` lists it with `readOnly: true`), and an empty final turn after the call is a complete final answer, so a continued process finishes `declined` without a model request. The continuing host must send the same `mayDecline` it started with.
+3. The host emits `{"version":3,"type":"result","status":"declined","text":"",...}` and settles the task through `completeTask` with outcome `declined`: nothing is posted to the Chat. Usage is reported as for `completed`.
+
+Deciding whether to offer the choice at all (rules, the Decision service) is the Desktop host's job, not the runtime's.
+
 ## Route allow-list
 
 Continuation is enabled only for `ProtocolFamily::OpenAiChat` routes (DeepSeek and other OpenAI-chat-compatible providers). It is covered by loopback fixtures in `crates/runtime/tests/desktop/team_continuation_process.rs`: kill after the tool call is persisted, kill after the result is persisted, kill mid-response, epoch reuse, stale digest, recorded result, unsupported route, exactly-once batch and legal provider sequence. Anthropic, OpenAI Responses, Gemini, Azure and Foundry routes report `route_unsupported` until a continuation test proves them. Provider hidden reasoning state is neither saved nor relied on; a real-provider acceptance run (for example a DeepSeek reasoning model with tool calls) has not been done and is required before enabling the route in a product build.

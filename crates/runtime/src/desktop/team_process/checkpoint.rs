@@ -17,7 +17,15 @@ pub(super) const LIST_READ_TOOL: &str = "TeamListRead";
 pub(super) const LIST_WRITE_TOOL: &str = "TeamListWrite";
 /// The same write on a list whose changes the requester approves first: its unfinished call is a request for that approval.
 pub(super) const LIST_PROPOSE_TOOL: &str = "TeamListProposeChange";
-pub(super) const READ_ONLY_TOOLS: [&str; 3] = ["TeamChatHistory", "TeamKnowledge", LIST_READ_TOOL];
+/// The Bot's choice to leave an unasked message unanswered. A call changes
+/// nothing outside the process, so an unfinished one is replayed like a read.
+pub(super) const NO_REPLY_TOOL: &str = "TeamNoReply";
+pub(super) const READ_ONLY_TOOLS: [&str; 4] = [
+    "TeamChatHistory",
+    "TeamKnowledge",
+    LIST_READ_TOOL,
+    NO_REPLY_TOOL,
+];
 /// The one tool whose unfinished call is a question to the task's requester.
 pub(super) const ASK_TOOL: &str = "TeamAskRequester";
 pub(super) const MAX_QUESTION_BYTES: usize = 2000;
@@ -128,6 +136,9 @@ pub(super) struct TaskState {
     pub prompt_persisted: bool,
     /// The newest durable assistant response is a complete final answer.
     pub final_answer: Option<String>,
+    /// The task's durable rows hold a no-reply call: the Bot chose silence,
+    /// whatever it wrote afterwards.
+    pub declined: bool,
 }
 
 pub(super) struct Inputs<'a> {
@@ -448,11 +459,14 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
     if pending_calls.iter().any(|c| Some(c.group) != last_group) {
         inconsistent = true;
     }
+    let declined = calls.iter().any(|c| c.name == NO_REPLY_TOOL);
     let mut final_answer = None;
     if let Some(group) = last_group.map(|g| &groups[g]) {
         let reason = group.stop_reason.as_deref();
         if group.calls == 0 {
-            if matches!(reason, Some("end_turn" | "stop_sequence")) && !group.text.trim().is_empty()
+            // After a no-reply call the turn may end without a word.
+            if matches!(reason, Some("end_turn" | "stop_sequence"))
+                && (declined || !group.text.trim().is_empty())
             {
                 final_answer = Some(group.text.clone());
             } else {
@@ -558,6 +572,7 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
         pending,
         prompt_persisted,
         final_answer: final_answer.filter(|_| pending_calls.is_empty()),
+        declined,
     })
 }
 
@@ -793,6 +808,50 @@ mod tests {
         assert!(state.checkpoint.continuable);
         assert_eq!(state.final_answer.as_deref(), Some("All done"));
         assert!(state.pending.is_empty());
+    }
+    #[test]
+    fn a_no_reply_call_is_replayable_and_lets_an_empty_turn_finish() {
+        // Unfinished: replayed like a read, never a pending write.
+        let open = lines(vec![
+            batch_row(),
+            prompt_row(),
+            call_row("m1", &[("c1", NO_REPLY_TOOL)], "tool_use"),
+        ]);
+        let state = eval(&open, true, CHAT);
+        assert!(
+            state.checkpoint.continuable,
+            "{:?}",
+            state.checkpoint.reason
+        );
+        assert!(state.declined);
+        assert!(state.checkpoint.pending_tool_calls[0].read_only);
+
+        // Finished with an empty last turn: the task is over without a model call.
+        let silent = lines(vec![
+            batch_row(),
+            prompt_row(),
+            call_row("m1", &[("c1", NO_REPLY_TOOL)], "tool_use"),
+            result_row("c1"),
+            text_row("m2", "", "end_turn"),
+        ]);
+        let state = eval(&silent, true, CHAT);
+        assert!(
+            state.checkpoint.continuable,
+            "{:?}",
+            state.checkpoint.reason
+        );
+        assert!(state.declined);
+        assert_eq!(state.final_answer.as_deref(), Some(""));
+
+        // Without the call an empty turn is still not an answer.
+        let empty = lines(vec![
+            batch_row(),
+            prompt_row(),
+            text_row("m1", "", "end_turn"),
+        ]);
+        let state = eval(&empty, true, CHAT);
+        assert!(!state.declined);
+        assert!(state.final_answer.is_none());
     }
     #[test]
     fn phases_route_and_digest() {

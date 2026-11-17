@@ -40,6 +40,7 @@ struct Start {
     continuation: Option<TeamContinuation>,
     ask_requester: Option<bool>,
     shared_list: Option<team_process::TeamSharedList>,
+    may_decline: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,7 +81,8 @@ impl Start {
             || self.limits.is_some()
             || self.continuation.is_some()
             || self.ask_requester.is_some()
-            || self.shared_list.is_some();
+            || self.shared_list.is_some()
+            || self.may_decline.is_some();
         let all = self.task_id.is_some()
             && self.invocation_id.is_some()
             && self.instructions.is_some()
@@ -111,7 +113,8 @@ impl Start {
                 && self.limits.is_none()
                 && self.continuation.is_none()
                 && self.ask_requester.is_none()
-                && self.shared_list.is_none();
+                && self.shared_list.is_none()
+                && self.may_decline.is_none();
             if !only_task_and_model {
                 return Err(Error::Protocol);
             }
@@ -160,6 +163,7 @@ impl Start {
             )?,
             ask_requester: self.ask_requester.unwrap_or(false),
             shared_list: self.shared_list,
+            may_decline: self.may_decline.unwrap_or(false),
         })
     }
 }
@@ -544,7 +548,7 @@ fn entry() -> Result<(), Error> {
     result
 }
 fn result_value(result: team_process::TeamProcessResult) -> Value {
-    let mut value = json!({"version":3,"type":"result","status":if result.outcome==TeamProcessOutcome::Completed{"completed"}else{"failed"},
+    let mut value = json!({"version":3,"type":"result","status":match result.outcome{TeamProcessOutcome::Completed=>"completed",TeamProcessOutcome::Declined=>"declined",_=>"failed"},
         "text":result.text,"cursor":result.cursor,"finishedAt":result.finished_at,"dispatchedRequests":result.dispatched_requests,"attemptDispatchedRequests":result.attempt_dispatched_requests,"deniedTools":result.denied_tools,"usage":result.usage});
     if let Some(document) = result.document {
         value["document"] = json!(document);
