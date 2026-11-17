@@ -176,8 +176,9 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
 
     for prompt in ["Find the bug", "Fix it and then run the focused tests"] {
         stage_tx.send(()).unwrap();
+        // Bounds a hang only; a loaded CI runner can take several seconds per turn.
         let result = tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(60),
             runtime.orchestrator.run_turn_streaming(prompt),
         )
         .await;
