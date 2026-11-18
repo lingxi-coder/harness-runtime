@@ -13,6 +13,16 @@ struct Workflow {
     page: String,
     section: String,
     queries: Vec<String>,
+    #[serde(default)]
+    contexts: Vec<String>,
+    #[serde(default)]
+    refinements: Vec<Refinement>,
+}
+
+#[derive(Deserialize)]
+struct Refinement {
+    section: String,
+    qualifiers: Vec<String>,
 }
 
 // The website imports this same index from its pinned Harness revision.
@@ -20,8 +30,42 @@ static WORKFLOWS: LazyLock<Vec<Workflow>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("lingxi-api/workflows.json")).expect("bundled workflows")
 });
 
+// Keep ASCII words whole and match Han characters with or without surrounding
+// whitespace. Padding makes substring searches respect both word boundaries.
+fn workflow_key(text: &str) -> String {
+    let mut key = String::new();
+    let mut in_ascii_word = false;
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        let ascii_word = ch.is_ascii_alphanumeric();
+        if ch.is_alphanumeric() || ch == '@' {
+            if !(ascii_word && in_ascii_word) {
+                key.push(' ');
+            }
+            key.push(ch);
+        }
+        in_ascii_word = ascii_word;
+    }
+    key.push(' ');
+    key
+}
+
+static WORKFLOW_PHRASES: LazyLock<Vec<(String, &Workflow)>> = LazyLock::new(|| {
+    let mut phrases: Vec<_> = WORKFLOWS
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .queries
+                .iter()
+                .map(move |q| (workflow_key(q), workflow))
+        })
+        .collect();
+    // Stable ties follow the shared index order on both surfaces.
+    phrases.sort_by_cached_key(|(key, _)| std::cmp::Reverse(key.chars().count()));
+    phrases
+});
+
 fn workflow_for_question(units: &[u16]) -> Option<&'static Workflow> {
-    let question = String::from_utf16(units).ok()?.to_lowercase();
+    let question = String::from_utf16(units).ok()?;
     let first_word = question.split_whitespace().next()?;
     if first_word.starts_with(['/', '\\', '.'])
         || question.contains("://")
@@ -29,23 +73,32 @@ fn workflow_for_question(units: &[u16]) -> Option<&'static Workflow> {
     {
         return None;
     }
-    let query: String = question.split_whitespace().collect();
-    WORKFLOWS
+    let query = workflow_key(&question);
+    let direct = WORKFLOW_PHRASES
         .iter()
-        .flat_map(|workflow| {
+        .find(|(phrase, _)| query.contains(phrase))
+        .map(|(_, workflow)| *workflow);
+    // A bare product name only provides context for a more specific action.
+    let workflow = direct.or_else(|| {
+        WORKFLOWS.iter().find(|workflow| {
             workflow
-                .queries
+                .contexts
                 .iter()
-                .map(move |phrase| (workflow, phrase))
+                .any(|context| query.contains(&workflow_key(context)))
         })
-        .filter_map(|(workflow, phrase)| {
-            let needle: String = phrase.to_lowercase().split_whitespace().collect();
-            query
-                .contains(&needle)
-                .then_some((needle.chars().count(), workflow))
-        })
-        .max_by_key(|(length, _)| *length)
-        .map(|(_, workflow)| workflow)
+    })?;
+    for refinement in &workflow.refinements {
+        if refinement
+            .qualifiers
+            .iter()
+            .any(|q| query.contains(&workflow_key(q)))
+        {
+            return WORKFLOWS
+                .iter()
+                .find(|item| item.page == workflow.page && item.section == refinement.section);
+        }
+    }
+    direct
 }
 
 struct Topic {
@@ -125,9 +178,20 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
         "local-apps" => "local-app",
         other => other,
     };
-    let selected = TOPICS.iter().find(|topic| topic.id == canonical);
-    let workflow = workflow_for_question(args)
-        .filter(|workflow| selected.is_none_or(|topic| topic.id == workflow.topic));
+    let natural = workflow_for_question(args);
+    // A canonical topic is explicit. A leading alias can be the first word
+    // of a question, e.g. "bot dm" or "Bot 自主回复".
+    let selected = TOPICS
+        .iter()
+        .find(|topic| topic.id == canonical)
+        .filter(|_| {
+            selector == canonical
+                || matches!(selector.as_str(), "remote-control" | "local-apps")
+                || natural.is_none()
+                || args[end..].iter().all(|unit| whitespace(*unit))
+        });
+    let workflow =
+        natural.filter(|workflow| selected.is_none_or(|topic| topic.id == workflow.topic));
     let topic = selected.or_else(|| {
         let workflow = workflow?;
         TOPICS.iter().find(|topic| topic.id == workflow.topic)
@@ -309,6 +373,111 @@ mod tests {
             .string_at("")
             .unwrap()
             .contains("/docs/teams#auto-reply"));
+    }
+
+    #[test]
+    fn every_workflow_question_opens_its_registered_topic_and_section() {
+        for workflow in WORKFLOWS.iter() {
+            for question in &workflow.queries {
+                let prompt =
+                    crate::desktop_builtin_skill_prompt("lingxi-api", &question.as_str().into())
+                        .expect("registered skill");
+                let text = prompt.string_at("").unwrap();
+                assert_eq!(
+                    text.matches("## Bundled resource:").count(),
+                    1,
+                    "{question}"
+                );
+                assert!(
+                    text.contains(&format!(
+                        "## Bundled resource: `references/{}.md`",
+                        workflow.topic
+                    )),
+                    "{question}"
+                );
+                assert!(
+                    text.contains(&format!(
+                        "Handbook section: `/docs/{}#{}`",
+                        workflow.page, workflow.section
+                    )),
+                    "{question}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_questions_preserve_the_request_and_route_by_intent() {
+        for (question, section) in [
+            ("如何发送团队消息", "teams#send-message"),
+            ("如何创建一个团队？", "teams#create-team"),
+            ("Bot 自主回复", "teams#auto-reply"),
+            ("Bot DM?", "teams#bot-chat"),
+            ("创建群聊并发送消息", "teams#group-chat"),
+            (
+                "How do I publish a local app to the market?",
+                "local-apps#market",
+            ),
+            (
+                "Can I publish my local app directly to the app market?",
+                "local-apps#market",
+            ),
+            ("如何把 Local App 发布到市场？", "local-apps#market"),
+            ("如何发布 Local App 到应用市场？", "local-apps#market"),
+            (
+                "publish a local app on my phone",
+                "local-apps#publish-local",
+            ),
+            ("怎么私下分享 Local App 给朋友？", "local-apps#source-zip"),
+            ("我只在 iPhone 上有这个 Local App，怎么只发给一个同事？如果后来决定让大家都能安装，要怎么操作？", "local-apps#source-zip"),
+            ("我的手机通过远控打开电脑上的应用，我昨天记的数据这次还能继续用吗？", "local-apps#paired-devices"),
+        ] {
+            let prompt = render(body(), &question.into());
+            let text = prompt.string_at("").unwrap();
+            assert!(
+                text.contains(&format!("Handbook section: `/docs/{section}`")),
+                "{question}"
+            );
+            assert!(text.ends_with(question), "{question}");
+        }
+        for question in [
+            "create admin account",
+            "How do I create a chatbot?",
+            "local app SDK protocol",
+        ] {
+            assert!(
+                !render(body(), &question.into())
+                    .string_at("")
+                    .unwrap()
+                    .contains("Handbook section:"),
+                "{question}"
+            );
+        }
+        let explicit = render(body(), &"bots 如何发送团队消息".into());
+        let text = explicit.string_at("").unwrap();
+        assert!(text.contains("## Bundled resource: `references/bots.md`"));
+        assert!(!text.contains("Handbook section:"));
+        assert!(text.ends_with("如何发送团队消息"));
+    }
+
+    #[test]
+    fn local_app_guide_exposes_the_user_controls_for_each_sharing_route() {
+        let prompt =
+            crate::desktop_builtin_skill_prompt("lingxi-api", &"share a local app".into()).unwrap();
+        let text = prompt.string_at("").unwrap();
+        let hidden = text.find("starts hidden").unwrap();
+        let public = text.find("**Make public**").unwrap();
+        assert!(hidden < public);
+        for control in [
+            "iOS",
+            "Android",
+            "source ZIP",
+            "Import source",
+            "localStorage",
+            "IndexedDB",
+        ] {
+            assert!(text.contains(control), "missing {control}");
+        }
     }
 
     #[test]

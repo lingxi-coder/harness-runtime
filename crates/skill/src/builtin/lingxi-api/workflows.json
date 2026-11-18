@@ -1,20 +1,21 @@
 [
-  {"topic":"teams","page":"teams","section":"create-team","queries":["create a team","create team","创建团队","新建团队","创建 team"]},
+  {"topic":"teams","page":"teams","section":"create-team","queries":["create a team","create team","创建团队","创建一个团队","新建团队","创建 team"]},
   {"topic":"teams","page":"teams","section":"invite","queries":["join a team","invite a teammate","加入团队","邀请团队成员"]},
   {"topic":"teams","page":"teams","section":"chat-type","queries":["create a chat","create chat","创建 chat","如何创建对话","新建对话"]},
   {"topic":"teams","page":"teams","section":"group-chat","queries":["create a group chat","start a group chat","create a channel","建群","创建群聊","创建频道"]},
   {"topic":"teams","page":"teams","section":"direct-message","queries":["start a dm","create a dm","create dm","direct message a teammate","创建 DM","发私信","成员私聊"]},
   {"topic":"teams","page":"teams","section":"bot-chat","queries":["start a bot chat","bot dm","ask a bot in a group","和 Bot 私聊","在群里点名 Bot"]},
   {"topic":"teams","page":"teams","section":"auto-reply","queries":["reply without an @","without mentioning the bot","bot auto-reply","不 @ 也回复","不需要 @","不用@","自主回复","自动回复","自主判断是否回复","Decision 判断是否回复"]},
-  {"topic":"teams","page":"teams","section":"send-message","queries":["send a team message","send a message","send message","发送消息","发团队消息","发送 message"]},
+  {"topic":"teams","page":"teams","section":"send-message","queries":["send a team message","send a message","send message","发送消息","发送团队消息","发团队消息","发送 message"]},
   {"topic":"teams","page":"teams","section":"share-bot","queries":["share a bot with my team","share my bot with my team","把 Bot 分享给团队","把 Bot 加到团队","给团队共享 Bot"]},
   {"topic":"bots","page":"bots","section":"create","queries":["create a LingXi bot","创建灵犀 Bot","创建一个周报 Bot"]},
   {"topic":"bots","page":"bots","section":"audience","queries":["share my bot","share a bot","share a bot with a friend","分享我的 Bot","好友使用我的 Bot","分享 Bot"]},
   {"topic":"bots","page":"bots","section":"no-reply","queries":["bot is not replying","bot is not responding","Bot 不回消息","Bot 没回复","Bot 没有回复"]},
   {"topic":"webrtc","page":"remote-control","section":"same-account","queries":["remote control","pair my computer","continue my desktop session on my phone","远控","远程控制","手机继续电脑上的会话","手机上继续 Mac 会话"]},
   {"topic":"webrtc","page":"remote-control","section":"direct","queries":["computer is missing","session is missing","看不到 Mac","看不到电脑","看不到会话"]},
-  {"topic":"local-app","page":"local-apps","section":"publish-local","queries":["publish a local app","publish local app","发布 Local App","发布本地应用"]},
-  {"topic":"local-app","page":"local-apps","section":"share-options","queries":["share a local app","share local app","共享 Local App","分享 Local App","共享本地应用","分享本地应用"]},
-  {"topic":"local-app","page":"local-apps","section":"market","queries":["publish to the app market","publish to market","install a copy of my app","发布到应用市场","上架应用","让别人安装我的应用"]},
-  {"topic":"local-app","page":"local-apps","section":"paired-devices","queries":["open my desktop app on my phone","share an app with my phone","手机打开电脑上的应用","在手机上使用桌面应用"]}
+  {"topic":"local-app","page":"local-apps","section":"publish-local","queries":["publish a local app","publish my local app","publish local app","发布 Local App","发布本地应用"],"refinements":[{"section":"market","qualifiers":["to the market","to market","to the app market","to app market","on the app market","到市场","到应用市场"]}]},
+  {"topic":"local-app","page":"local-apps","section":"share-options","queries":["share a local app","share local app","共享 Local App","分享 Local App","共享本地应用","分享本地应用"],"contexts":["Local App","本地应用"],"refinements":[{"section":"source-zip","qualifiers":["only to one person","privately","单独发给","只发给","私下分享"]},{"section":"market","qualifiers":["for everyone to install","让大家都能安装"]}]},
+  {"topic":"local-app","page":"local-apps","section":"market","queries":["publish to the app market","publish to the market","publish to market","install a copy of my app","发布到应用市场","发布到市场","上架应用","让别人安装我的应用"]},
+  {"topic":"local-app","page":"local-apps","section":"source-zip","queries":["share a local app privately","share a source zip","export a source zip","import a source zip","私下分享 Local App","导出源码 ZIP","导入源码 ZIP"]},
+  {"topic":"local-app","page":"local-apps","section":"paired-devices","queries":["open my desktop app on my phone","share an app with my phone","手机打开电脑上的应用","远控打开电脑上的应用","在手机上使用桌面应用"]}
 ]

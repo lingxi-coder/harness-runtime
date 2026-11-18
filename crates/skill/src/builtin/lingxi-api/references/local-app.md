@@ -16,7 +16,7 @@ explain that gap instead of inventing fields or substituting a website.
 
 Mobile uses browser presentation and its supported Mobile Linux backend runtime.
 Keep Mobile hosting available for long tasks; recommend Desktop without requiring
-it. Viewing a Desktop-hosted app on Mobile leaves execution and data on Desktop.
+it. Viewing a Desktop-hosted app on Mobile keeps its backend on Desktop.
 
 ## Publication and ownership
 
@@ -31,19 +31,36 @@ To publish locally, use `local-app` in Code mode on a capable host, publish the
 source with `LocalApp`, find its ID and revision in Apps, then open the release
 and check its status. `agent_catalog` lists public model and tool identifiers.
 
-To let another person install a copy, open Apps → the app's ••• menu →
-Publish to market on Desktop, sign in, review the release source and submit.
-Check the publication status. Once the listing is accessible to the recipient,
-send its market page in the intended DM or group. They review and install a
-compatible release with their own grants and data.
+For a public market release, sign in on the device that holds the revision
+and use Code mode. On Desktop, open Apps → ••• → Publish to market, enter
+the listing and release notes, and choose **Review source and publish**.
+On iOS or Android, open the app's details → **Publish to market**. Review
+the file list and confirm submission on that device.
+
+A new listing starts hidden. In **Manage publications**, open the listing
+and check the release status. After approval, choose **Make public** (上架应用).
+Anyone can now open the listing. Send its public detail page in the intended
+DM or group. Recipients review and install a compatible copy with their own
+data and permissions.
+
+To give someone the source privately on iOS or Android, export the current
+release's **source ZIP** from the app details. Save the ZIP with the file picker,
+then send it through a private file transfer such as AirDrop or email. To use
+a LingXi team DM, send a download link restricted to the recipient. Team
+attachments accept PNG, JPEG, PDF and plain text.
+In Code mode, the recipient chooses Apps → + → Import source folder on iOS
+or Apps → Import source on Android, then selects the ZIP and opens the local
+copy. The ZIP contains the release source. Runtime databases, browser state
+and grants stay with the original installation.
 
 To use the same running app on your other device, configure the Desktop
 remote gateway, enable **Allow access from paired devices** in the app menu,
-then open Apps on the connected computer in Remote Control. Code and business
-data stay on the host. The launch ticket is single-use and bound to the
-approved viewer. A team message can carry the market listing; it grants no
-access to a live Desktop app. Verify a member-specific grant UI before offering
-live multi-account hosting.
+then open Apps on the connected computer in Remote Control. The app uses
+the same running backend and the data that backend persists. Every remote
+opening gets a new browser origin. Cookies, `localStorage` and `IndexedDB`
+are isolated per opening, so browser-only records start fresh, even when
+reopening on the same phone. The launch ticket is single-use and bound to
+the approved viewer. Team membership alone grants no access to the live app.
 
 ## Choose the Agent interface
 

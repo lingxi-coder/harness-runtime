@@ -26,7 +26,7 @@ topics load offline through `Skill`, without probing private folders or a CLI.
 | [configuration](references/configuration.md) | Settings, permission mode, MCP, hooks, plugins, skills, slash commands |
 | [media](references/media.md) | Camera, microphone, transcription, speech, live assistance |
 | [remote-control](references/webrtc.md) | Pair your devices and continue a host session. Also accepts `webrtc` |
-| [local-app](references/local-app.md) | Publish locally, share a market listing, or open the running app on a paired device |
+| [local-app](references/local-app.md) | Publish on Desktop or Mobile, make a market listing public, share a source ZIP privately, or open a running app on a paired device |
 | [bots](references/bots.md) | Create a personal Bot, choose who can use it, diagnose missing replies, delegate |
 | [devices](references/devices.md) | Computer Use, browser, Android automation, native device tools |
 | [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs |
