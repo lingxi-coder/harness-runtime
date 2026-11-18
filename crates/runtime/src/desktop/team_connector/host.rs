@@ -41,6 +41,7 @@ struct Start {
     ask_requester: Option<bool>,
     shared_list: Option<team_process::TeamSharedList>,
     may_decline: Option<bool>,
+    addressed: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,7 +83,8 @@ impl Start {
             || self.continuation.is_some()
             || self.ask_requester.is_some()
             || self.shared_list.is_some()
-            || self.may_decline.is_some();
+            || self.may_decline.is_some()
+            || self.addressed.is_some();
         let all = self.task_id.is_some()
             && self.invocation_id.is_some()
             && self.instructions.is_some()
@@ -114,10 +116,15 @@ impl Start {
                 && self.continuation.is_none()
                 && self.ask_requester.is_none()
                 && self.shared_list.is_none()
-                && self.may_decline.is_none();
+                && self.may_decline.is_none()
+                && self.addressed.is_none();
             if !only_task_and_model {
                 return Err(Error::Protocol);
             }
+        }
+        // Only a task that may stay silent says how its message reached the Bot.
+        if self.addressed.is_some() && self.may_decline != Some(true) {
+            return Err(Error::Protocol);
         }
         if let Some(continuation) = &self.continuation {
             if self.kind != "continue" {
@@ -164,6 +171,7 @@ impl Start {
             ask_requester: self.ask_requester.unwrap_or(false),
             shared_list: self.shared_list,
             may_decline: self.may_decline.unwrap_or(false),
+            addressed: self.addressed.unwrap_or(false),
         })
     }
 }

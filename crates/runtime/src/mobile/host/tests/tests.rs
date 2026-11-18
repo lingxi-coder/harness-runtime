@@ -5002,7 +5002,9 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
     let base = format!("http://{}", server.local_addr().unwrap());
     let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
     let server_thread = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // The deadline starts before the runtime is built; a loaded runner
+        // can spend seconds there. This only bounds a hang.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut socket = loop {
             match server.accept() {
                 Ok((socket, _)) => break socket,

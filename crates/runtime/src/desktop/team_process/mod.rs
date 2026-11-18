@@ -124,6 +124,9 @@ pub struct TeamProcessRequest {
     /// Nobody asked the Bot for this task: offer it the tool that leaves the
     /// message unanswered. The task then ends as `Declined` and posts nothing.
     pub may_decline: bool,
+    /// With `may_decline` only: the member wrote this message to the Bot
+    /// directly (a Bot DM), so the Bot answers unless it plainly needs no answer.
+    pub addressed: bool,
 }
 
 /// The requester's reply to what a task is waiting on: the answer to its
@@ -426,6 +429,10 @@ impl TeamProcessStart {
             return Err(TeamProcessError::Protocol);
         }
         read_tools::validate_knowledge(&request.knowledge)?;
+        // How the message reached the Bot is said only for a task that may stay silent.
+        if request.addressed && !request.may_decline {
+            return Err(TeamProcessError::Protocol);
+        }
         let batch_id = batch.batch_id.clone();
         let protocol = request.model.route.model_protocol;
         let bootstrap = Bootstrap {
@@ -469,6 +476,7 @@ impl TeamProcessStart {
                 _ => None,
             },
             may_decline: request.may_decline,
+            addressed: request.addressed,
         };
         Ok(Self {
             profile,

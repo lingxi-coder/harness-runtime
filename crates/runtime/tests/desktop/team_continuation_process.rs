@@ -74,6 +74,8 @@ struct Task {
     list: Option<TeamSharedList>,
     /// Nobody asked the Bot: offer the no-reply tool.
     may_decline: bool,
+    /// With `may_decline`: the member wrote to the Bot directly (a Bot DM).
+    addressed: bool,
 }
 impl Task {
     fn new() -> Self {
@@ -85,6 +87,7 @@ impl Task {
             ask: false,
             list: None,
             may_decline: false,
+            addressed: false,
         }
     }
     /// Same task and batch; a fresh invocation identity, like a new host permit.
@@ -123,6 +126,7 @@ impl Task {
             deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
             ask_requester: self.ask,
             may_decline: self.may_decline,
+            addressed: self.addressed,
             shared_list: self.list.clone(),
         }
     }
@@ -1714,6 +1718,7 @@ async fn a_bot_nobody_asked_may_stay_silent_and_the_next_task_is_unaffected() {
     assert_eq!(result.dispatched_requests, 2);
     let first = server.requests.lock().unwrap()[0].body.clone();
     assert!(tool_names(&first).contains(&"TeamNoReply".to_owned()));
+    assert!(first.to_string().contains("Nobody asked you"));
     assert_legal_sequence(&server.requests.lock().unwrap()[1].body);
     let recorded = checkpoint(&root, &task);
     assert_eq!(recorded.phase, TeamTaskPhase::ResultRecorded);
@@ -1736,6 +1741,67 @@ async fn a_bot_nobody_asked_may_stay_silent_and_the_next_task_is_unaffected() {
     let third = server.requests.lock().unwrap()[2].body.clone();
     assert_eq!(tool_names(&third), ["TeamChatHistory", "TeamKnowledge"]);
     assert_legal_sequence(&third);
+}
+
+#[tokio::test]
+async fn a_member_who_wrote_to_the_bot_directly_is_not_told_nobody_asked() {
+    let (_temp, root) = root();
+    let task = Task {
+        addressed: true,
+        ..unasked_task()
+    };
+    let server = Server::new(vec![Reply::Text("Direct answer".into())]).await;
+    let result = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Direct answer");
+    let first = server.requests.lock().unwrap()[0].body.to_string();
+    assert!(
+        tool_names(&server.requests.lock().unwrap()[0].body).contains(&"TeamNoReply".to_owned())
+    );
+    assert!(first.contains("written to you directly"), "{first}");
+    assert!(first.contains("When in doubt, answer."));
+    assert!(!first.contains("Nobody asked you"));
+    assert!(!first.contains("stay silent."));
+
+    // The flag says how a message that may go unanswered reached the Bot; alone it means nothing.
+    let lone = Task {
+        addressed: true,
+        ..Task::new()
+    };
+    let refused = TeamProcessStart::prepare(
+        &root,
+        lone.request(&root, lone.chat_model(&server.endpoint)),
+    );
+    assert!(matches!(refused, Err(TeamProcessError::Protocol)));
+    assert_eq!(server.count(), 1);
+}
+
+#[tokio::test]
+async fn writing_too_much_after_choosing_silence_is_still_silence() {
+    let (_temp, root) = root();
+    let task = unasked_task();
+    let server = Server::new(vec![stay_silent(), Reply::Text("x".repeat(70 * 1024))]).await;
+    let result = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Declined);
+    assert_eq!(result.text, "");
 }
 
 #[tokio::test]

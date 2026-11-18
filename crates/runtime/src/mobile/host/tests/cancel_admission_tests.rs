@@ -299,14 +299,19 @@ fn cancel_admission_bash_already_queued_gets_terminal_not_no_admission() {
             .unwrap();
         let checkpoint = handle.durable_turns.load(&session, id).unwrap();
         assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Cancelled));
-        assert!(listener
-            .received
-            .lock()
-            .await
-            .iter()
-            .any(|event| matches!(event,
+        // The durable checkpoint is written before the listener's copy of the
+        // terminal event is delivered; wait for delivery instead of racing it.
+        tokio::time::timeout(WAIT, async {
+            while !listener.received.lock().await.iter().any(|event| {
+                matches!(event,
             Ev::TurnRecoveryState { snapshot } if snapshot.turn_id == id
-                && snapshot.state == TurnRecoveryStateDto::Cancelled)));
+                && snapshot.state == TurnRecoveryStateDto::Cancelled)
+            }) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the cancelled terminal state reaches the listener");
         assert!(!listener.received.lock().await.iter().any(|event|
             matches!(event, Ev::TurnStarted { turn_id: Some(started), .. } if *started == id)));
     });
