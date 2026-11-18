@@ -429,6 +429,10 @@ impl TeamProcessStart {
             return Err(TeamProcessError::Protocol);
         }
         read_tools::validate_knowledge(&request.knowledge)?;
+        // How the message reached the Bot is said only for a task that may stay silent.
+        if request.addressed && !request.may_decline {
+            return Err(TeamProcessError::Protocol);
+        }
         let batch_id = batch.batch_id.clone();
         let protocol = request.model.route.model_protocol;
         let bootstrap = Bootstrap {
@@ -472,11 +476,7 @@ impl TeamProcessStart {
                 _ => None,
             },
             may_decline: request.may_decline,
-            addressed: if request.addressed && !request.may_decline {
-                return Err(TeamProcessError::Protocol);
-            } else {
-                request.addressed
-            },
+            addressed: request.addressed,
         };
         Ok(Self {
             profile,
