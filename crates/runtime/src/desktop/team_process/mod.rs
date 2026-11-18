@@ -124,6 +124,9 @@ pub struct TeamProcessRequest {
     /// Nobody asked the Bot for this task: offer it the tool that leaves the
     /// message unanswered. The task then ends as `Declined` and posts nothing.
     pub may_decline: bool,
+    /// With `may_decline` only: the member wrote this message to the Bot
+    /// directly (a Bot DM), so the Bot answers unless it plainly needs no answer.
+    pub addressed: bool,
 }
 
 /// The requester's reply to what a task is waiting on: the answer to its
@@ -469,6 +472,11 @@ impl TeamProcessStart {
                 _ => None,
             },
             may_decline: request.may_decline,
+            addressed: if request.addressed && !request.may_decline {
+                return Err(TeamProcessError::Protocol);
+            } else {
+                request.addressed
+            },
         };
         Ok(Self {
             profile,

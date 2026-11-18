@@ -1,6 +1,6 @@
-//! The no-reply tool of a task the Bot was not asked to do. Nobody addressed
-//! the Bot: it was shown a Chat message and may answer it or stay silent. A
-//! call returns at once and the turn ends normally; the task then ends as
+//! The no-reply tool of a task that may stay silent. Either nobody addressed
+//! the Bot (it was shown a group Chat message), or a member wrote to it directly
+//! in a Bot DM with a message that may need no answer. A call returns at once and the turn ends normally; the task then ends as
 //! `declined` and nothing is posted. The durable transcript is the record of
 //! the choice, so a continued process reaches the same outcome.
 use super::checkpoint::NO_REPLY_TOOL;
@@ -9,12 +9,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tool_api::tool_trait::*;
 
-/// Whether this process saw the Bot choose silence.
-#[derive(Default)]
-pub(crate) struct NoReply(AtomicBool);
+/// Whether this process saw the Bot choose silence, and how the message
+/// reached the Bot.
+pub(crate) struct NoReply {
+    chosen: AtomicBool,
+    addressed: bool,
+}
 impl NoReply {
+    pub(super) fn new(addressed: bool) -> Self {
+        Self {
+            chosen: AtomicBool::new(false),
+            addressed,
+        }
+    }
     pub(super) fn chosen(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.chosen.load(Ordering::Acquire)
+    }
+    /// The member wrote to the Bot directly (a Bot DM).
+    pub(super) fn addressed(&self) -> bool {
+        self.addressed
     }
 }
 
@@ -62,6 +75,9 @@ impl Tool for NoReplyTool {
         "Stay silent: post nothing in the Chat for this message.".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> Json {
+        if self.choice.addressed {
+            return "The member wrote this message to you directly. Answer it, unless it plainly needs no answer from you: a thank-you, an acknowledgement or a goodbye that ends the exchange. Only then call this tool and end your turn without writing anything. When in doubt, answer. After this tool is called nothing you write is posted.".into();
+        }
         "Nobody asked you directly this time: you were shown the latest Chat message because you take part in this Chat. Decide whether a reply from you is wanted. Reply when the message asks you something, continues an exchange with you, or clearly needs what you are here for. Otherwise call this tool and then end your turn without writing anything: talk between other people, acknowledgements, thanks and messages meant for someone else need no reply from you. When in doubt, stay silent. After this tool is called nothing you write is posted.".into()
     }
     async fn check_permissions(
@@ -84,7 +100,7 @@ impl Tool for NoReplyTool {
         _: tool_api::context::ToolUseContext,
         _: tool_api::progress::ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        self.choice.0.store(true, Ordering::Release);
+        self.choice.chosen.store(true, Ordering::Release);
         Ok(ToolCallResult {
             data: generated_builtin_result(&serde_json::json!({
                 "posted": false,
