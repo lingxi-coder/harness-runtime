@@ -1786,6 +1786,25 @@ async fn a_member_who_wrote_to_the_bot_directly_is_not_told_nobody_asked() {
 }
 
 #[tokio::test]
+async fn writing_too_much_after_choosing_silence_is_still_silence() {
+    let (_temp, root) = root();
+    let task = unasked_task();
+    let server = Server::new(vec![stay_silent(), Reply::Text("x".repeat(70 * 1024))]).await;
+    let result = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Declined);
+    assert_eq!(result.text, "");
+}
+
+#[tokio::test]
 async fn the_choice_to_stay_silent_survives_a_killed_worker() {
     let (_temp, root) = root();
     let task = unasked_task();

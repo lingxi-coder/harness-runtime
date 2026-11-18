@@ -101,17 +101,12 @@ impl Tool for NoReplyTool {
         _: tool_api::progress::ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         self.choice.chosen.store(true, Ordering::Release);
-        Ok(ToolCallResult {
-            data: generated_builtin_result(&serde_json::json!({
+        Ok(super::list_tools::done(
+            &serde_json::json!({
                 "posted": false,
                 "next": "End your turn now without writing anything."
-            })),
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-            subagent_hooks_fired: false,
-        })
+            }),
+            false,
+        ))
     }
 }
