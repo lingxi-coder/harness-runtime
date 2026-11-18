@@ -27,12 +27,23 @@ observed `expectedRevision`. Resolve conflicts against the newer source rather
 than blindly retrying. Source Project, immutable release, current run and
 durable business data are distinct resources.
 
-Local publication adds to the device's Apps library; it does not publish to a
-public market. Version switching, source restore/remix, permission grants,
-background authorization and public uploads can be native-only operations.
-Explain the corresponding Apps UI when no model tool exists. `agent_catalog`
-lists public model and built-in/MCP tool identifiers; it neither returns
-credentials nor grants access.
+To publish locally, use `local-app` in Code mode on a capable host, publish the
+source with `LocalApp`, find its ID and revision in Apps, then open the release
+and check its status. `agent_catalog` lists public model and tool identifiers.
+
+To let another person install a copy, open Apps → the app's ••• menu →
+Publish to market on Desktop, sign in, review the release source and submit.
+Check the publication status. Once the listing is accessible to the recipient,
+send its market page in the intended DM or group. They review and install a
+compatible release with their own grants and data.
+
+To use the same running app on your other device, configure the Desktop
+remote gateway, enable **Allow access from paired devices** in the app menu,
+then open Apps on the connected computer in Remote Control. Code and business
+data stay on the host. The launch ticket is single-use and bound to the
+approved viewer. A team message can carry the market listing; it grants no
+access to a live Desktop app. Verify a member-specific grant UI before offering
+live multi-account hosting.
 
 ## Choose the Agent interface
 

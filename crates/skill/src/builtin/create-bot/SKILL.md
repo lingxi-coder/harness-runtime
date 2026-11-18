@@ -1,6 +1,6 @@
 ---
 name: create-bot
-description: "Help users create a persistent LingXi Bot in chat: clarify its purpose, write its persona, and fill in the Desktop Bot creation form. Not for subagents or third-party bots."
+description: "Draft a persistent personal LingXi Bot in Chat or Code for review in the Desktop creation form. Use for a LingXi assistant with its own persona, memory and conversations."
 ---
 
 # Create a Bot

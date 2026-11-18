@@ -24,22 +24,13 @@ and another host's tools are not model-callable grants. Remote viewers operate
 on their selected host, not a local copy of its files. Models, credentials,
 network, hardware and OS permission determine actual readiness.
 
-The public handbook is the user-facing contract for install, a first session,
-provider accounts, the CLI, desktop, phone, permissions, models, remote
-control, and help. These topics are its offline copy. The installed npm
-command is `lingxi`; help and `/doctor` identify the same program as
-`lingxi-cli`. A source checkout runs `lingxi-cli`. This offline guide is not a
-release catalog: verify the product's actual distribution channel before
-providing install links, versions or supported packages. Build scripts and
-source support do not prove that a public package is available. Desktop runs
-its Agent engine locally; authenticated Teams and Remote Control services have
-their own network and account requirements. Remote attachment does not copy
-the host's session into a synchronized local history. Adding a provider account
-does not create a LingXi subscription.
+The installed npm command is `lingxi`. Help and `/doctor` call the same program
+`lingxi-cli`, also its name in a source checkout. Check the distribution channel
+for current builds and install links. Desktop runs the engine locally. Teams
+and Remote Control each require a signed-in account. A remote session belongs
+to its host. Provider accounts supply model access independently of subscriptions.
 
 Source anchors: Harness `crates/runtime/src/{desktop,mobile}`,
 `crates/tool-api/src/registry.rs`; product host composition and Remote Control.
 
-Teams collaboration (see teams) and provider multi-account management (see
-accounts) are product features with separate identity and authorization. Teams
-membership is not a Remote Control device grant or a provider credential.
+For membership and messaging read `teams`. For provider routing read `accounts`.

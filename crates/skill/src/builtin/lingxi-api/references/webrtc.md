@@ -27,9 +27,11 @@ pairing. Forgetting the computer in the browser does not remove it from the
 desktop app. Connection loss, revocation and host shutdown must be reported as
 availability changes, not successful continuation.
 
-Bot-capable viewers can list enabled Desktop Bots and open their chats through
-the approved connection. They execute on that computer, not on the phone or in
-a new cloud worker. See the `bots` topic for task and permission ownership.
+If the computer is missing, check the account, host connectivity and its main
+Remote Control switch. If the computer appears but the session or Bot is
+missing, check its own remote-access switch on Desktop. For Local Apps enable
+access from paired devices for that app and open Apps on the connected
+computer. The selected host runs the work.
 
 For SDK work, inspect `RtcSession`, ICE, DataChannel and codec contracts at the
 chosen revision. RTP/audio/video plumbing does not authorize media capture.

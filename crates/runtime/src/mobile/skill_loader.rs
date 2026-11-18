@@ -780,6 +780,9 @@ mod tests {
             let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
             for (name, args) in [
                 ("lingxi-api", "media"),
+                ("lingxi-api", "如何创建团队"),
+                ("lingxi-api", "怎么共享 Local App"),
+                ("create-bot", "Create a writing partner"),
                 ("document-authoring", "Write a report"),
                 ("artifact-design", "Publish the notes"),
                 ("plan-artifact", "Publish the plan"),

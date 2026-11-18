@@ -4,6 +4,49 @@
 //! probes or privileged host dispatcher are needed to read a topic.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde::Deserialize;
+use std::sync::LazyLock;
+
+#[derive(Deserialize)]
+struct Workflow {
+    topic: String,
+    page: String,
+    section: String,
+    queries: Vec<String>,
+}
+
+// The website imports this same index from its pinned Harness revision.
+static WORKFLOWS: LazyLock<Vec<Workflow>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("lingxi-api/workflows.json")).expect("bundled workflows")
+});
+
+fn workflow_for_question(units: &[u16]) -> Option<&'static Workflow> {
+    let question = String::from_utf16(units).ok()?.to_lowercase();
+    let first_word = question.split_whitespace().next()?;
+    if first_word.starts_with(['/', '\\', '.'])
+        || question.contains("://")
+        || question.contains("/../")
+    {
+        return None;
+    }
+    let query: String = question.split_whitespace().collect();
+    WORKFLOWS
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .queries
+                .iter()
+                .map(move |phrase| (workflow, phrase))
+        })
+        .filter_map(|(workflow, phrase)| {
+            let needle: String = phrase.to_lowercase().split_whitespace().collect();
+            query
+                .contains(&needle)
+                .then_some((needle.chars().count(), workflow))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, workflow)| workflow)
+}
 
 struct Topic {
     id: &'static str,
@@ -44,8 +87,10 @@ fn whitespace(unit: u16) -> bool {
     char::from_u32(u32::from(unit)).is_some_and(char::is_whitespace)
 }
 
-pub(super) fn guide_context(body: Utf16JsonProjection) -> Utf16JsonProjection {
-    let mut units = body.string_units("").expect("builtin guide is text");
+pub(super) fn guide_context() -> Utf16JsonProjection {
+    // The read-only guide has its own instructions and no Skill tool. Give it
+    // the references directly, without the interactive Skill invocation menu.
+    let mut units = Vec::new();
     for topic in TOPICS {
         units.extend(
             format!(
@@ -72,10 +117,20 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
         .position(|unit| whitespace(*unit))
         .unwrap_or(args.len());
     let selector = String::from_utf16(&args[..end]).ok();
-    let topic = TOPICS.iter().find(|topic| {
-        selector
-            .as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case(topic.id))
+    let selector = selector.as_deref().unwrap_or("").to_ascii_lowercase();
+    let canonical = match selector.as_str() {
+        "team" => "teams",
+        "bot" => "bots",
+        "remote-control" => "webrtc",
+        "local-apps" => "local-app",
+        other => other,
+    };
+    let selected = TOPICS.iter().find(|topic| topic.id == canonical);
+    let workflow = workflow_for_question(args)
+        .filter(|workflow| selected.is_none_or(|topic| topic.id == workflow.topic));
+    let topic = selected.or_else(|| {
+        let workflow = workflow?;
+        TOPICS.iter().find(|topic| topic.id == workflow.topic)
     });
     let mut units = body.string_units("").expect("bundled guide body is text");
     let request = if let Some(topic) = topic {
@@ -87,11 +142,24 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
             )
             .encode_utf16(),
         );
-        &args[end..]
+        if selected.is_some() {
+            &args[end..]
+        } else {
+            args
+        }
     } else {
         units.extend("\n\nNo bundled topic matched the first argument. Use the topic table above to select the relevant reference.\n".encode_utf16());
         args
     };
+    if let Some(workflow) = workflow {
+        units.extend(
+            format!(
+                "\n\nHandbook section: `/docs/{}#{}`",
+                workflow.page, workflow.section
+            )
+            .encode_utf16(),
+        );
+    }
     if request.iter().any(|unit| !whitespace(*unit)) {
         units.extend("\n\n## User Request\n\n".encode_utf16());
         units.extend(request);
@@ -151,7 +219,7 @@ mod tests {
 
     #[test]
     fn isolated_guide_agent_context_reuses_the_same_topic_sources() {
-        let context = guide_context(body());
+        let context = guide_context();
         let text = context.string_at("").unwrap();
         assert_eq!(text.matches("## Bundled resource:").count(), TOPICS.len());
         for topic in TOPICS {
@@ -173,7 +241,7 @@ mod tests {
                 topic.id
             );
         }
-        let context = guide_context(body());
+        let context = guide_context();
         assert!(!context.string_at("").unwrap().contains("{{"));
     }
 
@@ -206,6 +274,44 @@ mod tests {
     }
 
     #[test]
+    fn product_workflows_and_legacy_selectors_load_one_offline_topic() {
+        for (question, topic) in [
+            ("team", "teams"),
+            ("BOT", "bots"),
+            ("remote-control", "webrtc"),
+            ("webrtc", "webrtc"),
+            ("如何创建 team？", "teams"),
+            ("如何开启 Bot 自主判断是否回复？", "teams"),
+            ("不需要 @ 也能自动回复吗？", "teams"),
+            ("how do I create a DM?", "teams"),
+            ("如何发送 message？", "teams"),
+            ("怎么把 Bot 分享给团队", "teams"),
+            ("手机继续电脑上的会话", "webrtc"),
+            ("怎么共享 Local App 给同事", "local-app"),
+            ("How do I publish a local app?", "local-app"),
+        ] {
+            let prompt = render(body(), &question.into());
+            let text = prompt.string_at("").unwrap();
+            assert!(
+                text.contains(&format!("## Bundled resource: `references/{topic}.md`")),
+                "{question}"
+            );
+            assert_eq!(text.matches("## Bundled resource:").count(), 1);
+            if question.contains('？') || question.ends_with('?') {
+                assert!(text.ends_with(question));
+            }
+        }
+        for workflow in WORKFLOWS.iter() {
+            assert!(TOPICS.iter().any(|topic| topic.id == workflow.topic));
+        }
+        let decision = render(body(), &"不需要 @ 也能自主回复吗？".into());
+        assert!(decision
+            .string_at("")
+            .unwrap()
+            .contains("/docs/teams#auto-reply"));
+    }
+
+    #[test]
     fn guide_answers_shipped_behavior_that_claude_priors_get_wrong() {
         let root = body();
         let root_text = root.string_at("").unwrap();
@@ -213,7 +319,7 @@ mod tests {
             root_text.contains("Read the matching topic before answering"),
             "entrypoint must route before answering from memory"
         );
-        let context = guide_context(root.clone());
+        let context = guide_context();
         let text = context.string_at("").unwrap();
         for fact in [
             branding::DISABLE_AGENT_VIEW_ENV,
