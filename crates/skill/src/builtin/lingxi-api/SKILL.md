@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: Explain, configure, debug, or integrate LingXi (灵犀) CLI, sessions, settings, tools, models, and host APIs. For app building use local-app; for ordinary coding use task tools.
+description: Use and troubleshoot LingXi (灵犀). Create Teams, chats and DMs, send messages, share Bots or Local Apps, pair devices, or integrate the CLI, settings, models and host APIs. For a new personal Bot use create-bot.
 ---
 
 # LingXi API guide
@@ -11,23 +11,23 @@ schemas, and returned status decide what can run here.
 
 ## Read the matching topic before answering
 
-The first argument is a topic id. Call `Skill` with `skill: "lingxi-api"` and
-`args: "<topic>"`, or use `/lingxi-api <topic> [question]`. Request the known
-topic on the first call: skill installation/MCP uses `configuration`, failed
-calls use `troubleshooting`. Load only relevant topics and reuse loaded ones.
+Use `/lingxi-api <topic> [question]` or ask in ordinary language, for example
+`/lingxi-api 如何发送团队消息`. With `Skill`, pass the topic as `args` when known.
+Skill installation/MCP uses `configuration`. Start a failed product workflow
+in its own topic. For a general tool failure use `troubleshooting`. Load only relevant topics.
 File-based installations read the linked references beside this file; bundled
 topics load offline through `Skill`, without probing private folders or a CLI.
 
 | Topic | Read when the question concerns |
 | --- | --- |
 | [overview](references/overview.md) | Product surfaces, installable builds, command names |
-| [teams](references/teams.md) | Teams identity, membership, connectors, Bot boundaries |
+| [teams](references/teams.md) | Create or join a team, open a DM, group or channel, send a message, share a Bot |
 | [accounts](references/accounts.md) | Host-global provider accounts and execution routing |
 | [configuration](references/configuration.md) | Settings, permission mode, MCP, hooks, plugins, skills, slash commands |
 | [media](references/media.md) | Camera, microphone, transcription, speech, live assistance |
-| [webrtc](references/webrtc.md) | Browser Remote Control. The CLI remote-control handler is not that page |
-| [local-app](references/local-app.md) | Local Apps, publication, app-owned MCP, WebMCP, and AG-UI |
-| [bots](references/bots.md) | Persistent Bots, Bot memory, routines, delegation |
+| [remote-control](references/webrtc.md) | Pair your devices and continue a host session. Also accepts `webrtc` |
+| [local-app](references/local-app.md) | Publish locally, share a market listing, or open the running app on a paired device |
+| [bots](references/bots.md) | Create a personal Bot, choose who can use it, diagnose missing replies, delegate |
 | [devices](references/devices.md) | Computer Use, browser, Android automation, native device tools |
 | [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs |
 | [sessions](references/sessions.md) | Resume, instruction files, config home, history, memory |
@@ -43,10 +43,10 @@ Use the current host, caller catalog and tool schema. Feature support,
 visible tools, permission, readiness and successful execution are separate
 facts. Native UI and SDK declarations do not create model-callable tools.
 
-Use LingXi's branded paths and provider-neutral routing, not remembered Claude
-Code commands or models. Sessions covers instruction files; agents covers
-/fork and /subtask; configuration covers settings, skills and ordinary MCP.
-App-owned MCP follows the App lifecycle.
+Use LingXi's branded paths and the current provider. Answer in Chat or Code
+according to the request: give the actual UI steps for a product task and the
+owning contract for an integration. Team member messages use the Teams
+composer. Coordinator `SendMessage` addresses agent workers.
 
 For actions, use the registered domain skill: `local-app` for App authoring,
 `media`, `visualize`, `workflow-authoring`, `update-config` or mobile skills

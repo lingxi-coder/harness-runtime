@@ -54,7 +54,17 @@ store,routerTools,botSettings}.ts`, `apps/electron/src/shared/bots.ts`,
 `apps/electron/src/main/remoteControl/remoteBots.ts`,
 `packages/remote-control-client/src/session/bots.rs`.
 
-The current Bot execution service is macOS Desktop-hosted. Remote Bot chats
-attach to that host. Teams Bot identity/membership and same-account Remote
-Control grants are separate. Scoped router follow-ups are accepted only for
-completed/failed tasks; preserve task IDs rather than submitting duplicates.
+For sharing, ask who will run the Bot. A paired device can open your personal
+Bot on your Mac. Share a running Bot with a friend in the friend's Shared Bots
+panel, or publish to a team's Bot directory. A hosted service (`/services`)
+serves its chosen audience. A Bot Market recipient installs a personal copy
+and chooses their own model and resources.
+
+For a missing reply, identify the conversation and read its visible status.
+Check host availability, publication, permission and quota. In a team, open
+the task card for a wait or failure. When a shared Bot and the conversation
+both enable Decision auto-reply, an ordinary message can get a reply without
+an @. Silence is a valid choice even in an opted-in Bot DM. When Decision
+returns no verdict for an otherwise unaddressed message, a group stays quiet
+and a Bot DM proceeds. In a personal Bot router conversation,
+follow up on the original task ID after completion or failure.

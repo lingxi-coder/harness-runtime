@@ -69,9 +69,7 @@ fn with_user_request(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
 /// agent to receive an executable Skill or shell tool.
 #[must_use]
 pub fn lingxi_api_guide_context() -> Utf16JsonProjection {
-    lingxi_api::guide_context(
-        desktop_builtin_skill_content("lingxi-api").expect("builtin API guide"),
-    )
+    lingxi_api::guide_context()
 }
 
 fn register_slice(reg: &mut SkillRegistry, slice: &[BundledSkill]) {

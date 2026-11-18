@@ -514,6 +514,8 @@ mod tests {
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
         for (name, args) in [
             ("lingxi-api", "bots"),
+            ("lingxi-api", "如何发送消息"),
+            ("lingxi-api", "remote-control"),
             ("document-authoring", "Write a report"),
             ("artifact-design", "Publish the notes"),
             ("plan-artifact", "Publish the plan"),
