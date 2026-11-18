@@ -27,7 +27,17 @@ struct Refinement {
 
 // The website imports this same index from its pinned Harness revision.
 static WORKFLOWS: LazyLock<Vec<Workflow>> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("lingxi-api/workflows.json")).expect("bundled workflows")
+    let mut workflows: Vec<Workflow> =
+        serde_json::from_str(include_str!("lingxi-api/workflows.json")).expect("bundled workflows");
+    for query in workflows
+        .iter_mut()
+        .flat_map(|workflow| &mut workflow.queries)
+    {
+        *query = query
+            .replace("{{product_name}}", branding::PRODUCT_NAME)
+            .replace("{{product_name_zh}}", branding::PRODUCT_NAME_ZH);
+    }
+    workflows
 });
 
 // Keep ASCII words whole and match Han characters with or without surrounding
@@ -376,6 +386,21 @@ mod tests {
     }
 
     #[test]
+    fn bot_creation_workflows_use_both_product_names() {
+        for question in [
+            format!("How do I create a {} bot?", branding::PRODUCT_NAME),
+            format!("如何创建{} Bot？", branding::PRODUCT_NAME_ZH),
+        ] {
+            let workflow = workflow_for_question(&question.encode_utf16().collect::<Vec<_>>())
+                .expect("branded bot creation question");
+            assert_eq!(
+                (workflow.topic.as_str(), workflow.section.as_str()),
+                ("bots", "create")
+            );
+        }
+    }
+
+    #[test]
     fn every_workflow_question_opens_its_registered_topic_and_section() {
         for workflow in WORKFLOWS.iter() {
             for question in &workflow.queries {
@@ -479,6 +504,7 @@ mod tests {
         for control in [
             "iOS",
             "Android",
+            "The **Export source ZIP** entry is available only on iOS and Android.",
             "source ZIP",
             "Import source",
             "localStorage",

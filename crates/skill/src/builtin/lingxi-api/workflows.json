@@ -8,7 +8,7 @@
   {"topic":"teams","page":"teams","section":"auto-reply","queries":["reply without an @","without mentioning the bot","bot auto-reply","不 @ 也回复","不需要 @","不用@","自主回复","自动回复","自主判断是否回复","Decision 判断是否回复"]},
   {"topic":"teams","page":"teams","section":"send-message","queries":["send a team message","send a message","send message","发送消息","发送团队消息","发团队消息","发送 message"]},
   {"topic":"teams","page":"teams","section":"share-bot","queries":["share a bot with my team","share my bot with my team","把 Bot 分享给团队","把 Bot 加到团队","给团队共享 Bot"]},
-  {"topic":"bots","page":"bots","section":"create","queries":["create a LingXi bot","创建灵犀 Bot","创建一个周报 Bot"]},
+  {"topic":"bots","page":"bots","section":"create","queries":["create a {{product_name}} bot","创建{{product_name_zh}} Bot","创建一个周报 Bot"]},
   {"topic":"bots","page":"bots","section":"audience","queries":["share my bot","share a bot","share a bot with a friend","分享我的 Bot","好友使用我的 Bot","分享 Bot"]},
   {"topic":"bots","page":"bots","section":"no-reply","queries":["bot is not replying","bot is not responding","Bot 不回消息","Bot 没回复","Bot 没有回复"]},
   {"topic":"webrtc","page":"remote-control","section":"same-account","queries":["remote control","pair my computer","continue my desktop session on my phone","远控","远程控制","手机继续电脑上的会话","手机上继续 Mac 会话"]},

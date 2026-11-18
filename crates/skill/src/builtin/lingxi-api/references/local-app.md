@@ -43,9 +43,15 @@ Anyone can now open the listing. Send its public detail page in the intended
 DM or group. Recipients review and install a compatible copy with their own
 data and permissions.
 
-To give someone the source privately on iOS or Android, export the current
-release's **source ZIP** from the app details. Save the ZIP with the file picker,
-then send it through a private file transfer such as AirDrop or email. To use
+### Share a source ZIP privately
+
+The **Export source ZIP** entry is available only on iOS and Android. State
+this platform restriction before the steps in every private-sharing answer,
+including when the user asks from Desktop or leaves the device unspecified.
+
+On the iOS or Android device holding the release, open Apps → app details →
+**Export source ZIP**. Save the ZIP with the file picker, then send it through a
+private file transfer such as AirDrop or email. To use
 a LingXi team DM, send a download link restricted to the recipient. Team
 attachments accept PNG, JPEG, PDF and plain text.
 In Code mode, the recipient chooses Apps → + → Import source folder on iOS
