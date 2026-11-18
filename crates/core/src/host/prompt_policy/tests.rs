@@ -215,6 +215,29 @@ fn default_matrix_keeps_claude_across_supported_transports() {
 }
 
 #[test]
+fn chat_prompt_routes_lingxi_product_help_to_the_available_skill() {
+    let policy = resolve_prompt_policy(PromptTarget::from_route(
+        ConversationMode::Chat,
+        "openai-chatgpt",
+        "gpt-6-luna",
+        None,
+        None,
+        None,
+    ));
+    let SystemPromptBinding::Template(chat) = policy.system else {
+        panic!("default Chat route must use the generic template");
+    };
+    for instruction in [
+        "if `lingxi-api` is available through `Skill`, call it before drafting",
+        "Bot 自主回复",
+        "共享 Local App",
+        "Pass the user's question as `args`",
+    ] {
+        assert!(chat.contains(instruction), "{instruction}");
+    }
+}
+
+#[test]
 fn every_native_catalog_provider_identity_resolves_to_the_same_claude_bundle() {
     let oracle: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/model_capabilities_2_1_319.json"

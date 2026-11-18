@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: Use and troubleshoot LingXi (灵犀). Create Teams, chats and DMs, send messages, share Bots or Local Apps, pair devices, or integrate the CLI, settings, models and host APIs. For a new personal Bot use create-bot.
+description: LingXi (灵犀) product help. Create teams, chats or DMs, send messages, configure Bot Decision replies without @ (Bot 自主回复), publish or share Local Apps (共享 Local App), pair devices, or use the CLI and host APIs. For a new personal Bot use create-bot.
 ---
 
 # LingXi API guide
@@ -27,7 +27,7 @@ topics load offline through `Skill`, without probing private folders or a CLI.
 | [media](references/media.md) | Camera, microphone, transcription, speech, live assistance |
 | [remote-control](references/webrtc.md) | Pair your devices and continue a host session. Also accepts `webrtc` |
 | [local-app](references/local-app.md) | Publish on Desktop or Mobile, make a market listing public, share a source ZIP privately, or open a running app on a paired device |
-| [bots](references/bots.md) | Create a personal Bot, choose who can use it, diagnose missing replies, delegate |
+| [bots](references/bots.md) | Create a personal Bot, choose who can use it, configure Decision, diagnose missing replies, delegate |
 | [devices](references/devices.md) | Computer Use, browser, Android automation, native device tools |
 | [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs |
 | [sessions](references/sessions.md) | Resume, instruction files, config home, history, memory |

@@ -412,6 +412,10 @@ mod tests {
             ("如何发送团队消息", "teams#send-message"),
             ("如何创建一个团队？", "teams#create-team"),
             ("Bot 自主回复", "teams#auto-reply"),
+            (
+                "如何配置团队里的 Bot 自主回复，让它在没有被 @ 的时候也能自己判断要不要回答？",
+                "teams#auto-reply",
+            ),
             ("Bot DM?", "teams#bot-chat"),
             ("创建群聊并发送消息", "teams#group-chat"),
             (
@@ -429,6 +433,10 @@ mod tests {
                 "local-apps#publish-local",
             ),
             ("怎么私下分享 Local App 给朋友？", "local-apps#source-zip"),
+            (
+                "如何把我做的 Local App 共享给一位同事？",
+                "local-apps#source-zip",
+            ),
             ("我只在 iPhone 上有这个 Local App，怎么只发给一个同事？如果后来决定让大家都能安装，要怎么操作？", "local-apps#source-zip"),
             ("我的手机通过远控打开电脑上的应用，我昨天记的数据这次还能继续用吗？", "local-apps#paired-devices"),
         ] {
