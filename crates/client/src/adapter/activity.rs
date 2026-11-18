@@ -139,3 +139,41 @@ mod activity_tests {
         assert!(summarize_activity_line(&marker).is_none());
     }
 }
+
+/// Current session writer is retargeted by the host; each parked action captures
+/// its exact path once, so a delayed resolution cannot affect a new session.
+#[derive(Default)]
+pub(crate) struct InboxActionSource(std::sync::OnceLock<std::sync::Weak<session::JsonlWriter>>);
+
+impl InboxActionSource {
+    pub(crate) fn bind(&self, writer: &std::sync::Arc<session::JsonlWriter>) {
+        let _ = self.0.set(std::sync::Arc::downgrade(writer));
+    }
+    pub(crate) async fn park(
+        &self,
+        owner: Option<&str>,
+        kind: session::jsonl::activity::ActionKind,
+    ) -> Option<session::jsonl::activity::ActivityAction> {
+        let writer = self.0.get()?.upgrade()?;
+        let path = if let Some(owner) = owner {
+            writer.session_target_path(lingxi_core::types::SessionId::parse_prefixed(owner)?)?
+        } else {
+            writer.active_path()
+        };
+        match tokio::task::spawn_blocking(move || {
+            session::jsonl::activity::ActivityAction::start(&path, kind)
+        })
+        .await
+        {
+            Ok(Ok(lease)) => lease,
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "Could not publish inbox action");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(%e, "Inbox action worker failed");
+                None
+            }
+        }
+    }
+}

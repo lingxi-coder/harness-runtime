@@ -42,6 +42,7 @@ const PUBLICATION_COMPLETE: u8 = 2;
 const PUBLICATION_REMOVED: u8 = 3;
 
 struct PendingAskUserQuestion {
+    _activity: Option<session::jsonl::activity::ActivityAction>,
     resp_tx: oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
     timeout_task: Option<JoinHandle<()>>,
     cancellation_task: Option<JoinHandle<()>>,
@@ -62,6 +63,7 @@ impl PendingAskUserQuestion {
         lifetime: AskUserQuestionLifetime,
     ) -> Self {
         Self {
+            _activity: None,
             resp_tx,
             timeout_task: None,
             cancellation_task: None,
@@ -140,6 +142,7 @@ fn lower_question(question: AskQuestion) -> AskQuestionDto {
 /// waiting on the same oneshot across the disconnect. Nothing here needs to
 /// be durable: the parked turn dies with the process.
 pub struct AskUserQuestionBroker {
+    inbox: super::activity::InboxActionSource,
     sink: Arc<dyn ClientEventSink>,
     next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, PendingAskUserQuestion>>>,
@@ -148,10 +151,16 @@ pub struct AskUserQuestionBroker {
 }
 
 impl AskUserQuestionBroker {
+    /// Bind parked questions to the durable source session activity.
+    pub fn bind_inbox(&self, writer: &Arc<session::JsonlWriter>) {
+        self.inbox.bind(writer);
+    }
+
     /// Construct a connection-scoped broker.
     #[must_use]
     pub fn new(sink: Arc<dyn ClientEventSink>) -> Self {
         Self {
+            inbox: Default::default(),
             sink,
             next_id: AtomicU64::new(1),
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -187,6 +196,10 @@ impl AskUserQuestionBroker {
             // holding the pending lock: cleanup can then either remove the
             // queued entry or wait for this publication to finish, but cannot
             // emit Resolved and let us publish Ask afterward.
+            let activity = self
+                .inbox
+                .park(None, session::jsonl::activity::ActionKind::Input)
+                .await;
             let should_publish = {
                 let mut pending = self.pending.lock().await;
                 if resp_tx.is_closed() {
@@ -199,10 +212,9 @@ impl AskUserQuestionBroker {
                     );
                     continue;
                 }
-                pending.insert(
-                    request_id,
-                    PendingAskUserQuestion::new(resp_tx, request.clone(), lifetime),
-                );
+                let mut entry = PendingAskUserQuestion::new(resp_tx, request.clone(), lifetime);
+                entry._activity = activity;
+                pending.insert(request_id, entry);
                 pending
                     .get(&request_id)
                     .is_some_and(PendingAskUserQuestion::claim_publication)

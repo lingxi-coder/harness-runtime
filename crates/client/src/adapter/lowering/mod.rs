@@ -226,7 +226,16 @@ fn lower_account_usage_row(row: &AccountUsageRow) -> AccountUsageRowDto {
 /// a lossy display string (plan line 152 — not synthesized).
 #[must_use]
 pub fn lower_session_metadata(meta: &SessionMetadata) -> SessionRowDto {
+    let mut activity = session::jsonl::activity::summary(&meta.path)
+        .map_err(|error| tracing::warn!(%error, "Assistant activity unavailable"))
+        .ok()
+        .flatten();
+    let user_title = activity
+        .as_mut()
+        .and_then(|a| a.take_user_title(meta.custom_or_ai_title.as_deref()));
     SessionRowDto {
+        user_title,
+        activity_json: activity.and_then(|a| serde_json::to_string(&a).ok()),
         uuid: meta.uuid.to_string(),
         title: meta.title.clone(),
         modified_rfc3339: system_time_to_rfc3339(meta.modified),

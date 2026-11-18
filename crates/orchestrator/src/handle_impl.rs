@@ -2857,7 +2857,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         };
         let session_id = self.session.lock().await.session_id;
         writer
-            .append_custom_title(&session_id.as_uuid().to_string(), name)
+            .append_user_title(&session_id.as_uuid().to_string(), name)
             .await
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
     }

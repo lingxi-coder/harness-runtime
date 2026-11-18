@@ -90,6 +90,7 @@ pub trait PermissionRequestSink: Send + Sync {
 /// One parked permission round-trip: the oneshot the awaiting `check()` blocks
 /// on, plus the exact call input (so `resolve` can narrow an `AllowAlways`).
 struct ParkedRequest {
+    _activity: Option<session::jsonl::activity::ActivityAction>,
     /// Resolves the awaiting `check()` future.
     sender: oneshot::Sender<PermissionResponse>,
     /// The tool input of the call, captured at `check()` time.
@@ -174,6 +175,7 @@ impl Drop for ParkedRequestGuard {
 /// task ([`Self::resolve`]) and the engine turn task ([`PermissionGate::check`])
 /// operate on the same state.
 pub struct AdapterPermissionGate {
+    inbox: super::activity::InboxActionSource,
     /// Where outbound [`PermissionRequestDto`]s go (the transport).
     sink: Arc<dyn PermissionRequestSink>,
     /// Session-scoped allow rules. Consulted before a request is emitted;
@@ -203,6 +205,11 @@ pub struct AdapterPermissionGate {
 }
 
 impl AdapterPermissionGate {
+    /// Bind parked permission lifetimes to the source session's inbox.
+    pub fn bind_inbox(&self, writer: &Arc<session::JsonlWriter>) {
+        self.inbox.bind(writer);
+    }
+
     /// Construct a gate with the [`DEFAULT_PERMISSION_TIMEOUT`] and a fresh empty
     /// session-rule list.
     #[must_use]
@@ -218,6 +225,7 @@ impl AdapterPermissionGate {
         session_allow_rules: Arc<Mutex<Vec<PermissionRule>>>,
     ) -> Self {
         Self {
+            inbox: Default::default(),
             sink,
             session_allow_rules,
             next_id: Arc::new(AtomicU64::new(1)),
@@ -612,10 +620,18 @@ impl AdapterPermissionGate {
         // Step 3: reserve a fresh id, park the oneshot, emit the request.
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
+        let activity = self
+            .inbox
+            .park(
+                owner.as_ref().and_then(|o| o.wire.session_id.as_deref()),
+                session::jsonl::activity::ActionKind::Approval,
+            )
+            .await;
         {
             self.pending.lock().await.insert(
                 request_id,
                 ParkedRequest {
+                    _activity: activity,
                     sender: tx,
                     input: input.clone(),
                     tool_name: name.to_string(),
@@ -1642,6 +1658,7 @@ mod tests {
         gate.pending.lock().await.insert(
             41,
             ParkedRequest {
+                _activity: None,
                 sender,
                 input: Utf16JsonProjection::from_serde_value(&json!({"command": "dangerous"}))
                     .unwrap(),
@@ -1680,6 +1697,7 @@ mod tests {
         gate.pending.lock().await.insert(
             77,
             ParkedRequest {
+                _activity: None,
                 sender,
                 input: Utf16JsonProjection::from_serde_value(&json!({"command": "dangerous"}))
                     .unwrap(),

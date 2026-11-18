@@ -16,6 +16,7 @@
 /// Persisted behavior profile shared with the host and orchestrator.
 pub use lingxi_core::host::session_context::ConversationMode as SessionMode;
 
+pub mod activity;
 pub mod aliases;
 pub mod djb2;
 pub mod durable_writer;

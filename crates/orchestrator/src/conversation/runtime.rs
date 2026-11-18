@@ -915,6 +915,67 @@ impl ConversationOrchestrator {
         stop_reason: &str,
         cost: &lingxi_core::host::CostSnapshot,
     ) {
+        self.emit_turn_terminal_with_result(stop_reason, cost, None)
+            .await;
+    }
+
+    pub(super) async fn emit_turn_terminal_with_result(
+        &self,
+        stop_reason: &str,
+        cost: &lingxi_core::host::CostSnapshot,
+        final_message: Option<MessageId>,
+    ) {
+        let failed = match stop_reason {
+            "model_error"
+            | "error"
+            | "prompt_too_long"
+            | "structured_output_retry_exhausted"
+            | "blocking_limit"
+            | "rapid_refill_breaker"
+            | "malformed_tool_use_exhausted" => Some(true),
+            "end_turn" | "stop_sequence" | "refusal" | "max_tokens" | "length" | "stop" => {
+                Some(false)
+            }
+            _ => None,
+        };
+        if let (Some(failed), Some(writer)) = (failed, self.session_transcript_writer()) {
+            let (session, logical) = {
+                let state = self.session.lock().await;
+                let logical = state
+                    .history
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        ConversationMessage::Assistant { id, .. } => {
+                            Some(Some(id.as_uuid().to_string()))
+                        }
+                        ConversationMessage::User { .. } => Some(None),
+                        _ => None,
+                    })
+                    .flatten();
+                (
+                    state.session_id,
+                    final_message.map(|id| id.as_uuid().to_string()).or(logical),
+                )
+            };
+            let outer = self.transcript.last_jsonl_uuid.lock().await.clone();
+            if let Some(path) = writer.session_target_path(session) {
+                match tokio::task::spawn_blocking(move || {
+                    session::jsonl::activity::finish_turn(
+                        &path,
+                        logical.as_deref(),
+                        outer.as_deref(),
+                        failed,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(%e, "Could not publish terminal inbox status"),
+                    Err(e) => tracing::warn!(%e, "Terminal inbox worker failed"),
+                }
+            }
+        }
         self.note_turn_terminal_reason(stop_reason);
         self.output.emit_end_turn(stop_reason, cost).await;
     }

@@ -385,6 +385,22 @@ impl MobileEngineHandle {
         Ok(())
     }
 
+    async fn inbox_activity_path(&self, session_id: &str) -> Result<PathBuf, ClientError> {
+        let id = uuid::Uuid::parse_str(session_id).map_err(|_| ClientError::Rejected {
+            message: "Invalid session identity".into(),
+        })?;
+        session::jsonl::resolve_session_path_in_scope(
+            &self.lingxi_home,
+            &self.session_cwd(),
+            session::jsonl::SessionDiscoveryScope::All,
+            id,
+        )
+        .await
+        .map_err(|e| ClientError::Rejected {
+            message: e.to_string(),
+        })
+    }
+
     pub(super) async fn workspace_sessions_inner(
         &self,
         scope: MobileSessionDiscoveryScope,
@@ -543,6 +559,82 @@ impl MobileEngineHandle {
             .capture_workspace_session_source(&session_id, &transcript_path)
             .await?;
         self.resume_session_impl(session_id, captured).await
+    }
+
+    /// Read at most 50 content-free semantic positions from this device's source.
+    pub async fn assistant_activity_page(
+        &self,
+        session_id: String,
+        after: u64,
+    ) -> Result<String, ClientError> {
+        let path = self.inbox_activity_path(&session_id).await?;
+        tokio::task::spawn_blocking(move || {
+            let page = session::jsonl::activity::page(&path, after).map_err(|e| {
+                ClientError::Internal {
+                    message: e.to_string(),
+                }
+            })?;
+            serde_json::to_string(&page).map_err(|e| ClientError::Internal {
+                message: e.to_string(),
+            })
+        })
+        .await
+        .map_err(|e| ClientError::Internal {
+            message: e.to_string(),
+        })?
+    }
+
+    /// Resolve a single result for an explicit preview, independent of the active session.
+    pub async fn assistant_activity_preview(
+        &self,
+        session_id: String,
+        through: u64,
+    ) -> Result<String, ClientError> {
+        use client::protocol::message::{MessageBlockDto, MessageDto};
+        use client::protocol::text::ClientTextDto;
+        let path = self.inbox_activity_path(&session_id).await?;
+        tokio::task::spawn_blocking(move || {
+            let rows = session::jsonl::activity::preview(&path, through).map_err(|e| {
+                ClientError::Internal {
+                    message: e.to_string(),
+                }
+            })?;
+            #[derive(serde::Serialize)]
+            struct Preview {
+                available: bool,
+                messages: Vec<MessageDto>,
+            }
+            let messages: Vec<_> = rows
+                .into_iter()
+                .map(|row| MessageDto {
+                    transcript_uuid: Some(row.uuid),
+                    role: "assistant".into(),
+                    sent_at_ms: Some(row.at),
+                    blocks: row
+                        .blocks
+                        .into_iter()
+                        .map(|units| MessageBlockDto::Text {
+                            text: ClientTextDto::from_code_units(units),
+                        })
+                        .collect(),
+                    images: Vec::new(),
+                    loop_wakeup: None,
+                    visualization_context: None,
+                    skill_name: None,
+                })
+                .collect();
+            serde_json::to_string(&Preview {
+                available: !messages.is_empty(),
+                messages,
+            })
+            .map_err(|e| ClientError::Internal {
+                message: e.to_string(),
+            })
+        })
+        .await
+        .map_err(|e| ClientError::Internal {
+            message: e.to_string(),
+        })?
     }
 
     pub async fn workspace_sessions(

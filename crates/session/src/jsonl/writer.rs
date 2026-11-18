@@ -1646,7 +1646,10 @@ impl JsonlWriter {
                         SessionMetadataOperation::Rename(title) => {
                             let payload = Utf16JsonProjection::object(vec![
                                 ("type".into(), Utf16JsonProjection::from("custom-title")),
-                                ("customTitle".into(), Utf16JsonProjection::from(title)),
+                                (
+                                    "customTitle".into(),
+                                    Utf16JsonProjection::from(title.as_str()),
+                                ),
                                 ("sessionId".into(), Utf16JsonProjection::from(session_key)),
                             ])
                             .expect("metadata fields are unique");
@@ -1661,6 +1664,7 @@ impl JsonlWriter {
                                 Some(file),
                                 true,
                             )?;
+                            crate::jsonl::activity::record_user_title(&expected_path, &title)?;
                         }
                         SessionMetadataOperation::Touch => {
                             let file = authority.open_checked()?;
@@ -3818,7 +3822,11 @@ impl JsonlWriter {
         payload: &str,
         account_backstops: bool,
     ) -> Result<(), WriterError> {
+        let activity = crate::jsonl::activity::ActivityAppend::begin_host(path, payload).await?;
         if self.append_persistent_chat_payload(path, payload).await? {
+            if let Some(activity) = activity {
+                activity.commit_host().await?;
+            }
             if account_backstops {
                 self.bytes_since_metadata_re_append
                     .fetch_add(payload.len(), Ordering::Relaxed);
@@ -3850,6 +3858,9 @@ impl JsonlWriter {
         self.fs
             .append_file_with_mode(path_str, payload, 0o600)
             .await?;
+        if let Some(activity) = activity {
+            activity.commit_host().await?;
+        }
         // `bytesSinceMetadataReAppend += Buffer.byteLength(t,"utf8")` — counted
         // only on a SUCCESSFUL write, matching the oracle's post-await position.
         // `appendToFile` (@296775839) bumps BOTH counters from the same
@@ -4029,6 +4040,7 @@ impl JsonlWriter {
                     target.filter(|target| target.writer.transcript_authority().is_some())
                 {
                     target.writer.with_transaction(|_| {
+                        let _ = crate::jsonl::activity::summary(&path)?;
                         let result = compact_authoritative_target(&target.writer, &path);
                         if matches!(&result, Err(TranscriptWriterError::WrittenButNotDurable(_))) {
                             target.writer.mark_rewrite_uncertain();
@@ -4036,6 +4048,7 @@ impl JsonlWriter {
                         result
                     })
                 } else {
+                    let _ = crate::jsonl::activity::summary(&path)?;
                     Ok(perform_compact_transcript(&path))
                 }
             })
@@ -4298,6 +4311,24 @@ impl JsonlWriter {
         session_id: &str,
         custom_title: Utf16JsonProjection,
     ) -> Result<(), WriterError> {
+        self.append_title(session_id, custom_title, false).await
+    }
+
+    /// Host-driven user rename. Other custom titles can originate in hooks.
+    pub async fn append_user_title(
+        &self,
+        session_id: &str,
+        title: Utf16JsonProjection,
+    ) -> Result<(), WriterError> {
+        self.append_title(session_id, title, true).await
+    }
+
+    async fn append_title(
+        &self,
+        session_id: &str,
+        custom_title: Utf16JsonProjection,
+        user_rename: bool,
+    ) -> Result<(), WriterError> {
         let session_id = canonical_metadata_session_id(session_id);
         let session_id = session_id.as_str();
         let value = Utf16JsonProjection::object(vec![
@@ -4316,8 +4347,18 @@ impl JsonlWriter {
         let target = self.capture_metadata_target(session_id)?;
         let slot = self.session_metadata_state(session_id, &target.0).await;
         let mut state = slot.lock().await;
+        let path = target.0.clone();
         self.append_source_side_record_to_target(&value, target)
             .await?;
+        if user_rename {
+            if let Some(text) = custom_title.string_at("").map(str::to_owned) {
+                tokio::task::spawn_blocking(move || {
+                    crate::jsonl::activity::record_user_title(&path, &text)
+                })
+                .await
+                .map_err(|e| FsError::Io(e.to_string()))??;
+            }
+        }
         state.title = Some(custom_title);
         drop(state);
         self.maybe_re_append_metadata().await;

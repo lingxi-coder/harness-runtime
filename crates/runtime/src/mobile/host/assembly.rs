@@ -1411,6 +1411,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     // stays session-only here (the desktop transport gate persists; this does not).
     let adapter_gate =
         Arc::new(AdapterPermissionGate::new(permission_sink).with_event_sink(event_sink.clone()));
+    if !cfg.app_agent_host && !cfg.scheduler_controller {
+        if let Err(error) = session::jsonl::activity::source_id(&cfg.lingxi_home) {
+            tracing::warn!(%error, "Could not initialize local inbox source");
+        }
+        adapter_gate.bind_inbox(&session_writer);
+    }
     adapter_gate.set_session_id(Some(main_session_uuid.clone()));
     // Wrap the adapter gate with a local `PolicyPermissionGate` so the CORE
     // allow/deny/ask/defaultMode semantics bind on mobile too — claude-code
@@ -4304,6 +4310,7 @@ fn build_mobile_engine_on_worker(
     let ask_user_question_broker = Arc::new(client::adapter::AskUserQuestionBroker::new(
         event_sink.clone(),
     ));
+    ask_user_question_broker.bind_inbox(&inner.session_writer);
     {
         let broker = ask_user_question_broker.clone();
         runtime.spawn(async move { broker.run(ask_user_question_rx).await });

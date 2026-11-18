@@ -70,6 +70,14 @@ pub enum SessionModeDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SessionRowDto {
+    /// Explicit user-provided rename whose current transcript label still matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub user_title: Option<String>,
+    /// Content-free source activity projection for unified inbox clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub activity_json: Option<String>,
     /// The session UUID (parsed from the filename stem), as a stable string.
     pub uuid: String,
     /// The shared catalog title (≤ 200 Unicode characters + ellipsis); clients

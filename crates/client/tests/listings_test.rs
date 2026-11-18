@@ -34,6 +34,8 @@ use client::protocol::message::{MessageBlockDto, MessageDto};
 fn session_list_round_trips() {
     let ev = ClientEvent::SessionList {
         sessions: vec![SessionRowDto {
+            user_title: None,
+            activity_json: None,
             uuid: "0b3e2f10-1234-4abc-8def-0123456789ab".to_string(),
             title: "Refactor the parser".to_string(),
             modified_rfc3339: "2026-06-02T15:04:05Z".to_string(),
@@ -59,6 +61,8 @@ fn session_list_round_trips() {
 #[test]
 fn session_row_carries_path() {
     let row = SessionRowDto {
+        user_title: None,
+        activity_json: None,
         uuid: "u".to_string(),
         title: "t".to_string(),
         modified_rfc3339: "2026-06-02T15:04:05Z".to_string(),

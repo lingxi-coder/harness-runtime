@@ -2003,6 +2003,8 @@ fn current_contract_index() -> ContractIndex {
     put("SessionRowDto.message_count", "u32");
     put("SessionRowDto.path", "String");
     put("SessionRowDto.workspace_path", "Option<String>");
+    put("SessionRowDto.activity_json", "Option<String>");
+    put("SessionRowDto.user_title", "Option<String>");
 
     put("McpServerDto.name", "String");
     put("McpServerDto.status", "McpStatusDto");
@@ -4747,6 +4749,8 @@ fn contract_index_covers_every_dto() {
     };
     let _rows = (
         SessionRowDto {
+            user_title: None,
+            activity_json: None,
             uuid: String::new(),
             title: String::new(),
             modified_rfc3339: String::new(),

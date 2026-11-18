@@ -1204,7 +1204,17 @@ impl DurableTranscriptWriter {
             .file
             .as_mut()
             .expect("append descriptor was admitted");
-        let exact_previous_len = if resets_parent_chain {
+        let activity = crate::jsonl::activity::ActivityAppend::begin(
+            &transcript_root.join(transcript_relative),
+            &payload,
+            &line,
+            || {
+                file.metadata()
+                    .map(|m| m.len())
+                    .map_err(|e| FsError::Io(e.to_string()))
+            },
+        )?;
+        let exact_previous_len = if resets_parent_chain || activity.is_some() {
             Some(
                 file.metadata()
                     .map_err(|error| FsError::Io(error.to_string()))?
@@ -1258,6 +1268,7 @@ impl DurableTranscriptWriter {
         #[cfg(test)]
         Self::wait_authority_test_gate(&self.authority_after_write);
         self.confirm_authoritative_target_after_write(transcript_root, transcript_relative)?;
+        crate::jsonl::activity::ActivityAppend::settle_after_append(activity);
         admitted.file_present = true;
         admitted.missing_final_delimiter = false;
         admitted.last_uuid = Some(message_uuid.to_string());
@@ -1833,15 +1844,26 @@ impl DurableTranscriptTransaction<'_> {
         // A cwd transition must be durable before a host publishes the new
         // working directory; otherwise a cold resume can restore the old cwd.
         let relocation = payload.string_at("/type") == Some("relocated");
-        let previous_len = if fixed_mode || mobile_anchor || relocation || force_sync {
-            Some(
+        let activity = crate::jsonl::activity::ActivityAppend::begin(
+            &transcript_root.join(transcript_relative),
+            &payload,
+            &line,
+            || {
                 file.metadata()
-                    .map_err(|error| FsError::Io(error.to_string()))?
-                    .len(),
-            )
-        } else {
-            None
-        };
+                    .map(|m| m.len())
+                    .map_err(|e| FsError::Io(e.to_string()))
+            },
+        )?;
+        let previous_len =
+            if fixed_mode || mobile_anchor || relocation || force_sync || activity.is_some() {
+                Some(
+                    file.metadata()
+                        .map_err(|error| FsError::Io(error.to_string()))?
+                        .len(),
+                )
+            } else {
+                None
+            };
         self.writer.append_complete_line(&mut file, &line)?;
         if let Some(previous_len) = previous_len {
             #[cfg(test)]
@@ -1907,6 +1929,7 @@ impl DurableTranscriptTransaction<'_> {
         }
         self.writer
             .confirm_authoritative_target_after_write(transcript_root, transcript_relative)?;
+        crate::jsonl::activity::ActivityAppend::settle_after_append(activity);
         Ok(())
     }
 
@@ -1924,6 +1947,7 @@ impl DurableTranscriptTransaction<'_> {
         message_uuid: &str,
     ) -> Result<bool, TranscriptWriterError> {
         self.writer.ensure_rewrite_is_resolved()?;
+        let _ = crate::jsonl::activity::summary(&transcript_root.join(transcript_relative))?;
         let result = self.remove_message_by_uuid_at_inner(
             transcript_root,
             transcript_identity,

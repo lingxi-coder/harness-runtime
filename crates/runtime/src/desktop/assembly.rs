@@ -2741,6 +2741,12 @@ pub async fn build_with_credential_stack(
                         cwd: cwd.clone(),
                     }),
             );
+            if cfg.session_persistence && !is_app_chat {
+                if let Err(error) = session::jsonl::activity::source_id(&cfg.lingxi_home) {
+                    tracing::warn!(%error, "Could not initialize local inbox source");
+                }
+                gate.bind_inbox(&main_jsonl_writer);
+            }
             (gate.clone() as Arc<dyn PermissionGate>, Some(gate))
         };
 

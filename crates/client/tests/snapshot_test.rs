@@ -677,6 +677,8 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/session_list.json",
             ClientEvent::SessionList {
                 sessions: vec![SessionRowDto {
+                    user_title: None,
+                    activity_json: None,
                     uuid: "33333333-3333-4333-8333-333333333333".to_string(),
                     title: "Implement the parser".to_string(),
                     modified_rfc3339: "2026-06-02T12:00:00Z".to_string(),
