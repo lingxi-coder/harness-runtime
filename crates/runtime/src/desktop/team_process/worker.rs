@@ -133,7 +133,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     };
     let no_reply = bootstrap
         .may_decline
-        .then(|| Arc::new(super::decline_tool::NoReply::default()));
+        .then(|| Arc::new(super::decline_tool::NoReply::new(bootstrap.addressed)));
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
@@ -395,10 +395,10 @@ async fn run(
         .as_ref()
         .map_or(0, |state| state.checkpoint.dispatches_observed);
     let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
-    let input = if no_reply.is_some() {
-        format!("{input} Nobody asked you for this message: if no reply from you is wanted, call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL)
-    } else {
-        input
+    let input = match &no_reply {
+        Some(choice) if choice.addressed() => format!("{input} This message was written to you directly: answer it, unless it plainly needs no answer from you (a thank-you or an acknowledgement); only then call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL),
+        Some(_) => format!("{input} Nobody asked you for this message: if no reply from you is wanted, call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL),
+        None => input,
     };
     let finish_only = resumed
         .as_ref()

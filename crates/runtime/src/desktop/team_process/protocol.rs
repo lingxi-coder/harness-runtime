@@ -42,6 +42,9 @@ pub(super) struct Bootstrap {
     /// Register the no-reply tool for this process.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub may_decline: bool,
+    /// With `may_decline` only: the message was written to the Bot directly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub addressed: bool,
 }
 impl Bootstrap {
     pub fn limits(&self) -> Result<TeamInvocationLimits, TeamProcessError> {
