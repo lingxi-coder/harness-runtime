@@ -270,7 +270,7 @@ pub(super) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamLis
         }));
     }
 }
-fn done(value: &serde_json::Value, is_error: bool) -> ToolCallResult {
+pub(super) fn done(value: &serde_json::Value, is_error: bool) -> ToolCallResult {
     ToolCallResult {
         data: generated_builtin_result(value),
         model_content: None,

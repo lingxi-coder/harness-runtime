@@ -324,6 +324,8 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
     let mut prompt_persisted = false;
     let mut calls: Vec<Call> = Vec::new();
     let mut results: Vec<String> = Vec::new();
+    // Calls whose result is an error: a refused no-reply call is not a choice of silence.
+    let mut failed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut groups: Vec<Group> = Vec::new();
     let mut group_key: Option<String> = None;
     let mut last_kind: Option<&str> = None;
@@ -381,6 +383,15 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                failed.extend(
+                    content
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|b| b["type"] == "tool_result" && b["is_error"] == true)
+                        .filter_map(|b| b["tool_use_id"].as_str())
+                        .map(str::to_owned),
+                );
                 if !tool_results.is_empty() {
                     results.extend(tool_results);
                     last_kind = Some("tool_result");
@@ -459,7 +470,11 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
     if pending_calls.iter().any(|c| Some(c.group) != last_group) {
         inconsistent = true;
     }
-    let declined = calls.iter().any(|c| c.name == NO_REPLY_TOOL);
+    // An unanswered call is replayed like a read and so still stands; one the
+    // runtime refused (its input was invalid) chose nothing.
+    let declined = calls
+        .iter()
+        .any(|c| c.name == NO_REPLY_TOOL && !failed.contains(&c.id));
     let mut final_answer = None;
     if let Some(group) = last_group.map(|g| &groups[g]) {
         let reason = group.stop_reason.as_deref();
@@ -842,6 +857,18 @@ mod tests {
         );
         assert!(state.declined);
         assert_eq!(state.final_answer.as_deref(), Some(""));
+
+        // A call the runtime refused chose nothing: the empty turn after it is no answer.
+        let refused = lines(vec![
+            batch_row(),
+            prompt_row(),
+            call_row("m1", &[("c1", NO_REPLY_TOOL)], "tool_use"),
+            json!({"type":"user","uuid":"row_result_c1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","is_error":true,"content":"invalid input"}]}}),
+            text_row("m2", "", "end_turn"),
+        ]);
+        let state = eval(&refused, true, CHAT);
+        assert!(!state.declined);
+        assert_eq!(state.final_answer, None);
 
         // Without the call an empty turn is still not an answer.
         let empty = lines(vec![

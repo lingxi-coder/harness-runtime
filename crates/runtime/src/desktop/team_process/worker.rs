@@ -507,10 +507,15 @@ async fn run(
     let declined = no_reply.as_ref().is_some_and(|choice| {
         choice.chosen() || resumed.as_ref().is_some_and(|state| state.declined)
     });
-    let (outcome, text) = if output.overflow.load(Ordering::Acquire) {
-        (TeamProcessOutcome::OutputLimit, String::new())
-    } else if declined && matches!(&outcome, Ok(TurnOutcome::EndTurn | TurnOutcome::MaxTurns)) {
+    let overflow = output.overflow.load(Ordering::Acquire);
+    // Once silence is chosen nothing the model writes is posted, so writing too
+    // much afterwards does not turn the silence into a failure.
+    let (outcome, text) = if declined
+        && (overflow || matches!(&outcome, Ok(TurnOutcome::EndTurn | TurnOutcome::MaxTurns)))
+    {
         (TeamProcessOutcome::Declined, String::new())
+    } else if overflow {
+        (TeamProcessOutcome::OutputLimit, String::new())
     } else if output.failed.load(Ordering::Acquire)
         || outcome.is_err()
         || (matches!(&outcome, Ok(TurnOutcome::EndTurn)) && text.trim().is_empty())
