@@ -1234,7 +1234,7 @@ fn saved(revision: u64) -> Option<TeamOperationResult> {
 async fn team_data_write_survives_a_worker_restart_with_the_same_step() {
     let (_temp, root) = root();
     let task = Task {
-        data: vec![TeamDatasetOffer { dataset: "team-orders".into(), version: 1, write: true, handoff_targets: Vec::new() }],
+        data: vec![TeamDatasetOffer { dataset: "team-orders".into(), version: 1, write: true, report_review: false, handoff_targets: Vec::new() }],
         ..Task::new()
     };
     let args = json!({"action":"put","dataset":"team-orders","record":"order-1","schemaVersion":1,
