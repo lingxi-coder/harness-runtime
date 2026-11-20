@@ -96,6 +96,7 @@ fn request(
         may_decline: false,
         addressed: false,
         shared_list: None,
+        shared_data: Vec::new(),
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
     }
 }
@@ -449,6 +450,58 @@ async fn edits_and_recalls_remove_stale_source_and_derived_output_before_next_di
         assert!(!body.contains("STALE_DERIVED_SECRET"));
     }
 }
+#[tokio::test]
+async fn private_data_worker_excludes_shared_history_tools_and_artifacts() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, shared_root) = root();
+    let id = uuid::Uuid::new_v4();
+    let task_id = format!("task_{}", id.simple());
+    let parent = shared_root.join("data-private");
+    let private_root = parent.join(&task_id);
+    for dir in [&parent, &private_root] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let server = Server::new(vec![
+        Reply::Text("Private draft".into()),
+        Reply::Text("Normal Chat reply".into()),
+    ]).await;
+    let mut input = batch(0, 1, 0);
+    input.conversation_id = task_id.clone();
+    input.batch_id = task_id.clone();
+    let admission = private_root.join("admission.json");
+    std::fs::write(&admission, serde_json::to_vec(&json!([
+        1, "host-owner", "bob", "team_0001", "sharedbot_01", task_id
+    ])).unwrap()).unwrap();
+    std::fs::set_permissions(&admission, std::fs::Permissions::from_mode(0o600)).unwrap();
+    input.messages[0].text = "UNIQUE_DATA_PREVIEW".into();
+    let scope = input.scope();
+    let mut private = request(&private_root, server.endpoint.clone(), id, input);
+    private.knowledge.clear();
+    let broker = Arc::new(Broker::default());
+    let result = TeamProcessStart::prepare_private(&private_root, private).unwrap()
+        .run_with_broker(&worker(), CancellationToken::new(), broker.clone()).await.unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Private draft");
+    assert!(result.document.is_none());
+    assert!(broker.reads.lock().unwrap().is_empty());
+    let recovered = harness_runtime::desktop::team_process::recover_result(&private_root, &scope, &task_id)
+        .unwrap().unwrap();
+    assert_eq!(recovered.text, result.text);
+    assert!(harness_runtime::desktop::team_process::recover_result(&shared_root, &scope, &task_id)
+        .unwrap().is_none());
+
+    let mut next = batch(0, 1, 0);
+    next.conversation_id = task_id;
+    run(&shared_root, request(&shared_root, server.endpoint.clone(), uuid::Uuid::new_v4(), next))
+        .await.unwrap();
+    let records = server.requests.lock().unwrap();
+    assert!(records[0].body.to_string().contains("UNIQUE_DATA_PREVIEW"));
+    assert!(records[0].body["tools"].as_array().is_none_or(Vec::is_empty));
+    assert!(!records[1].body.to_string().contains("UNIQUE_DATA_PREVIEW"));
+    assert!(!records[1].body.to_string().contains("Private draft"));
+}
+
 #[tokio::test]
 async fn readonly_history_and_published_knowledge_reach_real_model_without_owner_tools() {
     let (_temp, root) = root();

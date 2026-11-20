@@ -7,6 +7,7 @@ mod ask_tool;
 mod chat_session;
 mod checkpoint;
 mod data;
+mod data_tools;
 mod decline_tool;
 mod interaction;
 pub(crate) mod list_tools;
@@ -18,6 +19,7 @@ pub use checkpoint::{
     TeamTaskPhase, TeamTaskWait, TeamWaitKind,
 };
 pub use data::TeamDataRef;
+pub use data_tools::TeamDatasetOffer;
 pub use list_tools::{
     TeamListApproval, TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamSharedList,
 };
@@ -121,6 +123,7 @@ pub struct TeamProcessRequest {
     /// changes it through the Team operation ledger. Ignored on routes without
     /// continuation support, where an interrupted write could not be finished.
     pub shared_list: Option<TeamSharedList>,
+    pub shared_data: Vec<TeamDatasetOffer>,
     /// Nobody asked the Bot for this task: offer it the tool that leaves the
     /// message unanswered. The task then ends as `Declined` and posts nothing.
     pub may_decline: bool,
@@ -389,7 +392,21 @@ impl TeamProcessStart {
         storage_root: &Path,
         request: TeamProcessRequest,
     ) -> Result<Self, TeamProcessError> {
-        Self::prepare_inner(storage_root, request, None)
+        Self::prepare_inner(storage_root, request, None, false)
+    }
+
+    /// Prepare a task-owned workspace for a tool-free private Data invocation.
+    pub fn prepare_private(
+        storage_root: &Path,
+        request: TeamProcessRequest,
+    ) -> Result<Self, TeamProcessError> {
+        if !protocol::private_data_scope(storage_root, &request.scope, &request.task_id)
+            || request.ask_requester || request.shared_list.is_some() || !request.shared_data.is_empty() || request.may_decline
+            || !request.knowledge.is_empty()
+        {
+            return Err(TeamProcessError::Protocol);
+        }
+        Self::prepare_inner(storage_root, request, None, true)
     }
 
     /// Prepare the continuation of an earlier epoch. The batch is never
@@ -404,15 +421,19 @@ impl TeamProcessStart {
         if !checkpoint::route_supports_continuation(request.model.route.model_protocol) {
             return Err(TeamProcessError::RouteUnsupported);
         }
-        Self::prepare_inner(storage_root, request, Some(continuation))
+        Self::prepare_inner(storage_root, request, Some(continuation), false)
     }
 
     fn prepare_inner(
         storage_root: &Path,
         request: TeamProcessRequest,
         continuation: Option<TeamContinuation>,
+        private_data: bool,
     ) -> Result<Self, TeamProcessError> {
         request.deadline.check()?;
+        if !private_data && storage_root.parent().and_then(Path::file_name).and_then(|name| name.to_str()) == Some("data-private") {
+            return Err(TeamProcessError::Protocol);
+        }
         let profile = TeamInvocationProfile::prepare(
             storage_root,
             request.scope,
@@ -421,7 +442,15 @@ impl TeamProcessStart {
             request.limits,
         )?
         .with_selected_model(request.model.clone());
+        let requester = if private_data {
+            Some(protocol::private_data_requester(storage_root, profile.scope(), &request.task_id)?)
+        } else {
+            None
+        };
         let batch: ChatInputBatch = request.input_batch_ref.read(storage_root)?;
+        if let Some(requester) = requester {
+            protocol::validate_private_data_input(&batch, &requester, &request.task_id)?;
+        }
         batch
             .validate(profile.session_id())
             .map_err(|_| TeamProcessError::Protocol)?;
@@ -462,6 +491,7 @@ impl TeamProcessStart {
                 .credentials
                 .for_worker(&profile.scope_root().join("home"))?,
             continuation,
+            private_data,
             ask_requester: request.ask_requester
                 && checkpoint::route_supports_continuation(protocol),
             shared_list: match request.shared_list {
@@ -474,6 +504,16 @@ impl TeamProcessStart {
                     Some(list)
                 }
                 _ => None,
+            },
+            shared_data: {
+                data_tools::validate_offers(&request.shared_data)?;
+                request.shared_data.into_iter().map(|mut offer| {
+                    offer.write &= checkpoint::route_supports_continuation(protocol);
+                    if !offer.write {
+                        offer.handoff_targets.clear();
+                    }
+                    offer
+                }).collect()
             },
             may_decline: request.may_decline,
             addressed: request.addressed,
@@ -591,6 +631,8 @@ impl TeamProcessStart {
                 broker_cancel,
                 &self.profile.scope_root().join("tmp"),
                 &self.bootstrap.task_id,
+                self.bootstrap.private_data,
+                &self.bootstrap.shared_data,
                 self.bootstrap
                     .shared_list
                     .as_ref()
@@ -645,6 +687,8 @@ async fn broker_exchange(
     cancel: CancellationToken,
     data_root: &Path,
     task_id: &str,
+    private_data: bool,
+    shared_data: &[TeamDatasetOffer],
     approval: TeamListApproval,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     use protocol::{ParentFrame, WorkerFrame};
@@ -679,6 +723,9 @@ async fn broker_exchange(
             }
 
             WorkerFrame::ReadChat { request } => {
+                if private_data {
+                    return Err(TeamProcessError::Protocol);
+                }
                 request.validate()?;
                 if !seen.insert(request.id.clone()) {
                     return Err(TeamProcessError::Protocol);
@@ -693,7 +740,14 @@ async fn broker_exchange(
                 }
             }
             WorkerFrame::Operate { request } => {
+                if private_data {
+                    return Err(TeamProcessError::Protocol);
+                }
                 request.validate(task_id, approval)?;
+                if matches!(request.tool, TeamOperationTool::DataRead | TeamOperationTool::DataWrite | TeamOperationTool::DataHandoff)
+                    && !data_tools::permitted(shared_data, request.tool, &request.arguments) {
+                    return Err(TeamProcessError::Protocol);
+                }
                 if !seen.insert(request.id.clone()) {
                     return Err(TeamProcessError::Protocol);
                 }
@@ -723,7 +777,7 @@ async fn broker_exchange(
                 }
             }
             WorkerFrame::Result { result } => {
-                protocol::validate_result(&result)?;
+                protocol::validate_result(&result, private_data)?;
                 // A terminal result is accepted only after clean stdout EOF.
                 if output.read(&mut unexpected).await? != 0 {
                     return Err(TeamProcessError::Protocol);

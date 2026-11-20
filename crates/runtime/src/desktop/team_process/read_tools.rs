@@ -102,7 +102,10 @@ impl TeamChatReadResult {
                 m.seq == 0
                     || m.created_at == 0
                     || m.change_seq == 0
-                    || (m.recalled == Some(true) && !m.text.is_empty())
+                    || (m.recalled == Some(true) && (!m.text.is_empty() || m.data_ref.is_some()))
+                    || m.data_ref
+                        .as_ref()
+                        .is_some_and(|reference| !reference.is_valid())
             })
         {
             return Err(TeamProcessError::Protocol);
@@ -142,16 +145,21 @@ impl TeamChatReadResult {
 pub(crate) struct TeamReadTools {
     pub(super) bridge: Arc<ChildInteraction>,
     pub(super) knowledge: Vec<TeamKnowledgeDocument>,
+    pub(super) private_data: bool,
     /// Present when this process may ask the task's requester a question.
     pub(super) ask: Option<Arc<super::ask_tool::AskRequester>>,
     /// Present when the Bot's publication shares a list with this Chat.
     pub(super) list: Option<Arc<super::list_tools::TeamListTools>>,
+    pub(super) data: Option<Arc<super::data_tools::TeamDataTools>>,
     /// Present when nobody asked the Bot for this task and it may stay silent.
     pub(super) no_reply: Option<Arc<super::decline_tool::NoReply>>,
 }
 impl TeamReadTools {
     /// Every tool this process offers the model, and nothing else.
     pub(crate) fn names(&self) -> Vec<String> {
+        if self.private_data {
+            return Vec::new();
+        }
         let mut names = vec!["TeamChatHistory".to_owned(), "TeamKnowledge".to_owned()];
         if self.ask.is_some() {
             names.push(super::checkpoint::ASK_TOOL.to_owned());
@@ -159,6 +167,15 @@ impl TeamReadTools {
         if let Some(list) = &self.list {
             names.push(super::checkpoint::LIST_READ_TOOL.to_owned());
             names.push(list.write_tool().to_owned());
+        }
+        if let Some(data) = &self.data {
+            names.push(super::data_tools::READ.to_owned());
+            if data.writable() {
+                names.push(super::data_tools::WRITE.to_owned());
+            }
+            if data.can_handoff() {
+                names.push(super::data_tools::HANDOFF.to_owned());
+            }
         }
         if self.no_reply.is_some() {
             names.push(super::checkpoint::NO_REPLY_TOOL.to_owned());
@@ -172,11 +189,17 @@ struct ReadTool {
     schema: Json,
 }
 pub(crate) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamReadTools>) {
+    if tools.private_data {
+        return;
+    }
     if let Some(ask) = &tools.ask {
         super::ask_tool::register(registry, ask.clone());
     }
     if let Some(list) = &tools.list {
         super::list_tools::register(registry, list.clone());
+    }
+    if let Some(data) = &tools.data {
+        super::data_tools::register(registry, data.clone());
     }
     if let Some(choice) = &tools.no_reply {
         super::decline_tool::register(registry, choice.clone());

@@ -111,6 +111,20 @@ fn strict_manifest_requires_schema_targets_known_capabilities() {
     }
 }
 #[test]
+fn manifest_round_trips_declared_data_aliases_without_dataset_identity() {
+    let mut value = manifest();
+    value["dataBindings"] = json!({"orders":"edit","activity":"read"});
+    let parsed = Manifest::parse(&value.to_string()).unwrap();
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap()["dataBindings"],
+        value["dataBindings"]
+    );
+    value["dataBindings"] = json!({"orders":{"dataset":"private"}});
+    assert!(Manifest::parse(&value.to_string()).is_err());
+    value["dataBindings"] = json!({"orders/other":"read"});
+    assert!(Manifest::parse(&value.to_string()).is_err());
+}
+#[test]
 fn app_owned_mcp_requires_desktop_targets_and_exact_release_consent() {
     let (_dir, library, request) = setup();
     let mut value = manifest();

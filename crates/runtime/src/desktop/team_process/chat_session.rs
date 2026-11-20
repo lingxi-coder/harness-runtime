@@ -675,7 +675,10 @@ pub fn recover_result(
         {
             let result: super::TeamProcessResult =
                 serde_json::from_value(value["result"].clone()).map_err(storage_error)?;
-            super::protocol::validate_result(&result)?;
+            super::protocol::validate_result(
+                &result,
+                super::protocol::private_data_scope(storage_root, scope, task_id),
+            )?;
             if result.cursor.scope.as_ref() != Some(scope) {
                 return Err(TeamProcessError::Protocol);
             }

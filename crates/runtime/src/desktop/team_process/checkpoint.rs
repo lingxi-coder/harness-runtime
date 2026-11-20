@@ -20,10 +20,11 @@ pub(super) const LIST_PROPOSE_TOOL: &str = "TeamListProposeChange";
 /// The Bot's choice to leave an unasked message unanswered. A call changes
 /// nothing outside the process, so an unfinished one is replayed like a read.
 pub(super) const NO_REPLY_TOOL: &str = "TeamNoReply";
-pub(super) const READ_ONLY_TOOLS: [&str; 4] = [
+pub(super) const READ_ONLY_TOOLS: [&str; 5] = [
     "TeamChatHistory",
     "TeamKnowledge",
     LIST_READ_TOOL,
+    super::data_tools::READ,
     NO_REPLY_TOOL,
 ];
 /// The one tool whose unfinished call is a question to the task's requester.
@@ -524,7 +525,7 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
             _ if inconsistent => (false, Some("transcript_inconsistent")),
             _ if pending_tool_calls.iter().any(|c| {
                 !c.read_only
-                    && ![ASK_TOOL, LIST_WRITE_TOOL, LIST_PROPOSE_TOOL]
+                    && ![ASK_TOOL, LIST_WRITE_TOOL, LIST_PROPOSE_TOOL, super::data_tools::WRITE, super::data_tools::HANDOFF]
                         .contains(&c.tool_name.as_str())
             }) =>
             {

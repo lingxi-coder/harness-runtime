@@ -47,6 +47,17 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     if bootstrap.version != 3 {
         return Err(TeamProcessError::Protocol);
     }
+    if bootstrap.private_data && (!protocol::private_data_scope(&bootstrap.storage_root, &bootstrap.scope, &bootstrap.task_id)
+        || bootstrap.continuation.is_some() || bootstrap.ask_requester || bootstrap.shared_list.is_some()
+        || !bootstrap.shared_data.is_empty() || bootstrap.may_decline)
+    {
+        return Err(TeamProcessError::Protocol);
+    }
+    let requester = if bootstrap.private_data {
+        Some(protocol::private_data_requester(&bootstrap.storage_root, &bootstrap.scope, &bootstrap.task_id)?)
+    } else {
+        None
+    };
     let model = bootstrap.model()?;
     let limits = bootstrap.limits()?;
     let batch: crate::desktop::session_state::team_chat::ChatInputBatch =
@@ -65,6 +76,12 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let knowledge: Vec<super::TeamKnowledgeDocument> =
         bootstrap.knowledge_ref.read(&bootstrap.storage_root)?;
     super::read_tools::validate_knowledge(&knowledge)?;
+    if let Some(requester) = requester {
+        if !knowledge.is_empty() {
+            return Err(TeamProcessError::Protocol);
+        }
+        protocol::validate_private_data_input(&batch, &requester, &bootstrap.task_id)?;
+    }
     for (key, value) in environment(profile.scope_root()) {
         if std::env::var_os(key).as_ref() != Some(&value) {
             return Err(TeamProcessError::Environment);
@@ -134,11 +151,22 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let no_reply = bootstrap
         .may_decline
         .then(|| Arc::new(super::decline_tool::NoReply::new(bootstrap.addressed)));
+    super::data_tools::validate_offers(&bootstrap.shared_data)?;
+    let data = (!bootstrap.shared_data.is_empty()).then(|| {
+        Arc::new(super::data_tools::TeamDataTools {
+            bridge: bridge.clone(),
+            offers: bootstrap.shared_data.clone(),
+            task_id: bootstrap.task_id.clone(),
+            source: Default::default(),
+        })
+    });
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
+        private_data: bootstrap.private_data,
         ask: ask.clone(),
         list: list.clone(),
+        data: data.clone(),
         no_reply: no_reply.clone(),
     }));
     let mut cfg = DesktopConfig::default();
@@ -155,7 +183,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,no_reply).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,no_reply,bootstrap.private_data).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -245,7 +273,9 @@ async fn run(
     protocol: lingxi_llm_client::protocol::ProtocolFamily,
     ask: Option<Arc<super::ask_tool::AskRequester>>,
     list: Option<Arc<super::list_tools::TeamListTools>>,
+    data: Option<Arc<super::data_tools::TeamDataTools>>,
     no_reply: Option<Arc<super::decline_tool::NoReply>>,
+    private_data: bool,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
         return Err(TeamProcessError::RouteUnsupported);
@@ -264,6 +294,13 @@ async fn run(
     if let Some(list) = &list {
         // A write is dispatched only once its call is on this file.
         let _ = list.source.set(super::list_tools::StepSource {
+            transcript: path.clone(),
+            scope: batch.scope(),
+            batch_id: batch.batch_id.clone(),
+        });
+    }
+    if let Some(data) = &data {
+        let _ = data.source.set(super::list_tools::StepSource {
             transcript: path.clone(),
             scope: batch.scope(),
             batch_id: batch.batch_id.clone(),
@@ -538,7 +575,7 @@ async fn run(
             TurnOutcome::MaxTurns => TeamProcessOutcome::MaxTurns,
             TurnOutcome::Cancelled => return Err(TeamProcessError::Cancelled),
         };
-        if text.len() > MAX_RESULT_TEXT {
+        if text.len() > if private_data { 8192 } else { MAX_RESULT_TEXT } {
             return Err(TeamProcessError::Protocol);
         }
         (outcome, text)
@@ -559,7 +596,7 @@ async fn run(
     let result = TeamProcessResult {
         version: 3,
         outcome,
-        document: if outcome == TeamProcessOutcome::Completed {
+        document: if outcome == TeamProcessOutcome::Completed && !private_data {
             Some(super::chat_session::document(&task_id, &text))
         } else {
             None
