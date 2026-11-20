@@ -57,6 +57,9 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// App data schema and compatible version range, if declared.
     pub data_schema: Option<DataSchema>,
+    /// Named dataset capabilities that must be bound by the current user.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub data_bindings: BTreeMap<String, DataBindingAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Remix permission and license information, if declared.
     pub remix: Option<Remix>,
@@ -316,6 +319,16 @@ fn check_step(
     }
     Ok(())
 }
+/// Maximum data access an app release can request for an alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataBindingAccess {
+    /// Read metadata, records and revisions.
+    Read,
+    /// Read and submit new revisions.
+    Edit,
+}
+
 impl Manifest {
     /// Public source packages cannot carry process environment credentials.
     /// The host must obtain runtime secrets separately, outside this manifest.
@@ -464,6 +477,17 @@ impl Manifest {
                     }
                 }
             }
+        }
+        if self.data_bindings.len() > 16
+            || self.data_bindings.keys().any(|alias| {
+                alias.is_empty()
+                    || alias.len() > 64
+                    || !alias
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            })
+        {
+            return Err(AppError::Invalid("invalid dataBindings aliases".into()));
         }
         if let Some(schema) = &self.data_schema {
             if schema.version == 0

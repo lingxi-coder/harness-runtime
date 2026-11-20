@@ -39,6 +39,7 @@ mod resume;
 mod retention;
 pub use crate::branch_recovery::capture_branch_recovery;
 pub use resume::capture_resume_cost;
+pub mod lingxi_data;
 mod storage_recovery;
 pub mod team_chat;
 mod tool_execution;

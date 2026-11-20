@@ -59,6 +59,9 @@ impl TeamSharedList {
 pub enum TeamOperationTool {
     ListRead,
     ListWrite,
+    DataRead,
+    DataWrite,
+    DataHandoff,
 }
 
 /// One request to the host's shared-list service. `logical_step_id` is present
@@ -87,7 +90,7 @@ impl TeamOperationRequest {
                 self.approval_ref.is_none() && self.arguments == serde_json::json!({})
             }
             (TeamOperationTool::ListWrite, Some(step)) => {
-                step.len() <= 200
+                valid_step(task_id, step)
                     && match approval {
                         TeamListApproval::None => self.approval_ref.is_none(),
                         TeamListApproval::Requester => {
@@ -95,14 +98,12 @@ impl TeamOperationRequest {
                                 == Some(super::checkpoint::wait_id(step).as_str())
                         }
                     }
-                    && step
-                        .strip_prefix(task_id)
-                        .and_then(|rest| rest.strip_prefix("/t"))
-                        .and_then(|rest| rest.split_once("/c"))
-                        .is_some_and(|(group, index)| {
-                            group.parse::<u32>().is_ok() && index.parse::<u32>().is_ok()
-                        })
                     && validate_write(&self.arguments).is_ok()
+            }
+            (TeamOperationTool::DataRead, None) | (TeamOperationTool::DataWrite | TeamOperationTool::DataHandoff, Some(_)) => {
+                self.approval_ref.is_none()
+                    && self.logical_step_id.as_deref().is_none_or(|step| valid_step(task_id, step))
+                    && super::data_tools::request_dataset(self.tool, &self.arguments).is_some()
             }
             _ => false,
         };
@@ -112,6 +113,14 @@ impl TeamOperationRequest {
             Err(TeamProcessError::Protocol)
         }
     }
+}
+
+fn valid_step(task_id: &str, step: &str) -> bool {
+    step.len() <= 200
+        && step.strip_prefix(task_id).and_then(|rest| rest.strip_prefix("/t"))
+            .and_then(|rest| rest.split_once("/c")).is_some_and(|(group, index)| {
+                group.parse::<u32>().is_ok() && index.parse::<u32>().is_ok()
+            })
 }
 
 /// The established outcome of a request. An outcome nobody could establish is
@@ -194,6 +203,22 @@ pub(super) struct StepSource {
     pub scope: BotChatScope,
     pub batch_id: String,
 }
+impl StepSource {
+    pub(super) async fn durable_step(&self, bridge: &ChildInteraction, task_id: &str, tool_use_id: &str) -> Option<String> {
+        for _ in 0..200 {
+            let transcript = std::fs::read_to_string(&self.transcript).unwrap_or_default();
+            if let Some(step) = super::checkpoint::pending_step(&self.scope, task_id, &self.batch_id, &transcript, tool_use_id) {
+                return Some(step);
+            }
+            tokio::select! {
+                biased;
+                () = bridge.cancel.cancelled() => return None,
+                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        }
+        None
+    }
+}
 pub(crate) struct TeamListTools {
     pub(super) bridge: Arc<ChildInteraction>,
     pub(super) list: TeamSharedList,
@@ -221,25 +246,7 @@ impl TeamListTools {
     /// that holds it is on the transcript file. A call that never becomes
     /// durable is never dispatched.
     async fn durable_step(&self, tool_use_id: &str) -> Option<String> {
-        let source = self.source.get()?;
-        for _ in 0..200 {
-            let transcript = std::fs::read_to_string(&source.transcript).unwrap_or_default();
-            if let Some(step) = super::checkpoint::pending_step(
-                &source.scope,
-                &self.task_id,
-                &source.batch_id,
-                &transcript,
-                tool_use_id,
-            ) {
-                return Some(step);
-            }
-            tokio::select! {
-                biased;
-                () = self.bridge.cancel.cancelled() => return None,
-                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-            }
-        }
-        None
+        self.source.get()?.durable_step(&self.bridge, &self.task_id, tool_use_id).await
     }
 }
 
@@ -270,7 +277,7 @@ pub(super) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamLis
         }));
     }
 }
-fn done(value: &serde_json::Value, is_error: bool) -> ToolCallResult {
+pub(super) fn done(value: &serde_json::Value, is_error: bool) -> ToolCallResult {
     ToolCallResult {
         data: generated_builtin_result(value),
         model_content: None,

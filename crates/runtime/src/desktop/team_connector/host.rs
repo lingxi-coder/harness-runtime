@@ -40,6 +40,7 @@ struct Start {
     continuation: Option<TeamContinuation>,
     ask_requester: Option<bool>,
     shared_list: Option<team_process::TeamSharedList>,
+    shared_data: Option<Vec<team_process::TeamDatasetOffer>>,
     may_decline: Option<bool>,
 }
 #[derive(Deserialize)]
@@ -64,7 +65,7 @@ impl Start {
         if self.version != 3
             || !matches!(
                 self.kind.as_str(),
-                "inspect_scope" | "inspect_result" | "inspect_task" | "run" | "continue"
+                "inspect_scope" | "inspect_result" | "inspect_task" | "run" | "run_private" | "continue"
             )
         {
             return Err(Error::Protocol);
@@ -82,6 +83,7 @@ impl Start {
             || self.continuation.is_some()
             || self.ask_requester.is_some()
             || self.shared_list.is_some()
+            || self.shared_data.is_some()
             || self.may_decline.is_some();
         let all = self.task_id.is_some()
             && self.invocation_id.is_some()
@@ -94,7 +96,7 @@ impl Start {
             && self.limits.is_some();
         if self.kind == "inspect_scope" && (any || self.task_id.is_some())
             || self.kind == "inspect_result" && (any || self.task_id.is_none())
-            || self.kind == "run" && (!all || self.continuation.is_some())
+            || matches!(self.kind.as_str(), "run" | "run_private") && (!all || self.continuation.is_some())
             || self.kind == "continue" && (!all || self.continuation.is_none())
         {
             return Err(Error::Protocol);
@@ -114,6 +116,7 @@ impl Start {
                 && self.continuation.is_none()
                 && self.ask_requester.is_none()
                 && self.shared_list.is_none()
+                && self.shared_data.is_none()
                 && self.may_decline.is_none();
             if !only_task_and_model {
                 return Err(Error::Protocol);
@@ -163,6 +166,7 @@ impl Start {
             )?,
             ask_requester: self.ask_requester.unwrap_or(false),
             shared_list: self.shared_list,
+            shared_data: self.shared_data.unwrap_or_default(),
             may_decline: self.may_decline.unwrap_or(false),
         })
     }
@@ -512,6 +516,7 @@ fn entry() -> Result<(), Error> {
         let continuation = boot.continuation.clone();
         let scope = boot.scope.clone();
         let protocol = boot.model.as_ref().ok_or(Error::Protocol)?.model_protocol;
+        let private_data = boot.kind == "run_private";
         let request = boot.request()?;
         let task_id = request.task_id.clone();
         bridge.authorize(bridge.cancel.child_token()).await?;
@@ -519,6 +524,7 @@ fn entry() -> Result<(), Error> {
             Some(continuation) => {
                 TeamProcessStart::prepare_continuation(&root, request, continuation)?
             }
+            None if private_data => TeamProcessStart::prepare_private(&root, request)?,
             None => TeamProcessStart::prepare(&root, request)?,
         };
         let result = start

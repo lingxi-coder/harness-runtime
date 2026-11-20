@@ -134,6 +134,8 @@ pub struct ChatSourceMessage {
     /// Set on a Bot's question to its requester and on the requester's answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_ref: Option<super::lingxi_data::DataRef>,
     /// The files the message carries. Their bytes are not here: see `ChatInputBatch::files`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ChatSourceAttachment>,
@@ -234,7 +236,13 @@ impl ChatInputBatch {
                 })
                 || !ids.insert(&message.message_id)
                 || (message.recalled == Some(true)
-                    && (!message.text.is_empty() || !message.attachments.is_empty()))
+                    && (!message.text.is_empty()
+                        || !message.attachments.is_empty()
+                        || message.data_ref.is_some()))
+                || message
+                    .data_ref
+                    .as_ref()
+                    .is_some_and(|reference| !reference.is_valid())
                 || message.attachments.len() > CHAT_FILES
                 || message.attachments.iter().any(|file| {
                     !file_facts(
@@ -477,6 +485,7 @@ mod tests {
                     artifact_id: None,
                     wait_id: None,
                     attachments: Vec::new(),
+                    data_ref: None,
                 })
                 .collect(),
         }
