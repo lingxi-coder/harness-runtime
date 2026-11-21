@@ -43,6 +43,11 @@ enum Request {
     Serve {
         path: String,
     },
+    ReadSource {
+        session_id: String,
+        id: String,
+        revision: u32,
+    },
     WriteState {
         token: String,
         generation: u64,
@@ -151,6 +156,24 @@ impl DesktopVisualizationHost {
                     "headers": response.headers,
                     "body_base64": base64::engine::general_purpose::STANDARD.encode(response.body),
                 })
+            }
+            Request::ReadSource {
+                session_id,
+                id,
+                revision,
+            } => {
+                let session = session_uuid(&session_id).ok_or("invalid visualization session")?;
+                let id = VisualizationId::parse(&id).ok_or("invalid visualization id")?;
+                let reference = VisualizationRef { id, revision };
+                match self
+                    .service
+                    .store()
+                    .read_revision(session, &reference)
+                    .await
+                {
+                    Ok(source) => json!({ "title": source.title, "html": source.fragment }),
+                    Err(_) => Value::Null,
+                }
             }
             Request::WriteState {
                 token,

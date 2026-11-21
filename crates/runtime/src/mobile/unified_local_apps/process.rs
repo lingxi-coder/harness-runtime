@@ -198,6 +198,7 @@ impl MobileLocalAppServiceHandle {
                 name: preparation.record.name.clone(),
                 revision: preparation.release.revision,
                 platform: self.target.lock().unwrap().platform.clone(),
+                dataset_bridge_origin: Arc::clone(&run.dataset_bridge_origin),
             }),
             run_id: run_id.clone(),
             root: PathBuf::from(&preparation.work_path),

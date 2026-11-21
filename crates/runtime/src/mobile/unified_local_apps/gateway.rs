@@ -46,6 +46,7 @@ pub(super) struct BrowserHost {
     pub name: String,
     pub revision: u64,
     pub platform: String,
+    pub dataset_bridge_origin: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[derive(Clone)]
@@ -1198,7 +1199,7 @@ where
         let Some(host) = &route.host else {
             return error(&mut socket, 503, "application host unavailable").await;
         };
-        let config = serde_json::json!({"appId":host.app_id,"name":host.name,"productName":branding::PRODUCT_NAME,"revision":host.revision,"hostPlatform":host.platform,"runId":route.run_id,"capabilities":route.capabilities,"services":route.services.keys().collect::<Vec<_>>()});
+        let config = serde_json::json!({"appId":host.app_id,"name":host.name,"productName":branding::PRODUCT_NAME,"revision":host.revision,"hostPlatform":host.platform,"runId":route.run_id,"capabilities":route.capabilities,"services":route.services.keys().collect::<Vec<_>>(), "datasetBridgeOrigin": host.dataset_bridge_origin.lock().ok().and_then(|origin| origin.clone())});
         let script = browser_sdk_script(&config.to_string());
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
         if method == "GET" {
@@ -1538,8 +1539,12 @@ fn security_headers(route: &Route) -> String {
     } else {
         "()"
     };
+    let bridge_origin = route.host.as_ref().and_then(|host|
+        host.dataset_bridge_origin.lock().ok().and_then(|origin| origin.clone()));
+    let frame_ancestors = bridge_origin.as_deref().unwrap_or("'none'");
+    let frame_options = if bridge_origin.is_none() { "X-Frame-Options: DENY\r\n" } else { "" };
     format!(
-        "Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-downloads allow-same-origin allow-top-navigation-to-custom-protocols; default-src 'self' data: blob:{remote_scripts}; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:{remote_scripts}; style-src 'self' 'unsafe-inline'{remote_scripts}; connect-src 'self' ws://127.0.0.1:{}{remote_sources}; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'\r\nPermissions-Policy: camera={camera}, microphone={microphone}, geolocation=()\r\nReferrer-Policy: same-origin\r\nX-Frame-Options: DENY\r\n",
+        "Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-downloads allow-same-origin allow-top-navigation-to-custom-protocols; default-src 'self' data: blob:{remote_scripts}; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:{remote_scripts}; style-src 'self' 'unsafe-inline'{remote_scripts}; connect-src 'self' ws://127.0.0.1:{}{remote_sources}; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors {frame_ancestors}\r\nPermissions-Policy: camera={camera}, microphone={microphone}, geolocation=()\r\nReferrer-Policy: same-origin\r\n{frame_options}",
         route.port
     )
 }
@@ -3064,6 +3069,7 @@ mod agent_control_lane_tests {
                 name: "Test App".into(),
                 revision: 1,
                 platform: "android".into(),
+                dataset_bridge_origin: Arc::new(std::sync::Mutex::new(None)),
             }),
             run_id: "epoch".into(),
             root: temp.path().into(),
@@ -3123,6 +3129,7 @@ mod agent_control_lane_tests {
                 name: "Test App".into(),
                 revision: 1,
                 platform: "android".into(),
+                dataset_bridge_origin: Arc::new(std::sync::Mutex::new(None)),
             }),
             run_id: "epoch".into(),
             root: temp.path().into(),

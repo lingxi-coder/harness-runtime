@@ -45,9 +45,16 @@ pub struct WorkflowAuthoringPromptFn;
 impl BundledPromptFn for WorkflowAuthoringPromptFn {
     fn build(
         &self,
-        _args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-        workflow::description::authoring_skill_prompt().into()
+        let prompt = workflow::description::authoring_skill_prompt();
+        match args.string_at("").map(str::trim) {
+            Some("datasets" | "dataset" | "数据集") => format!(
+                "{prompt}\n\n## Dataset workflows\n\nUse the host's approved Dataset references and declared actions. Keep the original logical run ID on retries. Review the audience before publishing; when it changes, pause for user approval. Load lingxi-api datasets when available."
+            )
+            .into(),
+            _ => prompt.into(),
+        }
     }
 }
 

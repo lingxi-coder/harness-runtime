@@ -30,6 +30,12 @@ actual model, folders and permissions in the creation form. A persona cannot
 grant access. Do not edit Bot storage, host configuration, router tokens or
 other Bots to create this one.
 
+If this Bot needs Dataset access, include its narrow purpose and expected
+actions in the persona. Have the user configure the actual Dataset reference,
+fields, partitions and handoff after creation using the host's run permissions.
+Private source previews stay inside the approved run. For the product
+workflow, use the bundled `lingxi-api datasets` topic when available.
+
 ## Present a usable draft
 
 Once there is enough information, briefly explain the proposed Bot and emit

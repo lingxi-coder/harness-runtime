@@ -58,6 +58,15 @@ The static example lists possible web targets; retain only the platforms the app
 
 For services, `venv` and step `cwd` are app-relative. Install/build commands terminate; named processes can run until stopped, fail, or their host ends, subject to the platform's lifecycle. `dependsOn` sets startup order and readiness uses an HTTP `path` or exact `output`. Obtain URLs with `await window.localApp.serviceUrl(serviceName)` and `await window.localApp.serviceSocketUrl(serviceName)` rather than hardcoded ports or saved run URLs; use the manifest's service name, and restart revokes the old run's service access. Declare only needed native capabilities and handle denial visibly. An `agent.tools` declaration is a capability requirement, not a grant. App pages never receive general host tools or provider credentials. App processes run with this device user's access; they are not isolated by a per-app Linux security sandbox.
 
+## Dataset access
+
+If an application needs a Dataset, use a manifest `dataBindings` alias with
+the host's supported access mode. The user binds that alias to an approved
+Dataset and installation in the native app. Use the host's authenticated
+bridge and preserve operation IDs across retries. Keep credential material
+outside page scripts, URLs, manifests and generated assets. See
+`lingxi-api datasets` where the bundled guide is available.
+
 ## Backend and native tools with standard MCP
 
 For Desktop tools, implement standard MCP using an official SDK. Reuse the app's validated business functions and durable data. Add `mcpServers` to the schema-2 manifest, declare `mcp` and `process` capabilities, and select Desktop `native` targets. For example, these fields declare a host-owned stdio server:

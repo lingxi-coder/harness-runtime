@@ -10,6 +10,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use private_page::document::{self, CONTENT_SECURITY_POLICY};
+use private_page::store::StoredPage;
 use private_page::{PageId, PageRef, PageStore};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -18,6 +19,7 @@ use serde_json::{json, Value};
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Serve { id: String, revision: u32 },
+    ReadSource { id: String, revision: u32 },
 }
 
 /// Answers `private_page` requests for one bridge process.
@@ -44,8 +46,20 @@ impl DesktopPrivatePageHost {
             .map_err(|_| "invalid private page request".to_string())?;
         let request: Request = serde_json::from_str(&source)
             .map_err(|_| "invalid private page request".to_string())?;
-        let Request::Serve { id, revision } = request;
-        let response = match document_for(&self.store, &id, revision).await {
+        let (id, revision) = match request {
+            Request::ReadSource { id, revision } => {
+                let response = stored_page(&self.store, &id, revision)
+                    .await
+                    .map_or(Value::Null, |page| json!({ "title": page.title, "html": page.fragment }));
+                return Utf16JsonProjection::from_serde_value(&response)
+                    .map_err(|_| "invalid private page response".to_string());
+            }
+            Request::Serve { id, revision } => (id, revision),
+        };
+        let body = stored_page(&self.store, &id, revision)
+            .await
+            .map(|page| document::wrap(&page.title, &page.fragment));
+        let response = match body {
             Some(body) => json!({
                 "status": 200,
                 "headers": [
@@ -71,13 +85,12 @@ impl DesktopPrivatePageHost {
     }
 }
 
-async fn document_for(store: &PageStore, id: &str, revision: u32) -> Option<String> {
+async fn stored_page(store: &PageStore, id: &str, revision: u32) -> Option<StoredPage> {
     if revision == 0 {
         return None;
     }
     let id = PageId::parse(id)?;
-    let stored = store.read(&PageRef { id, revision }).await.ok()?;
-    Some(document::wrap(&stored.title, &stored.fragment))
+    store.read(&PageRef { id, revision }).await.ok()
 }
 
 #[cfg(test)]

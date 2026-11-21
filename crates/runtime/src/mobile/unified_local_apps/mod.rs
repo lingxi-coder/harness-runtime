@@ -1,5 +1,6 @@
 //! Standalone mobile app service. Its lifetime, permissions and processes are
 //! independent of the active conversation and Firebase account.
+mod dataset_browser;
 mod gateway;
 mod process;
 
@@ -85,6 +86,7 @@ pub(super) struct ActiveRun {
     pub log_stop: CancellationToken,
     pub log_task_ids: Mutex<BTreeSet<String>>,
     pub url: Mutex<String>,
+    pub dataset_bridge_origin: Arc<Mutex<Option<String>>>,
     pub output: Mutex<BTreeMap<String, String>>,
     pub service_tasks: Mutex<Vec<String>>,
     pub lifecycle: AsyncMutex<()>,
@@ -1440,6 +1442,7 @@ impl MobileLocalAppServiceHandle {
             log_stop: CancellationToken::new(),
             log_task_ids: Mutex::new(BTreeSet::new()),
             url: Mutex::new(String::new()),
+            dataset_bridge_origin: Arc::new(Mutex::new(None)),
             output: Mutex::new(BTreeMap::new()),
             service_tasks: Mutex::new(Vec::new()),
             lifecycle: AsyncMutex::new(()),
@@ -2014,6 +2017,31 @@ impl MobileLocalAppServiceHandle {
             .await;
         agent_envelope(result.unwrap_or_else(|_| Err("agent_host_unavailable".into())))
     }
+    /// Trusted native code hands the one-use proof to the default browser through a separate loopback origin.
+    pub async fn dataset_browser_launch(
+        self: Arc<Self>,
+        app_id: String,
+        revision: u64,
+        bridge_origin: String,
+        proof: String,
+    ) -> String {
+        let result = EXECUTOR
+            .get()
+            .expect("app executor")
+            .spawn(async move {
+                self.dataset_bootstrap(&app_id, revision, &bridge_origin, &proof).await
+            })
+            .await;
+        match result {
+            Ok(Ok(url)) => json!({"ok":true,"value":{"url":url}}).to_string(),
+            Ok(Err(error)) => json!({"ok":false,"error":{"code":error.code,"message":error.message}}).to_string(),
+            Err(error) => {
+                let error = join_error(error);
+                json!({"ok":false,"error":{"code":error.code,"message":error.message}}).to_string()
+            }
+        }
+    }
+
     /// A stable JSON ABI keeps native bindings independent of evolving release
     /// structs. Invalid operations always produce an explicit error envelope.
     pub async fn request_json(self: Arc<Self>, request: String) -> String {

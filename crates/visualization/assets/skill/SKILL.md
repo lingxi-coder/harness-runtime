@@ -28,6 +28,12 @@ Skip it for short factual answers, plain code, or anything a sentence or a Markd
 4. Write the reference line the tool returns **on its own line** in your reply, exactly as returned, outside any code block or quote. Add your explanation before or after it. Without that line the widget only appears behind the tool call.
 5. To change a published widget, publish again with the same `id`. Every publish is a new immutable revision; earlier messages keep showing the revision they referenced. If you do not have the id, call `Visualization` with `action` set to `list` and no other fields. The list contains only this conversation.
 
+For a Dataset-backed widget, request only the fields and rows needed for the
+chart. For a separate shareable page, develop with the schema and synthetic
+samples. Publish through the host after the user reviews the package,
+recipient scope and allowed actions. Keep live records and credentials out
+of the package. See `lingxi-api datasets` where available.
+
 ## The sandbox
 
 - The widget runs offline in an isolated frame. It cannot load anything from the network: no CDN scripts, web fonts, remote images, `fetch`, `XMLHttpRequest` or WebSocket. Inline data and assets; `data:` URIs are fine.

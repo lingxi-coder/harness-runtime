@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 
 const MAX_SAFE: u64 = 9_007_199_254_740_991;
 fn id(value: &str) -> bool {
-    (8..=64).contains(&value.len())
+    value.len() >= 8 && data_id(value)
+}
+fn data_id(value: &str) -> bool {
+    (1..=64).contains(&value.len())
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
@@ -53,6 +56,14 @@ impl BotChatScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChatAuthor {
+    Task {
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(rename = "logicalRun")]
+        logical_run: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+    },
     User {
         uid: String,
         #[serde(rename = "displayName")]
@@ -136,6 +147,8 @@ pub struct ChatSourceMessage {
     pub wait_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_ref: Option<super::lingxi_data::DataRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_ref: Option<super::dataset_resource::ResourceRef>,
     /// The files the message carries. Their bytes are not here: see `ChatInputBatch::files`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ChatSourceAttachment>,
@@ -192,6 +205,16 @@ impl ChatInputBatch {
         let mut ids = std::collections::HashSet::new();
         for (index, message) in self.messages.iter().chain(&self.changes).enumerate() {
             let author_valid = match &message.author {
+                ChatAuthor::Task {
+                    task_id,
+                    logical_run,
+                    display_name,
+                } => {
+                    data_id(task_id)
+                        && data_id(logical_run)
+                        && !display_name.is_empty()
+                        && display_name.encode_utf16().count() <= 80
+                }
                 ChatAuthor::User { uid, display_name } => {
                     !uid.is_empty()
                         && uid.len() <= 128
@@ -238,7 +261,13 @@ impl ChatInputBatch {
                 || (message.recalled == Some(true)
                     && (!message.text.is_empty()
                         || !message.attachments.is_empty()
-                        || message.data_ref.is_some()))
+                        || message.data_ref.is_some()
+                        || message.resource_ref.is_some()))
+                || message
+                    .resource_ref
+                    .as_ref()
+                    .is_some_and(|reference| !reference.is_valid())
+                || (message.resource_ref.is_some() && message.data_ref.is_some())
                 || message
                     .data_ref
                     .as_ref()
@@ -486,6 +515,7 @@ mod tests {
                     wait_id: None,
                     attachments: Vec::new(),
                     data_ref: None,
+                    resource_ref: None,
                 })
                 .collect(),
         }
@@ -547,6 +577,32 @@ mod tests {
         assert_eq!(state.bot_chat_cursor().last_message_seq, 5);
         state.close_and_drain().await.unwrap();
         worker.await.unwrap();
+    }
+    #[test]
+    fn task_messages_validate_the_data_identifier_and_reference_contract() {
+        let mut value = serde_json::to_value(batch(0, 1, 0)).unwrap();
+        value["messages"][0]["author"] = serde_json::json!({
+            "kind": "task", "taskId": "t", "logicalRun": "r", "displayName": "Report"
+        });
+        value["messages"][0]["resourceRef"] = serde_json::json!({
+            "kind": "record", "dataset": "d", "record": "x", "revision": 1, "schemaVersion": 1
+        });
+        let validate = |wire: serde_json::Value| {
+            let input = serde_json::from_value::<ChatInputBatch>(wire).unwrap();
+            input.validate(input.scope().session_id().unwrap())
+        };
+        validate(value.clone()).unwrap();
+        for (field, invalid) in [("taskId", ""), ("logicalRun", "run/other")] {
+            let mut altered = value.clone();
+            altered["messages"][0]["author"][field] = serde_json::json!(invalid);
+            assert!(validate(altered).is_err());
+        }
+        let mut stale = value.clone();
+        stale["messages"][0]["resourceRef"]["revision"] = serde_json::json!(0);
+        assert!(validate(stale).is_err());
+        value["messages"][0]["recalled"] = serde_json::json!(true);
+        value["messages"][0]["text"] = serde_json::json!("");
+        assert!(validate(value).is_err());
     }
     #[test]
     fn strict_metadata_and_scope_reject_missing_times_old_keys_and_incomplete_input() {

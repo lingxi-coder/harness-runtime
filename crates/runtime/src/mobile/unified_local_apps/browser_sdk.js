@@ -1,7 +1,8 @@
 /* Served by the run-scoped LingXi loopback gateway. No native message bridge. */
 (() => {
-  if (window.top !== window || window.localApp) return;
   const config = __LINGXI_APP_CONFIGURATION__;
+  const bridgeOrigin = config.datasetBridgeOrigin;
+  if ((window.top !== window && !bridgeOrigin) || window.localApp) return;
   const productName = config.productName;
   if (typeof productName !== 'string' || !productName) {
     throw new TypeError('The Local App host must provide a product name.');
@@ -1606,6 +1607,35 @@
     }
   }
 
+  const dataWaiters = new Map();
+  if (bridgeOrigin && window.parent !== window) {
+    window.addEventListener('message', event => {
+      const reply = event.data;
+      if (event.source !== window.parent || event.origin !== bridgeOrigin || reply?.type !== 'lingxi.dataset.result') return;
+      const waiting = dataWaiters.get(reply.id);
+      if (!waiting) return;
+      dataWaiters.delete(reply.id);
+      clearTimeout(waiting.timeout);
+      if (reply.error) waiting.reject(makeError('The Dataset action could not be completed.', reply.error));
+      else waiting.resolve(reply.result);
+    });
+  }
+  const data = Object.freeze({
+    request(alias, command, operation) {
+      if (!bridgeOrigin || window.parent === window) return Promise.reject(makeError('Open this app with Dataset access.', 'DATA_BINDING_REQUIRED'));
+      if (dataWaiters.size >= 16) return Promise.reject(makeError('Too many pending Dataset requests.', 'DATA_QUOTA'));
+      const id = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          dataWaiters.delete(id);
+          reject(makeError('The Dataset request timed out.', 'DATA_UNAVAILABLE'));
+        }, 35000);
+        dataWaiters.set(id, { timeout, resolve, reject });
+        try { window.parent.postMessage({type:'lingxi.dataset.request', id, alias, command, operation}, bridgeOrigin); }
+        catch (error) { clearTimeout(timeout); dataWaiters.delete(id); reject(error); }
+      });
+    }
+  });
   const files = Object.freeze({pick: pickFiles});
   const host = Object.freeze({
     open: () => { location.href = 'lingxi://apps/' + encodeURIComponent(config.appId) + '?review=agent'; }
@@ -1620,7 +1650,7 @@
       runId: config.runId,
       recovery: {...recoveryState}
     }),
-    agent, files, host, serviceUrl,
+    agent, data, files, host, serviceUrl,
     serviceSocketUrl: async (name, path = '/') => serviceUrl(name, path).replace(/^http:/, 'ws:')
   })});
 

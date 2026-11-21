@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: LingXi (灵犀) product help. Create teams, chats or DMs, send messages, configure Bot Decision replies without @ (Bot 自主回复), publish or share Local Apps (共享 Local App), pair devices, or use the CLI and host APIs. For a new personal Bot use create-bot.
+description: LingXi (灵犀) product help. Create teams, chats or DMs, send messages, manage or share Datasets (数据集), configure Bot Decision replies without @ (Bot 自主回复), publish or share Local Apps (共享 Local App), pair devices, or use the CLI and host APIs. For a new personal Bot use create-bot.
 ---
 
 # LingXi API guide
@@ -22,6 +22,7 @@ topics load offline through `Skill`, without probing private folders or a CLI.
 | --- | --- |
 | [overview](references/overview.md) | Product surfaces, installable builds, command names |
 | [teams](references/teams.md) | Create or join a team, open a DM, group or channel, send a message, share a Bot |
+| [datasets](references/datasets.md) | Data picker, schema and records, fixed/latest/edit grants, Local App, visualization and Task bindings |
 | [accounts](references/accounts.md) | Host-global provider accounts and execution routing |
 | [configuration](references/configuration.md) | Settings, permission mode, MCP, hooks, plugins, skills, slash commands |
 | [media](references/media.md) | Camera, microphone, transcription, speech, live assistance |

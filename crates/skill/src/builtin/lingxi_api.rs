@@ -131,6 +131,7 @@ const TOPICS: &[Topic] = &[
     topic!("overview"),
     topic!("accounts"),
     topic!("teams"),
+    topic!("datasets"),
     topic!("configuration"),
     topic!("media"),
     topic!("webrtc"),
@@ -184,6 +185,7 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
     let canonical = match selector.as_str() {
         "team" => "teams",
         "bot" => "bots",
+        "dataset" | "数据集" => "datasets",
         "remote-control" => "webrtc",
         "local-apps" => "local-app",
         other => other,
@@ -196,7 +198,10 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
         .find(|topic| topic.id == canonical)
         .filter(|_| {
             selector == canonical
-                || matches!(selector.as_str(), "remote-control" | "local-apps")
+                || matches!(
+                    selector.as_str(),
+                    "remote-control" | "local-apps" | "dataset" | "数据集"
+                )
                 || natural.is_none()
                 || args[end..].iter().all(|unit| whitespace(*unit))
         });
@@ -251,6 +256,16 @@ mod tests {
     }
 
     #[test]
+    fn dataset_topic_loads_in_english_and_chinese() {
+        for args in ["datasets", "dataset how do I write?", "数据集 如何撤权？"] {
+            let result = render(body(), &args.into());
+            let text = result.string_at("").unwrap();
+            assert!(text.contains("# Datasets / 数据集"), "{args}");
+            assert!(text.contains("fixed/latest/edit grants"), "{args}");
+        }
+    }
+
+    #[test]
     fn empty_arguments_load_only_the_entrypoint() {
         for args in ["", " \t\n", "\u{3000}"] {
             assert_eq!(render(body(), &args.into()), body());
@@ -301,7 +316,8 @@ mod tests {
         }
         // The public handbook facts live in these same topics. Keep the
         // isolated guide under one bounded prompt.
-        assert!(text.chars().count() < 56_000, "guide context grew past 56k");
+        let chars = text.chars().count();
+        assert!(chars < 56_000, "guide context grew to {chars} characters");
     }
 
     #[test]
