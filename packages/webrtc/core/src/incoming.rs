@@ -9,13 +9,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use std::collections::VecDeque;
+
 use rtc::interceptor::Interceptor;
-use rtc::interceptor::NoopInterceptor;
 use rtc::interceptor::Packet;
 use rtc::interceptor::StreamInfo;
 use rtc::interceptor::TaggedPacket;
-use rtc::interceptor::interceptor;
-use rtc::sansio;
+use rtc::sansio::Protocol;
 use rtc::shared::error::Error;
 use rtc::shared::marshal::Marshal;
 use rtc::shared::marshal::MarshalSize;
@@ -53,10 +53,9 @@ pub struct Incoming {
     receiver: mpsc::Receiver<ReceivedRtp>,
 }
 
-#[derive(Interceptor)]
+/// The only interceptor in the chain: it consumes inbound RTP and passes outbound packets through.
 pub struct Ingress {
-    #[next]
-    next: NoopInterceptor,
+    writes: VecDeque<TaggedPacket>,
     state: Arc<State>,
     sender: mpsc::Sender<ReceivedRtp>,
     payload_type: u8,
@@ -80,7 +79,7 @@ impl Incoming {
                 receiver,
             },
             Ingress {
-                next: NoopInterceptor::new(),
+                writes: VecDeque::new(),
                 state,
                 sender,
                 payload_type: 111,
@@ -132,18 +131,21 @@ impl Incoming {
     }
 }
 
-#[interceptor]
-impl Ingress {
-    #[overrides]
+impl Protocol<TaggedPacket, TaggedPacket, ()> for Ingress {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
+
     fn handle_read(&mut self, message: TaggedPacket) -> Result<(), Self::Error> {
-        if let Packet::Rtp(packet) = &message.message {
-            if packet.header.payload_type == 96 {
-                if let Some(video) = &mut self.video {
-                    return video.handle_read(message);
-                }
-            }
+        if let Packet::Rtp(packet) = &message.message.packet
+            && packet.header.payload_type == 96
+            && let Some(video) = &mut self.video
+        {
+            return video.handle_read(message);
         }
-        let Packet::Rtp(packet) = message.message else {
+        let Packet::Rtp(packet) = message.message.packet else {
             return Ok(());
         };
         let epoch = self.state.epoch.load(Ordering::Acquire);
@@ -184,6 +186,26 @@ impl Ingress {
         // Consume here: no second copy is retained by the upstream track-event queue.
         Ok(())
     }
+
+    fn poll_read(&mut self) -> Option<Self::Rout> {
+        None
+    }
+
+    fn handle_write(&mut self, message: TaggedPacket) -> Result<(), Self::Error> {
+        self.writes.push_back(message);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<Self::Wout> {
+        self.writes.pop_front()
+    }
+}
+
+impl Interceptor for Ingress {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
 
 #[cfg(test)]

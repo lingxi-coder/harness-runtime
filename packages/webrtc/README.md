@@ -64,7 +64,7 @@ Stop with docker compose down.
 ## Current evidence (2026-10-16)
 
 The Rust transport compiles for aarch64-apple-ios and aarch64-linux-android.
-The narrowly scoped nix target fix is described in vendor/README.md.
+webrtc and rtc come from crates.io (0.21.1); nix 0.31.4 includes the iOS target guards the earlier fork carried.
 A real host-to-Docker test returned 16384 arbitrary binary bytes unchanged.
 Reproduce it after starting Compose:
 

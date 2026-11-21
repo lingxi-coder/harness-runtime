@@ -229,18 +229,18 @@ fn run(
         let mut heartbeat_due = Instant::now() + Duration::from_secs(5);
         let mut heartbeat_wait = None::<Instant>;
         while !probe.stop.load(Ordering::Acquire) {
-            if probe.speaker_test_requested.swap(false, Ordering::AcqRel) {
-                if !matches!(
+            if probe.speaker_test_requested.swap(false, Ordering::AcqRel)
+                && !matches!(
                     tokio::time::timeout(
                         Duration::from_millis(250),
                         peer.send_bytes(b"lingxi-webrtc-speaker-test-v1")
                     )
                     .await,
                     Ok(Ok(()))
-                ) {
-                    probe.failure.store(-1225, Ordering::Release);
-                    break;
-                }
+                )
+            {
+                probe.failure.store(-1225, Ordering::Release);
+                break;
             }
             if !peer.is_ready() {
                 probe.failure.store(-1225, Ordering::Release);
@@ -498,10 +498,10 @@ pub unsafe extern "C" fn lingxi_webrtc_probe_close(handle: *mut Arc<Probe>) {
     }
     let probe = unsafe { Box::from_raw(handle) };
     probe.stop.store(true, Ordering::Release);
-    if let Ok(mut thread) = probe.thread.lock() {
-        if let Some(thread) = thread.take() {
-            let _ = thread.join();
-        }
+    if let Ok(mut thread) = probe.thread.lock()
+        && let Some(thread) = thread.take()
+    {
+        let _ = thread.join();
     }
 }
 /// # Safety

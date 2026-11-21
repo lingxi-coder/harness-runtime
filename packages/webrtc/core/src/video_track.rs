@@ -28,21 +28,24 @@ impl VideoTrack {
             VideoSource::Camera => "camera",
             VideoSource::Screen => "screen",
         };
-        let track = TrackLocalStaticSample::new(MediaStreamTrack::new(
-            "lingxi".into(),
-            format!("{label}-{ssrc}"),
-            label.into(),
-            RtpCodecKind::Video,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(ssrc),
+        let track = TrackLocalStaticSample::new(
+            std::time::Instant::now(),
+            MediaStreamTrack::new(
+                "lingxi".into(),
+                format!("{label}-{ssrc}"),
+                label.into(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        ..Default::default()
+                    },
+                    codec,
+                    active: true,
                     ..Default::default()
-                },
-                codec,
-                active: true,
-                ..Default::default()
-            }],
-        ))
+                }],
+            ),
+        )
         .map_err(|_| "video track creation failed")?;
         Ok(Self {
             track: Arc::new(track),
@@ -79,7 +82,7 @@ impl VideoTrack {
                 &Sample {
                     data: data.into(),
                     duration,
-                    ..Default::default()
+                    ..Sample::new(std::time::Instant::now())
                 },
                 &[],
             ),

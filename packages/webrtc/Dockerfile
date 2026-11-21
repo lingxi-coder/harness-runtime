@@ -1,7 +1,6 @@
 FROM rust:1.94-slim-bookworm AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY vendor ./vendor
 COPY media ./media
 COPY mobile ./mobile
 COPY core ./core
