@@ -1,0 +1,26 @@
+{
+  "source_commit": "41f66b3b4fe6a7b0587507d8a5664e1d97554eb5",
+  "baseline_commit": "2034414b827e8819766e738e47c4f41ccac60696",
+  "compose_blob": "87bcd4d1490d62b2785ff43813de490c6166ba62",
+  "compose_sha256": "588288a00a1dec3f0f88f8b9bfe1347752f45a650838550e18a2bc380fa605a8",
+  "core_tree": "e929f14ac74985702c2b15c4ec89320c06f796b7",
+  "nested_lock_blob": "d0377f6ec3a430ec6e45e838c3f8a5f9679a4b75",
+  "cached_core_binary_build_commit": "b75ef329600cd7bfb8dd9148b267b04818700407",
+  "cached_core_binary_sha256": "13b3d436793802a8969a9c00b6a1080db7a20a4e83765aef738b3f6dba0a1ad8",
+  "coturn_image_id": "sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+  "files": {
+    "compose-after.json": "ffa7ebfe86db62c014156f77287474a887b521797cf0a51ca8e59b6a5f82249a",
+    "compose-before.json": "dac6f0a483a7357d7aaee45edd351a76049984fe4a7aebed810a2b9d59178423",
+    "container.json": "b4f42573017f1fbd57fda54eadb7d783441d2716d7c9eb284357c4dac2e39e53",
+    "fixture.log.gz": "af5e19b2477387ddb88d2119b90d43d0c5738db04c5a0fa9730a0b8c333eb487",
+    "runner.log.gz": "c0cbbc889110704cfa850b1ee8605d0f35b5319ef68b2f3a4cf58a3f5e8755de",
+    "tests.log.gz": "293007a87a33749bf76fe8aff25772a3719b444898f8a9066198b15e6ca29366",
+    "verify.sh.gz": "fbc12e7173e3c1ac511c623c780798d6f74a2d6ef7408bf9ad711e3fc5468bad"
+  },
+  "uncompressed_sha256": {
+    "runner.log": "fad43175038dbaa09b9300ec1b81e5212f9695adcca376a985689acae1f18620",
+    "tests.log": "023296b92b908a0e292babca78d7e43a9253444ad376fae6bd4fd2cc0379f549",
+    "fixture.log": "6a026ffca418e031b3a312cc527a6cdf4eebabb5e6b5e903d4b7a78641457671",
+    "verify.sh": "381bb68b5124801508010a564894a7eabb84ca32bbef419034493245ae4857ed"
+  }
+}

@@ -3,5 +3,4 @@ resolver = "2"
 members = ["core", "test-server", "media", "mobile"]
 
 [patch.crates-io]
-webrtc = { path = "vendor/webrtc" }
 nix = { path = "vendor/nix" }

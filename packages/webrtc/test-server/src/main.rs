@@ -230,7 +230,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/answer", post(answer))
         .layer(DefaultBodyLimit::max(70 * 1024))
         .with_state(app);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    let bind_address =
+        std::env::var("WEBRTC_TEST_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let listener = tokio::net::TcpListener::bind(bind_address).await?;
     axum::serve(listener, router).await?;
     Ok(())
 }

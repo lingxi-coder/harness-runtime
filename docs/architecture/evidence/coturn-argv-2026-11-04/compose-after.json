@@ -1,0 +1,180 @@
+{
+  "name": "lingxi-rtc021-argv-check",
+  "networks": {
+    "default": {
+      "name": "lingxi-rtc021-argv-check_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "turn": {
+      "cap_add": [
+        "NET_BIND_SERVICE"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "-n",
+        "-v",
+        "--pidfile=/tmp/turnserver.pid",
+        "--log-file=stdout",
+        "--listening-port=3478",
+        "--external-ip=127.0.0.1",
+        "--min-port=50100",
+        "--max-port=50115",
+        "--realm=lingxi-local-test",
+        "--lt-cred-mech",
+        "--user=lingxi-test:local-turn-test-password",
+        "--fingerprint",
+        "--no-tls",
+        "--no-multicast-peers",
+        "--allow-loopback-peers"
+      ],
+      "entrypoint": [
+        "turnserver"
+      ],
+      "image": "coturn/coturn:4.18.0-r0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 3478,
+          "published": "3478",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 3478,
+          "published": "3478",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50100,
+          "published": "50100",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50101,
+          "published": "50101",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50102,
+          "published": "50102",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50103,
+          "published": "50103",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50104,
+          "published": "50104",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50105,
+          "published": "50105",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50106,
+          "published": "50106",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50107,
+          "published": "50107",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50108,
+          "published": "50108",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50109,
+          "published": "50109",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50110,
+          "published": "50110",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50111,
+          "published": "50111",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50112,
+          "published": "50112",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50113,
+          "published": "50113",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50114,
+          "published": "50114",
+          "protocol": "udp"
+        },
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 50115,
+          "published": "50115",
+          "protocol": "udp"
+        }
+      ],
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/var/lib/coturn",
+        "/tmp",
+        "/var/run"
+      ]
+    }
+  }
+}

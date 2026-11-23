@@ -39,6 +39,9 @@ curl http://127.0.0.1:18080/health
 ```
 
 All signaling requests require Authorization: Bearer <LINGXI_TEST_TOKEN>.
+When running the test server directly, `WEBRTC_TEST_BIND_ADDR` can select a
+different listening address; the default is `0.0.0.0:8080`. Set
+`WEBRTC_TEST_ENDPOINT` to the same address when running the probe directly.
 POST /offer returns {id,sdp}. An answering peer applies the offer, creates an
 answer, finishes ICE gathering, then POSTs {id,sdp} to /answer. The peer accepts
 the server-created lingxi-agent channel; received bytes are echoed as
@@ -116,4 +119,4 @@ and receive queue, a bounded non-trickle gathering wait (default 3 s, returns th
 candidates gathered so far), remote mDNS `.local` candidate resolution
 (`MdnsMode::QueryOnly`, also the voice default) and a prompt channel-close signal
 on `close()`. The receive queue closes the channel on overflow
-(`receive_overflowed()`); the pinned driver cannot back-pressure receives.
+(`receive_overflowed()`).
