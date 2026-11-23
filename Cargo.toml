@@ -174,11 +174,11 @@ repository = "https://github.com/lingxi-coder/harness-runtime"
 [workspace.dependencies]
 lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "63c8f7663b7cba7466538213f86c6df4a30442a9", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
-mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5dd627e1049ba85e0563b7f351f79b00267c58c3" }
-mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5dd627e1049ba85e0563b7f351f79b00267c58c3" }
-mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5dd627e1049ba85e0563b7f351f79b00267c58c3" }
-mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5dd627e1049ba85e0563b7f351f79b00267c58c3" }
-platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5dd627e1049ba85e0563b7f351f79b00267c58c3" }
+mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "224cc6b272e1e8ee4385a03efd34bd79b18fd8ce" }
+mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "224cc6b272e1e8ee4385a03efd34bd79b18fd8ce" }
+mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "224cc6b272e1e8ee4385a03efd34bd79b18fd8ce" }
+mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "224cc6b272e1e8ee4385a03efd34bd79b18fd8ce" }
+platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "224cc6b272e1e8ee4385a03efd34bd79b18fd8ce" }
 
 # Single source of truth for the product namespace (paths, filenames, env
 # prefix, brand name). Path is workspace-root-relative so every member uses
