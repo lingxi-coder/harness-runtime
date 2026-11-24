@@ -131,6 +131,7 @@ const TOPICS: &[Topic] = &[
     topic!("overview"),
     topic!("accounts"),
     topic!("teams"),
+    topic!("friends"),
     topic!("datasets"),
     topic!("configuration"),
     topic!("media"),
@@ -183,7 +184,8 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
     let selector = String::from_utf16(&args[..end]).ok();
     let selector = selector.as_deref().unwrap_or("").to_ascii_lowercase();
     let canonical = match selector.as_str() {
-        "team" => "teams",
+        "team" | "channel" | "channels" | "频道" => "teams",
+        "friend" | "好友" => "friends",
         "bot" => "bots",
         "dataset" | "数据集" => "datasets",
         "remote-control" => "webrtc",
@@ -200,7 +202,7 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
             selector == canonical
                 || matches!(
                     selector.as_str(),
-                    "remote-control" | "local-apps" | "dataset" | "数据集"
+                    "remote-control" | "local-apps" | "dataset" | "数据集" | "好友" | "频道"
                 )
                 || natural.is_none()
                 || args[end..].iter().all(|unit| whitespace(*unit))
@@ -266,6 +268,79 @@ mod tests {
     }
 
     #[test]
+    fn friend_and_channel_selectors_load_their_topics() {
+        for (args, topic, fact) in [
+            ("friends", "friends", "**Let people find me by email**"),
+            ("friend how do I add someone?", "friends", "My friend link"),
+            ("好友 如何拉黑？", "friends", "Blocked people"),
+            ("channel", "teams", "New channel"),
+            ("频道 如何创建？", "teams", "Create channel"),
+        ] {
+            let result = render(body(), &args.into());
+            let text = result.string_at("").unwrap();
+            assert!(
+                text.contains(&format!("## Bundled resource: `references/{topic}.md`")),
+                "{args}"
+            );
+            assert_eq!(text.matches("## Bundled resource:").count(), 1, "{args}");
+            assert!(text.contains(fact), "{args} missing {fact}");
+        }
+    }
+
+    #[test]
+    fn product_topics_state_the_shipped_controls() {
+        for (topic, facts) in [
+            (
+                "teams",
+                &[
+                    "**Make owner**",
+                    "1–50 uses",
+                    "200 members",
+                    "Invite friends",
+                    "Recall",
+                ][..],
+            ),
+            (
+                "friends",
+                &[
+                    "without your approval",
+                    "Unblocking does not restore the friendship",
+                    "one Bot DM per",
+                    "**Team invitations**",
+                    "500",
+                ][..],
+            ),
+            (
+                "bots",
+                &[
+                    "**Publish a",
+                    "**All current and future members**",
+                    "UTC",
+                    "**Take",
+                    "**Bot Dataset permission**",
+                ][..],
+            ),
+            (
+                "datasets",
+                &[
+                    "**Use fixed version**",
+                    "**See latest**",
+                    "**Edit together**",
+                    "`dataBindings`",
+                    "**Data sources**",
+                    "**Bind Dataset**",
+                ][..],
+            ),
+        ] {
+            let result = render(body(), &topic.into());
+            let text = result.string_at("").unwrap();
+            for fact in facts {
+                assert!(text.contains(fact), "{topic} missing {fact}");
+            }
+        }
+    }
+
+    #[test]
     fn empty_arguments_load_only_the_entrypoint() {
         for args in ["", " \t\n", "\u{3000}"] {
             assert_eq!(render(body(), &args.into()), body());
@@ -315,9 +390,9 @@ mod tests {
             assert!(text.contains(&branding::render_namespace_template(topic.content)));
         }
         // The public handbook facts live in these same topics. Keep the
-        // isolated guide under one bounded prompt.
+        // isolated guide under one bounded prompt (about 20k tokens).
         let chars = text.chars().count();
-        assert!(chars < 56_000, "guide context grew to {chars} characters");
+        assert!(chars < 76_000, "guide context grew to {chars} characters");
     }
 
     #[test]

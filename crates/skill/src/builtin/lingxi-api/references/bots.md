@@ -60,6 +60,39 @@ panel, or publish to a team's Bot directory. A hosted service (`/services`)
 serves its chosen audience. A Bot Market recipient installs a personal copy
 and chooses their own model and resources.
 
+## Publish to a team or a friend
+
+On the Mac that hosts the Bot, open the team details → Bots → **Publish a
+Desktop Bot** (for a friend: Desktop → the friend chat → Shared Bots). Load
+the local Bots, choose the Bot and model and write the **Published role**:
+only that explicit role is shared. Private memory and conversations are
+excluded, and only plain-text Skills are supported.
+Choose who may use it (**All current and future members**, or **Maintainer
+and selected memberships**), the read-only files it may use, and the UTC
+daily request quotas for the team, each member and the Bot. Then **Review
+publication** and **Confirm publication**. Shared files stay shared until
+replaced or removed. Removing one stops requests that started with it.
+
+The maintainer's Mac answers with the maintainer's model account and cost.
+The maintainer can read every conversation that includes the Bot; members
+cannot approve its tools. While the Mac is offline requests queue. When a
+quota runs out, the member sees a request-limit error until the next UTC day.
+**Stop sharing** blocks new requests and keeps existing conversations;
+publishing again restores access. Decision auto-reply is a separate per-Bot
+publication option; see `teams`.
+
+**Hand over…** offers a published team Bot to another member. They receive
+only the published role and its shared files and have seven days to **Take
+over** on their own Mac, choosing one of their Bots to answer with their
+model account. Until then the original maintainer keeps it and can **Take
+back** the offer. Earlier conversations stay readable only to their people
+and the old maintainer. Audience, quotas and shared lists stay unchanged.
+
+For Dataset access, a maintainer opens **Bot Dataset permission** in the
+conversation, enters the Dataset ID and task plan, reviews and approves it.
+The approval covers the current published Bot in that conversation only and
+can be revoked there; see `datasets`.
+
 For a missing reply, identify the conversation and read its visible status.
 Check host availability, publication, permission and quota. In a team, open
 the task card for a wait or failure. When a shared Bot and the conversation

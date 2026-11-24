@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: LingXi (灵犀) product help. Create teams, chats or DMs, send messages, manage or share Datasets (数据集), configure Bot Decision replies without @ (Bot 自主回复), publish or share Local Apps (共享 Local App), pair devices, or use the CLI and host APIs. For a new personal Bot use create-bot.
+description: LingXi (灵犀) product help. Create teams, chats or DMs, add friends (好友), send messages, manage or share Datasets (数据集), configure Bot Decision replies without @ (Bot 自主回复), publish or share Local Apps (共享 Local App), pair devices, or use the CLI and host APIs. For a new personal Bot use create-bot.
 ---
 
 # LingXi API guide
@@ -21,14 +21,15 @@ topics load offline through `Skill`, without probing private folders or a CLI.
 | Topic | Read when the question concerns |
 | --- | --- |
 | [overview](references/overview.md) | Product surfaces, installable builds, command names |
-| [teams](references/teams.md) | Create or join a team, open a DM, group or channel, send a message, share a Bot |
-| [datasets](references/datasets.md) | Data picker, schema and records, fixed/latest/edit grants, Local App, visualization and Task bindings |
+| [teams](references/teams.md) | Create or join a team, roles and invites, open a DM, group or channel, send, edit or recall a message, Team Bots, lists and documents |
+| [friends](references/friends.md) | Add a friend by username, email or friend link, requests, block or remove, share a Bot with a friend, invite a friend to a team |
+| [datasets](references/datasets.md) | Data picker, schema and records, fixed/latest/edit grants, data sources and reports, Local App, visualization, Bot and Task bindings |
 | [accounts](references/accounts.md) | Host-global provider accounts and execution routing |
 | [configuration](references/configuration.md) | Settings, permission mode, MCP, hooks, plugins, skills, slash commands |
 | [media](references/media.md) | Camera, microphone, transcription, speech, live assistance |
 | [remote-control](references/webrtc.md) | Pair your devices and continue a host session. Also accepts `webrtc` |
 | [local-app](references/local-app.md) | Publish on Desktop or Mobile, make a market listing public, share a source ZIP privately, or open a running app on a paired device |
-| [bots](references/bots.md) | Create a personal Bot, choose who can use it, configure Decision, diagnose missing replies, delegate |
+| [bots](references/bots.md) | Create a personal Bot, publish it to a team or friend, audience and quotas, hand over, configure Decision, diagnose missing replies, delegate |
 | [devices](references/devices.md) | Computer Use, browser, Android automation, native device tools |
 | [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs |
 | [sessions](references/sessions.md) | Resume, instruction files, config home, history, memory |
