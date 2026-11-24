@@ -40,7 +40,7 @@ desktop = [
     "dep:msgqueue",
     "tokio/io-util",
     "dep:uuid",
-    "dep:chrono",
+    "dep:jiff",
     "dep:jsonrpc",
     "dep:branding",
     "command-api/builtin-handlers",
@@ -102,7 +102,7 @@ desktop = [
     "dep:platform-windows",
 ]
 mobile = [
-    "dep:chrono",
+    "dep:jiff",
     "dep:httparse",
     "dep:tempfile",
     "dep:jsonschema",
@@ -196,7 +196,7 @@ decision-api = { path = "../decision-api" }
 jsonschema = { version = "=0.46.10", default-features = false, optional = true }
 media-runtime = { path = "../media-runtime" }
 media-api.workspace = true
-chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
+jiff = { workspace = true, optional = true }
 
 mobile-linux-api.workspace = true
 

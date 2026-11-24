@@ -158,7 +158,7 @@ pub fn run_list(plugins_dir: &Path, json: bool) -> String {
 /// Current UTC time as ISO-8601 with millisecond precision + `Z`
 /// (`2026-07-04T12:04:33.514Z`), matching the registry's `lastUpdated`.
 fn iso_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    format!("{:.3}", jiff::Timestamp::now())
 }
 
 /// Write the registry map back (pretty, NO trailing newline — matching the

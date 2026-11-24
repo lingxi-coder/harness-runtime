@@ -930,9 +930,10 @@ fn replay_captured_session_inner(
         display_timestamps: display_entries
             .iter()
             .filter_map(|row| {
-                chrono::DateTime::parse_from_rfc3339(&row.timestamp)
+                row.timestamp
+                    .parse::<jiff::Timestamp>()
                     .ok()
-                    .map(|at| (row.uuid.clone(), at.timestamp_millis()))
+                    .map(|at| (row.uuid.clone(), at.as_millisecond()))
             })
             .collect(),
         display_history: display_state.history,
@@ -1459,9 +1460,12 @@ fn build_state_from_jsonl_with_text_projection(
                 // Message timing is a session sidecar, not part of the frozen
                 // ConversationMessage wire shape. Legacy or malformed rows
                 // leave it absent, making time-based microcompact a safe no-op.
-                if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&m.timestamp) {
-                    let committed_at: std::time::SystemTime =
-                        parsed.with_timezone(&chrono::Utc).into();
+                if let Some(committed_at) = m
+                    .timestamp
+                    .parse::<jiff::Timestamp>()
+                    .ok()
+                    .and_then(|parsed| std::time::SystemTime::try_from(parsed).ok())
+                {
                     if match state.message_timing.last_assistant_at {
                         Some(current) => committed_at > current,
                         None => true,

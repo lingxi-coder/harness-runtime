@@ -60,7 +60,7 @@ fn registry_error_kind(error: &str) -> &'static str {
 
 /// Now as ISO-8601 with milliseconds + `Z`.
 fn iso_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    format!("{:.3}", jiff::Timestamp::now())
 }
 
 fn current_thread_runtime() -> tokio::runtime::Runtime {
@@ -756,7 +756,7 @@ async fn materialize_external_plugin_source_with_bus(
                 .ok_or_else(|| "invalid plugin source cache destination".to_string())?;
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("failed to create plugin source cache: {error}"))?;
-            let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+            let nonce = i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or_default();
             let staging = parent.join(format!(".source-{}-{nonce}", std::process::id()));
             let work = staging.join("work");
             let _ = std::fs::remove_dir_all(&staging);
@@ -1900,7 +1900,7 @@ fn stage_and_publish_cache_dir(
     let staging = parent.join(format!(
         ".staged-{}-{}",
         std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or_default()
     ));
     let _ = std::fs::remove_dir_all(&staging);
     if let Err(error) = copy_dir(source, &staging) {
@@ -1926,7 +1926,7 @@ fn stage_and_publish_cache_dir(
         parent.join(format!(
             ".backup-{}-{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or_default()
         ))
     });
     if let Some(backup_path) = &backup {
@@ -2187,7 +2187,7 @@ async fn run_install_inner(
             ".{}.install-{}-{}",
             sanitize(name, false),
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or_default()
         ));
         let _ = std::fs::remove_dir_all(&staging);
         if let Err(error) = copy_dir(&plugin_src, &staging) {

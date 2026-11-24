@@ -109,14 +109,14 @@ async fn session_usage_api_returns_live_snapshot_and_validates_native_arguments(
     assert_eq!(usage["rateLimits"].as_array().unwrap().len(), 1);
     assert_eq!(usage["rateLimits"][0]["kind"], "five_hour");
     assert_eq!(usage["rateLimits"][0]["percentUsed"].as_f64(), Some(42.0));
-    let expected_reset =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(i64::try_from(active_reset).unwrap(), 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let expected_reset = format!(
+        "{:.3}",
+        jiff::Timestamp::from_second(i64::try_from(active_reset).unwrap()).unwrap()
+    );
     assert_eq!(usage["rateLimits"][0]["resetsAt"], expected_reset);
     assert_eq!(usage["cost"]["usd"].as_f64(), Some(0.0));
     let started_at = usage["startedAt"].as_str().expect("ISO startedAt");
-    chrono::DateTime::parse_from_rfc3339(started_at).unwrap();
+    started_at.parse::<jiff::Timestamp>().unwrap();
 
     // `columns` has no effect unless `breakdown` requests contextData.
     assert_eq!(columns_only["context"], usage["context"]);

@@ -27,7 +27,7 @@ url = "2"
 thiserror.workspace = true
 # Current month/year for the WebSearch description's runtime date slot
 # (claude-code computes it at render time; format "<Month> <Year>").
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+jiff = { workspace = true }
 
 [features]
 # Enables HTML→markdown conversion + the small-fast apply step. OFF by default

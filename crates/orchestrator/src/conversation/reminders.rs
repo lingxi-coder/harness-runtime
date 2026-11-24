@@ -2130,7 +2130,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             .silent_turn_reminder_marks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let timestamps = self
             .prompt_runtime
             .silent_turn_message_timestamps

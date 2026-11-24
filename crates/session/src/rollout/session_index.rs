@@ -6,7 +6,6 @@
 //! file from the end so the newest name is found first without rewriting.
 
 use crate::rollout::record::ThreadId;
-use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -33,7 +32,7 @@ pub async fn append_thread_name(
     thread_id: ThreadId,
     name: &str,
 ) -> std::io::Result<()> {
-    let updated_at = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let updated_at = format!("{:.0}", jiff::Timestamp::now());
     let entry = SessionIndexEntry {
         id: thread_id,
         thread_name: name.to_string(),

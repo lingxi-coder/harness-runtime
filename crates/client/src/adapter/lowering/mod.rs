@@ -96,9 +96,9 @@ pub fn system_time_to_rfc3339(t: SystemTime) -> String {
         .unwrap_or(0);
     #[allow(clippy::cast_possible_wrap)]
     let secs_i64 = secs as i64;
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs_i64, 0).map_or_else(
-        || "1970-01-01T00:00:00Z".to_string(),
-        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    jiff::Timestamp::from_second(secs_i64).map_or_else(
+        |_| "1970-01-01T00:00:00Z".to_string(),
+        |dt| dt.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
     )
 }
 

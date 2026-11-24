@@ -102,7 +102,7 @@ fn parse_timestamp_uuid_from_filename_basic() {
     let (ts, parsed_uuid) = parse_timestamp_uuid_from_filename(&name).expect("parse");
     assert_eq!(parsed_uuid, uuid);
     assert_eq!(
-        ts.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        ts.strftime("%Y-%m-%dT%H:%M:%S").to_string(),
         "2025-01-03T12:34:56"
     );
 }

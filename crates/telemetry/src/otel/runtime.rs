@@ -31,6 +31,7 @@ use prometheus::{Encoder, Registry, TextEncoder};
 
 use super::code_language::language_for_path;
 use super::config::{ExporterKind, OtelConfig, OtlpExporterConfig, OtlpProtocol};
+use super::console::{ConsoleLogExporter, ConsoleMetricExporter, ConsoleSpanExporter};
 use super::export_policy::GatedExporter;
 use super::git_ops::git_counter_hits;
 use super::metrics;
@@ -1931,7 +1932,7 @@ fn build_metrics_runtime(
         }
         ExporterKind::Console => {
             let reader = PeriodicReader::builder(GatedExporter::new(
-                opentelemetry_stdout::MetricExporter::default(),
+                ConsoleMetricExporter::default(),
                 policy,
             ))
             .with_interval(duration_ms_opt(config.metrics.export_interval_ms))
@@ -1984,7 +1985,7 @@ fn build_logger_provider(
         }
         ExporterKind::Console => {
             let batch = BatchLogProcessor::builder(GatedExporter::new(
-                opentelemetry_stdout::LogExporter::default(),
+                ConsoleLogExporter::default(),
                 policy,
             ))
             .with_batch_config(log_batch_config(config))
@@ -2038,7 +2039,7 @@ fn build_tracer_provider(
         }
         ExporterKind::Console => {
             let batch = BatchSpanProcessor::builder(GatedExporter::new(
-                opentelemetry_stdout::SpanExporter::default(),
+                ConsoleSpanExporter::default(),
                 policy,
             ))
             .with_batch_config(trace_batch_config(config))

@@ -885,7 +885,7 @@ mod tests {
         )
         .unwrap();
         let date = message.string_at("/attachment/date").unwrap();
-        let after = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let after = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
         assert!(date == date_before_startup || date == after);
         let expected_attachment = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
             &serde_json::json!({"type":"date","date":date}).to_string(),
@@ -990,7 +990,7 @@ mod tests {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = StateMachinePool::new(runtime, 1);
         let (release, startup) = tokio::sync::oneshot::channel();
-        let date_before_startup = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let date_before_startup = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
         let (id, mut events) = pool
             .allocate_with_startup(make_ctx(), None, Some(startup))
             .await
@@ -1399,7 +1399,7 @@ mod tests {
         let mut ctx = make_ctx();
         ctx.api_client = Some(model.clone());
         let aid = ctx.agent_id;
-        let date_before_startup = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let date_before_startup = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
         let (_id, mut out_rx) = pool.allocate(ctx).await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(1), model.started.notified())
@@ -1929,7 +1929,7 @@ mod tests {
             let mut ctx = make_ctx();
             ctx.api_client = Some(model.clone());
             let id = ctx.agent_id;
-            let date_before_startup = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let date_before_startup = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
             let (_id, mut out_rx) = pool.allocate(ctx).await.unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(1), model.started.notified())
                 .await

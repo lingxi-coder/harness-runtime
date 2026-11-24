@@ -100,9 +100,13 @@ impl TeamOperationRequest {
                     }
                     && validate_write(&self.arguments).is_ok()
             }
-            (TeamOperationTool::DataRead, None) | (TeamOperationTool::DataWrite | TeamOperationTool::DataHandoff, Some(_)) => {
+            (TeamOperationTool::DataRead, None)
+            | (TeamOperationTool::DataWrite | TeamOperationTool::DataHandoff, Some(_)) => {
                 self.approval_ref.is_none()
-                    && self.logical_step_id.as_deref().is_none_or(|step| valid_step(task_id, step))
+                    && self
+                        .logical_step_id
+                        .as_deref()
+                        .is_none_or(|step| valid_step(task_id, step))
                     && super::data_tools::request_dataset(self.tool, &self.arguments).is_some()
             }
             _ => false,
@@ -117,8 +121,11 @@ impl TeamOperationRequest {
 
 fn valid_step(task_id: &str, step: &str) -> bool {
     step.len() <= 200
-        && step.strip_prefix(task_id).and_then(|rest| rest.strip_prefix("/t"))
-            .and_then(|rest| rest.split_once("/c")).is_some_and(|(group, index)| {
+        && step
+            .strip_prefix(task_id)
+            .and_then(|rest| rest.strip_prefix("/t"))
+            .and_then(|rest| rest.split_once("/c"))
+            .is_some_and(|(group, index)| {
                 group.parse::<u32>().is_ok() && index.parse::<u32>().is_ok()
             })
 }
@@ -204,10 +211,21 @@ pub(super) struct StepSource {
     pub batch_id: String,
 }
 impl StepSource {
-    pub(super) async fn durable_step(&self, bridge: &ChildInteraction, task_id: &str, tool_use_id: &str) -> Option<String> {
+    pub(super) async fn durable_step(
+        &self,
+        bridge: &ChildInteraction,
+        task_id: &str,
+        tool_use_id: &str,
+    ) -> Option<String> {
         for _ in 0..200 {
             let transcript = std::fs::read_to_string(&self.transcript).unwrap_or_default();
-            if let Some(step) = super::checkpoint::pending_step(&self.scope, task_id, &self.batch_id, &transcript, tool_use_id) {
+            if let Some(step) = super::checkpoint::pending_step(
+                &self.scope,
+                task_id,
+                &self.batch_id,
+                &transcript,
+                tool_use_id,
+            ) {
                 return Some(step);
             }
             tokio::select! {
@@ -246,7 +264,10 @@ impl TeamListTools {
     /// that holds it is on the transcript file. A call that never becomes
     /// durable is never dispatched.
     async fn durable_step(&self, tool_use_id: &str) -> Option<String> {
-        self.source.get()?.durable_step(&self.bridge, &self.task_id, tool_use_id).await
+        self.source
+            .get()?
+            .durable_step(&self.bridge, &self.task_id, tool_use_id)
+            .await
     }
 }
 

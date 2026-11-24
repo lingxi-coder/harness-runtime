@@ -6,7 +6,7 @@ fn row(id: &str, millis: i64, sidechain: bool) -> JsonlMessage {
     let source = json!({
         "type": "user", "uuid": id, "parentUuid": null,
         "sessionId": "11111111-2222-4333-8444-555555555555",
-        "timestamp": chrono::DateTime::from_timestamp_millis(millis).unwrap().to_rfc3339(),
+        "timestamp": jiff::Timestamp::from_millisecond(millis).unwrap().display_with_offset(jiff::tz::Offset::UTC).to_string(),
         "cwd": "/workspace", "version": "0.12.0", "isSidechain": sidechain,
         "message": {"role": "user", "content": "hello"}
     });

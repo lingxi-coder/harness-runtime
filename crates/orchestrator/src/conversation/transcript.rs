@@ -3068,14 +3068,10 @@ impl ConversationOrchestrator {
                             .get_property("since_ms")
                             .and_then(|value| value.as_number())
                             .unwrap_or(0.0) as i64;
-                        if let Some(time) =
-                            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(since)
-                        {
+                        if let Ok(time) = jiff::Timestamp::from_millisecond(since) {
                             extra.insert(
                                 "streakStartedAt".into(),
-                                serde_json::json!(
-                                    time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                                ),
+                                serde_json::json!(format!("{time:.3}")),
                             );
                         }
                         if payload
@@ -3192,8 +3188,8 @@ impl ConversationOrchestrator {
                     .map(|(_, timestamp)| timestamp.clone())
             })
             .unwrap_or_else(|| {
-                chrono::Utc::now()
-                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                jiff::Timestamp::now()
+                    .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                     .to_string()
             }),
             // Per-line cwd readback — the LIVE session cwd (advanced by a Bash
@@ -4158,8 +4154,8 @@ impl ConversationOrchestrator {
             uuid: id.as_uuid().to_string(),
             parent_uuid: None,
             session_id: session_id.clone(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            timestamp: jiff::Timestamp::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
             cwd: self.current_cwd().to_string_lossy().into_owned(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -4268,8 +4264,8 @@ impl ConversationOrchestrator {
             uuid: id.as_uuid().to_string(),
             parent_uuid,
             session_id: session_id.clone(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            timestamp: jiff::Timestamp::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
             cwd: self.current_cwd().to_string_lossy().into_owned(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -4338,8 +4334,8 @@ impl ConversationOrchestrator {
             uuid: uuid.to_string(),
             parent_uuid,
             session_id: session_id_str.clone(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            timestamp: jiff::Timestamp::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
             cwd: self.current_cwd().to_string_lossy().into_owned(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -4470,8 +4466,8 @@ impl ConversationOrchestrator {
             ("operation", "remove".into()),
             (
                 "timestamp",
-                chrono::Utc::now()
-                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                jiff::Timestamp::now()
+                    .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                     .to_string()
                     .into(),
             ),
@@ -4530,8 +4526,8 @@ impl ConversationOrchestrator {
             uuid: uuid::Uuid::new_v4().to_string(),
             parent_uuid: parent.clone(),
             session_id: session_id.clone(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            timestamp: jiff::Timestamp::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
             cwd: cwd.to_string_lossy().into_owned(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -4926,10 +4922,10 @@ impl ConversationOrchestrator {
         let msg = &rewritten;
         let committed_at = preappended
             .as_ref()
-            .and_then(|metadata| chrono::DateTime::parse_from_rfc3339(metadata.timestamp).ok())
+            .and_then(|metadata| metadata.timestamp.parse::<jiff::Timestamp>().ok())
             .map_or_else(
-                || chrono::Utc::now().timestamp_millis(),
-                |time| time.timestamp_millis(),
+                || jiff::Timestamp::now().as_millisecond(),
+                |time| time.as_millisecond(),
             );
         self.prompt_runtime
             .silent_turn_message_timestamps
@@ -6600,7 +6596,7 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .entry(msg.id())
-                .or_insert_with(|| chrono::Utc::now().timestamp_millis());
+                .or_insert_with(|| jiff::Timestamp::now().as_millisecond());
             // An ordinary later assistant replaces a recoverable API-error row.
             // API persistence stamps its explicit marker after this common seam.
             self.note_turn_api_error_stop_reason(None);

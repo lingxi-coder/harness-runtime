@@ -373,8 +373,8 @@ impl QueueLifecycle {
     pub fn input_delivery(&self) -> orchestrator::prompt::mid_turn_input::MidTurnInputDelivery {
         orchestrator::prompt::mid_turn_input::MidTurnInputDelivery {
             delivery_id: uuid::Uuid::new_v4().to_string(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            timestamp: jiff::Timestamp::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
             reference_version: super::CLAUDE_CODE_REFERENCE_VERSION.into(),
         }
@@ -485,7 +485,7 @@ impl QueueLifecycle {
         }
         let record = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
             "type":"queue-operation","operation":"dequeue",
-            "timestamp":chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),"sessionId":self.session_id
+            "timestamp":jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),"sessionId":self.session_id
         })).expect("queue operation frame is valid JSON");
         self.journal
             .lock()

@@ -3535,7 +3535,7 @@ impl ConversationOrchestrator {
         } else {
             cost::prompt_cache_ledger::CacheTtl::FiveMinutes
         };
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let now_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
         let (prompt_cache_warm, ttl) = self
             .current_prompt_cache_ledger()
             .await

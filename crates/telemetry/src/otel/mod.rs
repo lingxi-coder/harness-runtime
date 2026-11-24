@@ -17,6 +17,7 @@
 
 mod code_language;
 pub mod config;
+mod console;
 mod export_policy;
 mod git_ops;
 pub mod headers_helper;

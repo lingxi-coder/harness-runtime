@@ -492,7 +492,7 @@ pub(super) async fn execute(
                 None,
             ));
         };
-        let deadline = chrono::DateTime::parse_from_rfc3339(expires);
+        let deadline = expires.parse::<jiff::Timestamp>();
         let Ok(deadline) = deadline else {
             return Ok(error(
                 "expired",
@@ -500,7 +500,7 @@ pub(super) async fn execute(
                 None,
             ));
         };
-        if chrono::Utc::now() > deadline {
+        if jiff::Timestamp::now() > deadline {
             return Ok(error(
                 "expired",
                 format!("request expired at {expires}"),

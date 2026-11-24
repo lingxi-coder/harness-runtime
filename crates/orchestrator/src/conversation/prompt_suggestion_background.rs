@@ -123,7 +123,7 @@ impl ConversationOrchestrator {
             .iter()
             .filter(|message| matches!(message, ConversationMessage::Assistant { .. }))
             .count();
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let (epoch, start, previous, mins) = {
             let mut state = self.background_suggestion_state();
             if state.session_id != session_id {
@@ -132,8 +132,8 @@ impl ConversationOrchestrator {
                 state.previous_state_since_ms = saved
                     .as_ref()
                     .and_then(|value| value.string_at("/updatedAt"))
-                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                    .map(|value| value.timestamp_millis())
+                    .and_then(|value| value.parse::<jiff::Timestamp>().ok())
+                    .map(jiff::Timestamp::as_millisecond)
                     .unwrap_or(now);
                 state.previous_state = saved
                     .as_ref()
@@ -153,8 +153,8 @@ impl ConversationOrchestrator {
                         };
                         state.previous_state_since_ms = saved
                             .string_at("/updatedAt")
-                            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                            .map(|value| value.timestamp_millis())
+                            .and_then(|value| value.parse::<jiff::Timestamp>().ok())
+                            .map(jiff::Timestamp::as_millisecond)
                             .unwrap_or(now);
                     }
                 }
@@ -404,7 +404,11 @@ impl ConversationOrchestrator {
         result
             .set_field(
                 "updatedAt",
-                Utf16JsonProjection::from(chrono::Utc::now().to_rfc3339()),
+                Utf16JsonProjection::from(
+                    jiff::Timestamp::now()
+                        .display_with_offset(jiff::tz::Offset::UTC)
+                        .to_string(),
+                ),
             )
             .ok()?;
         let context = {

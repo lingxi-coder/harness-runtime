@@ -368,8 +368,8 @@ impl TranscriptStore {
             .or_insert_with(|| {
                 (
                     uuid::Uuid::new_v4(),
-                    chrono::Utc::now()
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                    jiff::Timestamp::now()
+                        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                         .to_string(),
                 )
             })

@@ -17,7 +17,6 @@
 
 use crate::headless::io::Output;
 use async_trait::async_trait;
-use chrono::Utc;
 use lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_llm_client::exact_text::Utf16DisplayStream;
@@ -225,7 +224,7 @@ impl JsonSink {
     }
 
     fn ts() -> String {
-        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        format!("{:.0}", jiff::Timestamp::now())
     }
 }
 

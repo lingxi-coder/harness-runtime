@@ -401,7 +401,10 @@ impl TeamProcessStart {
         request: TeamProcessRequest,
     ) -> Result<Self, TeamProcessError> {
         if !protocol::private_data_scope(storage_root, &request.scope, &request.task_id)
-            || request.ask_requester || request.shared_list.is_some() || !request.shared_data.is_empty() || request.may_decline
+            || request.ask_requester
+            || request.shared_list.is_some()
+            || !request.shared_data.is_empty()
+            || request.may_decline
             || !request.knowledge.is_empty()
         {
             return Err(TeamProcessError::Protocol);
@@ -431,7 +434,13 @@ impl TeamProcessStart {
         private_data: bool,
     ) -> Result<Self, TeamProcessError> {
         request.deadline.check()?;
-        if !private_data && storage_root.parent().and_then(Path::file_name).and_then(|name| name.to_str()) == Some("data-private") {
+        if !private_data
+            && storage_root
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("data-private")
+        {
             return Err(TeamProcessError::Protocol);
         }
         let profile = TeamInvocationProfile::prepare(
@@ -443,7 +452,11 @@ impl TeamProcessStart {
         )?
         .with_selected_model(request.model.clone());
         let requester = if private_data {
-            Some(protocol::private_data_requester(storage_root, profile.scope(), &request.task_id)?)
+            Some(protocol::private_data_requester(
+                storage_root,
+                profile.scope(),
+                &request.task_id,
+            )?)
         } else {
             None
         };
@@ -507,13 +520,17 @@ impl TeamProcessStart {
             },
             shared_data: {
                 data_tools::validate_offers(&request.shared_data)?;
-                request.shared_data.into_iter().map(|mut offer| {
-                    offer.write &= checkpoint::route_supports_continuation(protocol);
-                    if !offer.write {
-                        offer.handoff_targets.clear();
-                    }
-                    offer
-                }).collect()
+                request
+                    .shared_data
+                    .into_iter()
+                    .map(|mut offer| {
+                        offer.write &= checkpoint::route_supports_continuation(protocol);
+                        if !offer.write {
+                            offer.handoff_targets.clear();
+                        }
+                        offer
+                    })
+                    .collect()
             },
             may_decline: request.may_decline,
             addressed: request.addressed,
@@ -744,8 +761,13 @@ async fn broker_exchange(
                     return Err(TeamProcessError::Protocol);
                 }
                 request.validate(task_id, approval)?;
-                if matches!(request.tool, TeamOperationTool::DataRead | TeamOperationTool::DataWrite | TeamOperationTool::DataHandoff)
-                    && !data_tools::permitted(shared_data, request.tool, &request.arguments) {
+                if matches!(
+                    request.tool,
+                    TeamOperationTool::DataRead
+                        | TeamOperationTool::DataWrite
+                        | TeamOperationTool::DataHandoff
+                ) && !data_tools::permitted(shared_data, request.tool, &request.arguments)
+                {
                     return Err(TeamProcessError::Protocol);
                 }
                 if !seen.insert(request.id.clone()) {

@@ -716,7 +716,7 @@ fn build_replay_ack_frame(
     session_id: &str,
 ) -> Value {
     let timestamp = timestamp.map_or_else(
-        || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        || format!("{:.3}", jiff::Timestamp::now()),
         ToString::to_string,
     );
     json!({

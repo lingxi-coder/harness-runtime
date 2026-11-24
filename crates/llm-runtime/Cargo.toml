@@ -33,8 +33,7 @@ futures-util = { workspace = true }
 telemetry = { path = "../telemetry" }
 secret = { path = "../secret" }
 regex = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-iana-time-zone = "0.1"
+jiff = { workspace = true }
 rand = "0.9"
 urlencoding = "2"
 tracing.workspace = true

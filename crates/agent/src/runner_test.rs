@@ -4374,9 +4374,9 @@ async fn run_subagent_emits_streamed_message_before_completed() {
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
     drop(event_tx);
-    let date_before = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_before = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
     run_subagent(ctx, event_rx, out_tx).await;
-    let date_after = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_after = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
     let events = drain(out_rx).await;
     assert_eq!(api.call_count(), 1);
     assert_eq!(
@@ -9647,7 +9647,7 @@ async fn no_hook_executor_means_no_preload_injection() {
     // announcement still follows the prompt seed.
     let expected_date = format!(
         "<system-reminder>\nToday's date is {}.\n</system-reminder>",
-        chrono::Local::now().format("%Y-%m-%d")
+        jiff::ZonedDateTime::now().strftime("%Y-%m-%d")
     );
     let api = CapturingApiClient::new();
     let mut ctx = loop_ctx(api.clone(), None, 2);
@@ -9789,7 +9789,7 @@ async fn missing_skill_is_skipped_no_message() {
     // G5: an unresolved skill injects NOTHING (claude logs the warn + skips).
     let expected_date = format!(
         "<system-reminder>\nToday's date is {}.\n</system-reminder>",
-        chrono::Local::now().format("%Y-%m-%d")
+        jiff::ZonedDateTime::now().strftime("%Y-%m-%d")
     );
     let api = CapturingApiClient::new();
     let mut ctx = loop_ctx(api.clone(), None, 2);

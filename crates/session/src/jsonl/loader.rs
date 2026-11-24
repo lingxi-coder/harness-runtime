@@ -4499,9 +4499,9 @@ pub fn format_rfc3339_seconds(t: SystemTime) -> String {
     // care about (mtime). The session picker only ever sees positive offsets.
     #[allow(clippy::cast_possible_wrap)]
     let secs_i64 = secs as i64;
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs_i64, 0).map_or_else(
-        || "1970-01-01T00:00:00Z".to_string(),
-        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    jiff::Timestamp::from_second(secs_i64).map_or_else(
+        |_| "1970-01-01T00:00:00Z".to_string(),
+        |dt| dt.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
     )
 }
 
@@ -4511,8 +4511,8 @@ pub fn format_rfc3339_seconds(t: SystemTime) -> String {
 /// `new Date(m.timestamp).getTime()` where an invalid date yields `NaN` and the
 /// `ts > tipTs` comparison is always false.
 fn timestamp_millis(ts: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|dt| dt.timestamp_millis())
+    ts.parse::<jiff::Timestamp>()
+        .map(|dt| dt.as_millisecond())
         .unwrap_or(i64::MIN)
 }
 
@@ -4551,11 +4551,11 @@ impl<'a> TimestampParentIndex<'a> {
             {
                 index.parsed_timestamps += 1;
             }
-            let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&candidate.timestamp) else {
+            let Ok(timestamp) = candidate.timestamp.parse::<jiff::Timestamp>() else {
                 continue;
             };
             index.candidates[usize::from(candidate.is_sidechain)]
-                .entry(timestamp.timestamp_millis())
+                .entry(timestamp.as_millisecond())
                 .or_default()
                 .insert(position, candidate);
         }
@@ -4568,9 +4568,11 @@ impl<'a> TimestampParentIndex<'a> {
         visited: &HashSet<String>,
     ) -> Option<&'a JsonlMessage> {
         const MAX_PARENT_GAP_MS: i64 = 5_000;
-        let current_ms = chrono::DateTime::parse_from_rfc3339(&current.timestamp)
+        let current_ms = current
+            .timestamp
+            .parse::<jiff::Timestamp>()
             .ok()?
-            .timestamp_millis();
+            .as_millisecond();
         let candidates = &mut self.candidates[usize::from(current.is_sidechain)];
         loop {
             let (&timestamp, group) = candidates.range(..=current_ms).next_back()?;
@@ -6536,8 +6538,7 @@ mod tests {
             "uuid": uuid.to_string(),
             "parentUuid": null,
             "sessionId": uuid.to_string(),
-            "timestamp": chrono::DateTime::<chrono::Utc>::from(mtime)
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "timestamp": format!("{:.3}", jiff::Timestamp::try_from(mtime).unwrap()),
             "cwd": cwd,
             "version": "0.12.0",
             "isSidechain": is_sidechain,
@@ -6633,8 +6634,7 @@ mod tests {
             "uuid": uuid.to_string(),
             "parentUuid": null,
             "sessionId": uuid.to_string(),
-            "timestamp": chrono::DateTime::<chrono::Utc>::from(mtime)
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "timestamp": format!("{:.3}", jiff::Timestamp::try_from(mtime).unwrap()),
             "cwd": cwd,
             "version": "0.12.0",
             "isSidechain": false,
@@ -7004,10 +7004,11 @@ mod tests {
             let contents = std::fs::read_to_string(&path).unwrap();
             let (header, row) = contents.split_once('\n').unwrap();
             let mut row: Value = serde_json::from_str(row).unwrap();
-            row["timestamp"] = json!(chrono::DateTime::<chrono::Utc>::from(
-                SystemTime::UNIX_EPOCH + Duration::from_secs(logical),
-            )
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            row["timestamp"] = json!(format!(
+                "{:.3}",
+                jiff::Timestamp::try_from(SystemTime::UNIX_EPOCH + Duration::from_secs(logical))
+                    .unwrap()
+            ));
             std::fs::write(&path, format!("{header}\n{row}\n")).unwrap();
             filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(physical))
                 .unwrap();
@@ -7707,7 +7708,7 @@ mod tests {
                 let row = json!({
                     "type": "assistant", "uuid": Uuid::new_v4(), "parentUuid": id,
                     "sessionId": id, "cwd": cwd,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "timestamp": jiff::Timestamp::now().display_with_offset(jiff::tz::Offset::UTC).to_string(),
                     "message": {"role":"assistant", "content":[{"type":"text", "text":"saved while describing"}]}
                 });
                 writeln!(std::fs::OpenOptions::new().append(true).open(&source).unwrap(), "{row}").unwrap();
@@ -7863,7 +7864,7 @@ mod tests {
         let old_cwd = cwd.replacen(std::path::MAIN_SEPARATOR, "-", 1);
         assert_ne!(old_cwd, cwd);
         assert_eq!(project_dir_name(&old_cwd), project_dir_name(&cwd));
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp = format!("{:.3}", jiff::Timestamp::now());
         let user = serde_json::json!({
             "type": "user",
             "uuid": id.to_string(),

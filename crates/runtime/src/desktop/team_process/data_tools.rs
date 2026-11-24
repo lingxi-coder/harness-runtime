@@ -91,8 +91,9 @@ pub(super) fn permitted(
         offer.dataset == dataset
             && match kind {
                 TeamOperationTool::DataRead => true,
-                TeamOperationTool::DataWrite => offer.write
-                    && (args["action"] != "openReportReview" || offer.report_review),
+                TeamOperationTool::DataWrite => {
+                    offer.write && (args["action"] != "openReportReview" || offer.report_review)
+                }
                 TeamOperationTool::DataHandoff => args["sharedBotId"]
                     .as_str()
                     .is_some_and(|id| offer.handoff_targets.iter().any(|target| target == id)),
@@ -159,12 +160,25 @@ mod report_tests {
 
     #[test]
     fn opening_a_report_case_requires_the_named_grant() {
-        let mut offer = TeamDatasetOffer { dataset: "orders".into(), version: 3, write: true,
-            report_review: false, handoff_targets: vec![] };
+        let mut offer = TeamDatasetOffer {
+            dataset: "orders".into(),
+            version: 3,
+            write: true,
+            report_review: false,
+            handoff_targets: vec![],
+        };
         let request = json!({"action":"openReportReview","dataset":"orders","release":"r","partition":"east","group":"Monday"});
-        assert!(!permitted(std::slice::from_ref(&offer), TeamOperationTool::DataWrite, &request));
+        assert!(!permitted(
+            std::slice::from_ref(&offer),
+            TeamOperationTool::DataWrite,
+            &request
+        ));
         offer.report_review = true;
-        assert!(permitted(std::slice::from_ref(&offer), TeamOperationTool::DataWrite, &request));
+        assert!(permitted(
+            std::slice::from_ref(&offer),
+            TeamOperationTool::DataWrite,
+            &request
+        ));
         offer.write = false;
         assert!(validate_offers(&[offer]).is_err());
     }

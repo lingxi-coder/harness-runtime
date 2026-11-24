@@ -2573,7 +2573,7 @@ impl ConversationOrchestrator {
         // the line is then omitted rather than shown empty.
         let prompt_cache_line = {
             let diagnostics = self.model_runtime.prompt_cache_ledger.lock().await;
-            let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+            let now_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
             diagnostics
                 .ledger_for_session(session_id)
                 .and_then(|ledger| {

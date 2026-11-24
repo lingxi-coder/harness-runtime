@@ -10,10 +10,10 @@ mod team_account_fixture;
 
 use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
-    inspect_task, TeamContinuation, TeamDatasetOffer, TeamKnowledgeDocument, TeamListApproval, TeamOperationRequest,
-    TeamOperationResult, TeamOperationTool, TeamProcessDeadline, TeamProcessError,
-    TeamProcessOutcome, TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamSharedList,
-    TeamTaskPhase, TeamWaitAnswer, TeamWaitKind,
+    inspect_task, TeamContinuation, TeamDatasetOffer, TeamKnowledgeDocument, TeamListApproval,
+    TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamProcessDeadline,
+    TeamProcessError, TeamProcessOutcome, TeamProcessRequest, TeamProcessResult, TeamProcessStart,
+    TeamSharedList, TeamTaskPhase, TeamWaitAnswer, TeamWaitKind,
 };
 use lingxi_llm_client::protocol::ProtocolFamily;
 use serde_json::{json, Value};
@@ -1234,7 +1234,13 @@ fn saved(revision: u64) -> Option<TeamOperationResult> {
 async fn team_data_write_survives_a_worker_restart_with_the_same_step() {
     let (_temp, root) = root();
     let task = Task {
-        data: vec![TeamDatasetOffer { dataset: "team-orders".into(), version: 1, write: true, report_review: false, handoff_targets: Vec::new() }],
+        data: vec![TeamDatasetOffer {
+            dataset: "team-orders".into(),
+            version: 1,
+            write: true,
+            report_review: false,
+            handoff_targets: Vec::new(),
+        }],
         ..Task::new()
     };
     let args = json!({"action":"put","dataset":"team-orders","record":"order-1","schemaVersion":1,
@@ -1242,38 +1248,62 @@ async fn team_data_write_survives_a_worker_restart_with_the_same_step() {
     let server = Server::new(vec![
         Reply::Tool("TeamDataWrite", args.clone()),
         Reply::Text("Saved the order".into()),
-    ]).await;
+    ])
+    .await;
     let disconnected = list_broker(&root, vec![]);
     let (handle, cancel) = first_run(&task, &root, &server.endpoint, disconnected.clone());
     tokio::time::timeout(Duration::from_secs(60), async {
         while disconnected.operations.lock().unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     kill(handle, cancel).await;
     let step = format!("{}/t0/c0", task.task_id);
     {
         let operations = disconnected.operations.lock().unwrap();
         assert_eq!(operations[0].0.tool, TeamOperationTool::DataWrite);
-        assert_eq!(operations[0].0.logical_step_id.as_deref(), Some(step.as_str()));
+        assert_eq!(
+            operations[0].0.logical_step_id.as_deref(),
+            Some(step.as_str())
+        );
         assert_eq!(operations[0].0.arguments, args);
-        assert!(operations[0].1, "the transcript must be durable before dispatch");
+        assert!(
+            operations[0].1,
+            "the transcript must be durable before dispatch"
+        );
     }
     let inspected = checkpoint(&root, &task);
     assert!(inspected.continuable);
     assert_eq!(inspected.pending_tool_calls[0].logical_step_id, step);
-    let resumed = list_broker(&root, vec![Some(TeamOperationResult {
-        succeeded: true,
-        result: json!({"dataset":"team-orders","record":"order-1","schemaVersion":1,"revision":1}),
-    })]);
+    let resumed = list_broker(
+        &root,
+        vec![Some(TeamOperationResult {
+            succeeded: true,
+            result: json!({"dataset":"team-orders","record":"order-1","schemaVersion":1,"revision":1}),
+        })],
+    );
     let result = run_to_end(
-        continuation(&root, &task, &server.endpoint, 2, &inspected.checkpoint_digest).unwrap(),
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
         resumed.clone(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert_eq!(result.outcome, TeamProcessOutcome::Completed);
     let operations = resumed.operations.lock().unwrap();
     assert_eq!(operations.len(), 1);
-    assert_eq!(operations[0].0.logical_step_id.as_deref(), Some(step.as_str()));
+    assert_eq!(
+        operations[0].0.logical_step_id.as_deref(),
+        Some(step.as_str())
+    );
     assert_eq!(operations[0].0.arguments, args);
     assert_eq!(server.count(), 2);
 }

@@ -727,8 +727,8 @@ fn fallback_tombstone_for_message(
     lingxi_core::host::ServerFallbackTombstoneMessage {
         uuid: message.id(),
         message_type: message_type.into(),
-        timestamp: chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        timestamp: jiff::Timestamp::now()
+            .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string(),
         request_id: None,
         request_ref: None,
@@ -2518,8 +2518,8 @@ fn declined_server_fallback_api_error_row(
     profile: Option<&str>,
     event: &llm_runtime::services::sdk::providers::anthropic::fallback_response::ServerFallbackEvent,
 ) -> Option<lingxi_core::host::ServerFallbackApiErrorRow> {
-    let timestamp = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+    let timestamp = jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     if event.reason == "sticky" {
         let text = Utf16JsonProjection::from(
@@ -7689,7 +7689,7 @@ async fn announce_instruction_context(
     {
         return;
     }
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
     for attachment in context_attachments(&ctx.instruction_context, &date, "session_start") {
         let id = MessageId::new();
         let message = render_instruction_attachment(&attachment).map(|text| {

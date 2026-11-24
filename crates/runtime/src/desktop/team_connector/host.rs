@@ -66,7 +66,12 @@ impl Start {
         if self.version != 3
             || !matches!(
                 self.kind.as_str(),
-                "inspect_scope" | "inspect_result" | "inspect_task" | "run" | "run_private" | "continue"
+                "inspect_scope"
+                    | "inspect_result"
+                    | "inspect_task"
+                    | "run"
+                    | "run_private"
+                    | "continue"
             )
         {
             return Err(Error::Protocol);
@@ -98,7 +103,8 @@ impl Start {
             && self.limits.is_some();
         if self.kind == "inspect_scope" && (any || self.task_id.is_some())
             || self.kind == "inspect_result" && (any || self.task_id.is_none())
-            || matches!(self.kind.as_str(), "run" | "run_private") && (!all || self.continuation.is_some())
+            || matches!(self.kind.as_str(), "run" | "run_private")
+                && (!all || self.continuation.is_some())
             || self.kind == "continue" && (!all || self.continuation.is_none())
         {
             return Err(Error::Protocol);

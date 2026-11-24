@@ -295,7 +295,7 @@ pub struct ResumeDoc<'a> {
 /// `new Date().toISOString()` — `2026-08-20T15:08:27.000Z`.
 #[must_use]
 pub fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    format!("{:.3}", jiff::Timestamp::now())
 }
 
 /// `Zsl(e)` (@292197365) — make one todo safe to paste into a markdown list.
@@ -1530,7 +1530,7 @@ fn gc_stale_checkpoint_refs(root: &std::path::Path, env: &[(&str, String)], keep
     .filter(|o| o.ok) else {
         return;
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let mut fields = line.split('\0');
         let Some(name) = fields.next() else { continue };

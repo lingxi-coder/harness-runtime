@@ -330,14 +330,15 @@ async fn native_321_catalog_keeps_alias_dedup_limits_and_repository_union() {
                 );
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
                 let created_ms = row["created_ms"].as_i64().unwrap();
-                let timestamp = chrono::DateTime::from_timestamp_millis(created_ms)
-                    .unwrap()
-                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let timestamp = format!(
+                    "{:.3}",
+                    jiff::Timestamp::from_millisecond(created_ms).unwrap()
+                );
                 let modified_ms = row["modified_ms"].as_i64().unwrap();
-                let activity_timestamp =
-                    chrono::DateTime::from_timestamp_millis(created_ms.max(modified_ms))
-                        .unwrap()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let activity_timestamp = format!(
+                    "{:.3}",
+                    jiff::Timestamp::from_millisecond(created_ms.max(modified_ms)).unwrap()
+                );
                 let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0});
                 let message = serde_json::json!({"type":"user", "uuid":id, "sessionId":id, "parentUuid":null,
                     "timestamp":timestamp, "message":{"role":"user", "content":"native replay"},

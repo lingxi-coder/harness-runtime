@@ -136,7 +136,7 @@ impl ConversationOrchestrator {
         usage: &llm_runtime::ExecutionUsage,
         current: Option<llm_runtime::prompt_cache::RequestSnapshot>,
     ) {
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let now_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
         let at_ms = current.as_ref().map_or(now_ms, |request| request.at_ms);
         let counts = usage.counts();
         let ttl = if counts.cache_write_1h_tokens > 0 {
@@ -203,7 +203,7 @@ impl ConversationOrchestrator {
     }
 
     pub(crate) async fn expect_prompt_cache_rebuild(&self) {
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let now_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
         self.current_prompt_cache_ledger()
             .await
             .ledger

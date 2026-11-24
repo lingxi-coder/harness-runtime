@@ -136,7 +136,7 @@ pub struct ApiSuccessFields {
 #[must_use]
 pub fn build_age_mins() -> Option<i64> {
     let epoch_secs: i64 = option_env!("LINGXI_COST_BUILD_EPOCH_SECS")?.parse().ok()?;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     Some((now - epoch_secs) / 60)
 }
 

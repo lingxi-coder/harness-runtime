@@ -3027,9 +3027,7 @@ impl ConversationOrchestrator {
                 ),
                 (
                     "timestamp".to_string(),
-                    CompactSource::from(
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                    ),
+                    CompactSource::from(format!("{:.3}", jiff::Timestamp::now())),
                 ),
             ]);
             let envelope_text = envelope
@@ -4979,8 +4977,8 @@ impl ConversationOrchestrator {
             uuid: marker.id().as_uuid().to_string(),
             parent_uuid: None,
             session_id: session_id_str.clone(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            timestamp: jiff::Timestamp::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
             cwd: self.current_cwd().to_string_lossy().into_owned(),
             version: env!("CARGO_PKG_VERSION").to_string(),

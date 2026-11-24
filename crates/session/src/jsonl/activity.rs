@@ -148,8 +148,8 @@ fn classify(row: &Row, session: Uuid) -> Option<Candidate> {
     };
     let at = row
         .string_at("/timestamp")
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map_or(0, |t| t.timestamp_millis());
+        .and_then(|s| s.parse::<jiff::Timestamp>().ok())
+        .map_or(0, |t| t.as_millisecond());
     Some(Candidate {
         group: digest(group.as_bytes()),
         outer,
@@ -811,7 +811,7 @@ impl Store {
                 .max(s.pending_action_revision)
                 .checked_add(1)
                 .ok_or_else(|| error("Action revision exhausted"))?;
-            state.at = chrono::Utc::now().timestamp_millis();
+            state.at = jiff::Timestamp::now().as_millisecond();
             self.put("actions.json", state)?;
         }
         let count = u32::try_from(state.leases.len()).map_err(error)?;
@@ -949,7 +949,7 @@ pub fn finish_turn(
         &Terminal {
             blocks,
             failed,
-            at: chrono::Utc::now().timestamp_millis(),
+            at: jiff::Timestamp::now().as_millisecond(),
         },
     )?;
     store.recover_terminal(&mut s)

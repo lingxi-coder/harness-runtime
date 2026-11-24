@@ -47,14 +47,25 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     if bootstrap.version != 3 {
         return Err(TeamProcessError::Protocol);
     }
-    if bootstrap.private_data && (!protocol::private_data_scope(&bootstrap.storage_root, &bootstrap.scope, &bootstrap.task_id)
-        || bootstrap.continuation.is_some() || bootstrap.ask_requester || bootstrap.shared_list.is_some()
-        || !bootstrap.shared_data.is_empty() || bootstrap.may_decline)
+    if bootstrap.private_data
+        && (!protocol::private_data_scope(
+            &bootstrap.storage_root,
+            &bootstrap.scope,
+            &bootstrap.task_id,
+        ) || bootstrap.continuation.is_some()
+            || bootstrap.ask_requester
+            || bootstrap.shared_list.is_some()
+            || !bootstrap.shared_data.is_empty()
+            || bootstrap.may_decline)
     {
         return Err(TeamProcessError::Protocol);
     }
     let requester = if bootstrap.private_data {
-        Some(protocol::private_data_requester(&bootstrap.storage_root, &bootstrap.scope, &bootstrap.task_id)?)
+        Some(protocol::private_data_requester(
+            &bootstrap.storage_root,
+            &bootstrap.scope,
+            &bootstrap.task_id,
+        )?)
     } else {
         None
     };

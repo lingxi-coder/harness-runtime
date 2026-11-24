@@ -294,7 +294,7 @@ impl ConversationOrchestrator {
 }
 
 fn epoch_ms() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+    u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0)
 }
 
 #[cfg(test)]

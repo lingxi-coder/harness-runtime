@@ -19,8 +19,8 @@ pub(super) struct PendingDateChange {
 }
 
 fn valid_date(date: &str) -> bool {
-    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .is_ok_and(|parsed| parsed.format("%Y-%m-%d").to_string() == date)
+    jiff::civil::Date::strptime("%Y-%m-%d", date)
+        .is_ok_and(|parsed| parsed.strftime("%Y-%m-%d").to_string() == date)
 }
 
 fn calendar_payload(kind: &str, session_date: &str, accepted_date: Option<&str>) -> Source {
@@ -33,10 +33,7 @@ fn calendar_payload(kind: &str, session_date: &str, accepted_date: Option<&str>)
     .expect("host calendar state is JSON")
 }
 
-fn date_metadata<'a>(
-    row: &'a Source,
-    session: SessionId,
-) -> Option<(MessageId, &'a str, Option<&'a str>)> {
+fn date_metadata(row: &Source, session: SessionId) -> Option<(MessageId, &str, Option<&str>)> {
     if row.string_at("/type") != Some("attachment")
         || row
             .string_at("/sessionId")
@@ -170,8 +167,8 @@ impl ConversationOrchestrator {
             uuid: id.as_uuid().to_string(),
             parent_uuid: None,
             session_id: session.as_uuid().to_string(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            timestamp: jiff::Timestamp::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
             cwd: self.current_cwd().to_string_lossy().into_owned(),
             version: env!("CARGO_PKG_VERSION").into(),

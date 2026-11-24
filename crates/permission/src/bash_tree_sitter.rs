@@ -114,7 +114,7 @@ fn parse_source_with_limits(
         count += 1;
         if count > max_nodes
             || depth > MAX_PARSE_DEPTH
-            || count % 128 == 0 && started.elapsed() >= timeout
+            || count.is_multiple_of(128) && started.elapsed() >= timeout
         {
             return Err(ParseBudgetExceeded);
         }

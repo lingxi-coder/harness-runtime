@@ -2530,7 +2530,8 @@ mod tests {
             .expect("Native warning includes its UTC timestamp and level");
         assert_eq!(timestamp.len(), 24);
         assert!(timestamp.ends_with('Z'));
-        chrono::DateTime::parse_from_rfc3339(timestamp)
+        timestamp
+            .parse::<jiff::Timestamp>()
             .expect("Native timestamp is a valid ISO UTC instant");
         assert!(message.contains(&format!("policyHelpers.{os_key}.defaultSettings:")));
         assert!(message.contains("allowedMarketplaces"));

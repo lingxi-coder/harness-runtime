@@ -23,7 +23,7 @@ adapter = [
     "dep:core",
     "dep:permission",
     "dep:session",
-    "dep:chrono",
+    "dep:jiff",
     "dep:orchestrator",
     "dep:async-trait",
     "dep:tokio",
@@ -49,7 +49,7 @@ similar = { version = "=2.7.0", optional = true }
 tool-api = { path = "../tool-api", optional = true }
 permission = { path = "../permission", optional = true }
 session = { path = "../session", optional = true }
-chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+jiff = { workspace = true, optional = true }
 orchestrator = { path = "../orchestrator", optional = true }
 async-trait = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

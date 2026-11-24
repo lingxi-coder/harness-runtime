@@ -52,8 +52,7 @@ outputstyles = { path = "../outputstyles" }
 # analogue of claude-code's `inputSchema.safeParse`). Lightest adequate
 # pure-Rust option (few transitive crates, most already in the workspace).
 boon = "0.6"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-iana-time-zone = "0.1"
+jiff = { workspace = true }
 # §F conditional-rule glob matching: the Rust analogue of claude-code's `ignore`
 # npm lib (gitignore-style globs). Same crate `permission`/`tools/file` use;
 # already in Cargo.lock.

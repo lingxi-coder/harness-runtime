@@ -66,7 +66,7 @@ tokio::task_local! {
 
 impl RequestCapture {
     pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
-        let anchor_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let anchor_at_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
         self.scope_at(anchor_at_ms, future).await
     }
 
@@ -187,7 +187,7 @@ fn inherit_request_anchor(mut snapshot: RequestSnapshot) -> RequestSnapshot {
 pub(crate) fn observe_snapshot(mut snapshot: Option<RequestSnapshot>) {
     let _ = CAPTURE.try_with(|capture| {
         if let Some(snapshot) = snapshot.as_mut() {
-            snapshot.at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+            snapshot.at_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
         }
         capture.0.lock().unwrap_or_else(|e| e.into_inner()).snapshot = snapshot;
     });
@@ -475,7 +475,7 @@ impl RequestSnapshot {
         };
         Self {
             request_anchor_at_ms: None,
-            at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+            at_ms: u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0),
             system: part_hash(
                 &block_array_without_cache_controls(&system, request.json_encoding)
                     .expect("system cache-control projection remains valid JSON"),

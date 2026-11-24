@@ -1007,7 +1007,7 @@ impl ConversationOrchestrator {
             "type":"attachment", "uuid":receipt.receipt_id,
             "parentUuid":replayed.last_message_uuid, "isSidechain":false,
             "sessionId":receipt.session_id,
-            "timestamp":chrono::Utc::now().to_rfc3339(),
+            "timestamp":jiff::Timestamp::now().display_with_offset(jiff::tz::Offset::UTC).to_string(),
             "cwd":self.current_cwd().to_string_lossy(), "version":env!("CARGO_PKG_VERSION"),
             "message":null, "attachment":receipt
         }))

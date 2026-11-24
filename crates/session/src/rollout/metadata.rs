@@ -8,7 +8,9 @@
 //! session-meta line or the filename — enough to inspect/resume a rollout.
 
 use crate::rollout::record::{RolloutItem, SessionSource, ThreadId};
-use chrono::{DateTime, NaiveDateTime, Utc};
+use jiff::civil::DateTime;
+use jiff::tz::TimeZone;
+use jiff::Timestamp;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -45,7 +47,7 @@ pub fn plain_rollout_path(path: &Path) -> PathBuf {
 /// creation timestamp and thread UUID. Scans from the right for the `-` that
 /// makes the suffix a valid UUID (UUIDs themselves contain dashes).
 #[must_use]
-pub fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(DateTime<Utc>, Uuid)> {
+pub fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(Timestamp, Uuid)> {
     let name = parse_rollout_file_name(name)?;
     let core = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
 
@@ -55,8 +57,8 @@ pub fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(DateTime<Utc>, 
         .find_map(|(i, _)| Uuid::parse_str(&core[i + 1..]).ok().map(|u| (i, u)))?;
 
     let ts_str = &core[..sep_idx];
-    let naive = NaiveDateTime::parse_from_str(ts_str, FILENAME_TS_FORMAT).ok()?;
-    let ts = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    let naive = DateTime::strptime(FILENAME_TS_FORMAT, ts_str).ok()?;
+    let ts = TimeZone::UTC.to_timestamp(naive).ok()?;
     Some((ts, uuid))
 }
 
@@ -77,7 +79,7 @@ pub fn rollout_date_parts(file_name: &OsStr) -> Option<(String, String, String)>
 pub struct ThreadMetadata {
     pub id: ThreadId,
     pub rollout_path: PathBuf,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub source: SessionSource,
     pub model_provider: Option<String>,
     pub agent_nickname: Option<String>,
@@ -94,7 +96,7 @@ pub struct ThreadMetadata {
 pub struct ThreadMetadataBuilder {
     pub id: ThreadId,
     pub rollout_path: PathBuf,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub source: SessionSource,
     pub model_provider: Option<String>,
     pub agent_nickname: Option<String>,
@@ -112,7 +114,7 @@ impl ThreadMetadataBuilder {
     pub fn new(
         id: ThreadId,
         rollout_path: PathBuf,
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
         source: SessionSource,
     ) -> Self {
         Self {
@@ -199,12 +201,9 @@ pub fn builder_from_items(
 }
 
 /// Parse a session-meta `timestamp` (filename format or RFC3339) to UTC.
-fn parse_timestamp_to_utc(ts: &str) -> Option<DateTime<Utc>> {
-    if let Ok(naive) = NaiveDateTime::parse_from_str(ts, FILENAME_TS_FORMAT) {
-        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+fn parse_timestamp_to_utc(ts: &str) -> Option<Timestamp> {
+    if let Ok(naive) = DateTime::strptime(FILENAME_TS_FORMAT, ts) {
+        return TimeZone::UTC.to_timestamp(naive).ok();
     }
-    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-        return Some(dt.with_timezone(&Utc));
-    }
-    None
+    ts.parse().ok()
 }

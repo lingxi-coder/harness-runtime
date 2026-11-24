@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+use jiff::{Timestamp, ZonedDateTime};
 use lingxi_llm_client::protocol::JsonPayload;
 use lingxi_llm_client::providers::response_headers::{
     AnthropicQuotaWindowHeaders, AnthropicRateLimitError, AnthropicRateLimitHeaders,
@@ -94,16 +94,21 @@ pub fn format_reset_time(
     show_timezone: bool,
     show_time: bool,
 ) -> Option<String> {
-    format_reset_time_at(timestamp_secs, Local::now(), show_timezone, show_time)
+    format_reset_time_at(
+        timestamp_secs,
+        &ZonedDateTime::now(),
+        show_timezone,
+        show_time,
+    )
 }
 
 /// Testable core of [`format_reset_time`] with an injected `now` (so unit tests
-/// never read the wall clock). `now` is a `DateTime<Local>`; the reset timestamp
-/// is interpreted in the same local zone, exactly like the TS `Date` accessors.
+/// never read the wall clock). `now` is a local `ZonedDateTime`; the reset
+/// timestamp is interpreted in `now`'s zone, exactly like the TS `Date` accessors.
 #[must_use]
 fn format_reset_time_at(
     timestamp_secs: Option<i64>,
-    now: DateTime<Local>,
+    now: &ZonedDateTime,
     show_timezone: bool,
     show_time: bool,
 ) -> Option<String> {
@@ -115,18 +120,21 @@ fn format_reset_time_at(
 
     // `new Date(timestampInSeconds * 1000)` in the local zone. A timestamp that
     // can't be represented (out of range) fails soft to `None`.
-    let date = Local.timestamp_opt(ts, 0).single()?;
+    let date = Timestamp::from_second(ts)
+        .ok()?
+        .to_zoned_datetime(now.time_zone().clone());
 
     let minutes = date.minute();
 
     // TS: `hoursUntilReset = (date - now) / 3_600_000ms`, branch on `> 24`.
     // Equivalent integer test `(date_ms - now_ms) > 24h_in_ms` — exact, no float
     // cast, same `>` boundary (a reset exactly 24h out stays time-only).
-    let is_far_future = date.timestamp_millis() - now.timestamp_millis() > TWENTY_FOUR_HOURS_MS;
+    let is_far_future =
+        date.timestamp().as_millisecond() - now.timestamp().as_millisecond() > TWENTY_FOUR_HOURS_MS;
 
     let tz_suffix = |s: String| -> String {
         if show_timezone {
-            format!("{s} ({})", reset_time_zone(date))
+            format!("{s} ({})", reset_time_zone(&date))
         } else {
             s
         }
@@ -140,7 +148,7 @@ fn format_reset_time_at(
         //   "Jun 7, 3pm"            (minutes == 0)
         //   "Jun 7, 3:30pm"         (minutes != 0)
         //   "Jun 7, 2027, 3:30pm"   (year differs)
-        let mut out = format!("{} {}", date.format("%b"), date.day());
+        let mut out = format!("{} {}", date.strftime("%b"), date.day());
         if date.year() != now.year() {
             out.push_str(&format!(", {}", date.year()));
         }
@@ -159,10 +167,10 @@ fn format_reset_time_at(
 /// then the AM/PM marker lowercased and joined with no space. Reproduces TS
 /// `toLocaleTimeString('en-US', { hour:'numeric', minute: …, hour12:true })`
 /// followed by `.replace(/ ([AP]M)/i, …toLowerCase())`.
-fn format_en_us_time(date: &DateTime<Local>, minutes: u32) -> String {
-    // `%-I` = 12-hour, no leading zero; `%p` = `AM`/`PM`.
-    let hour = date.format("%-I");
-    let ampm = date.format("%p").to_string().to_lowercase();
+fn format_en_us_time(date: &ZonedDateTime, minutes: i8) -> String {
+    // `%-I` = 12-hour, no leading zero; `%P` = lowercase `am`/`pm`.
+    let hour = date.strftime("%-I");
+    let ampm = date.strftime("%P");
     if minutes == 0 {
         format!("{hour}{ampm}")
     } else {
@@ -174,13 +182,15 @@ fn format_en_us_time(date: &DateTime<Local>, minutes: u32) -> String {
 ///
 /// Byte-faithful to claude-code `getTimeZone()`
 /// (`Intl.DateTimeFormat().resolvedOptions().timeZone`), which returns the IANA
-/// zone *name* (e.g. `"America/Los_Angeles"`). `iana-time-zone` is already in the
-/// locked dependency graph (transitive via chrono), so this adds an edge, not a
-/// new package. If the host zone cannot be resolved (rare), we fall back to the
-/// chrono `%Z` local-offset rendering (e.g. `"+08:00"`) so the suffix is never
-/// empty — `date` is retained only for that fallback.
-fn reset_time_zone(date: DateTime<Local>) -> String {
-    iana_time_zone::get_timezone().unwrap_or_else(|_| date.format("%Z").to_string())
+/// zone *name* (e.g. `"America/Los_Angeles"`), read from the zone `date` is in.
+/// If that zone has no IANA name (a POSIX `TZ` rule or an unlinked
+/// `/etc/localtime`), we fall back to the local offset (e.g. `"+08:00"`) so the
+/// suffix is never empty.
+fn reset_time_zone(date: &ZonedDateTime) -> String {
+    match date.time_zone().iana_name() {
+        Some(name) => name.to_owned(),
+        None => date.strftime("%:z").to_string(),
+    }
 }
 
 /// Owned, already-formatted reset strings derived from the unified-reset
@@ -231,7 +241,7 @@ pub fn formatted_reset_times_from_headers(headers: &[(String, String)]) -> Forma
 pub fn formatted_reset_times_from_decoded(
     headers: &AnthropicRateLimitHeaders,
 ) -> FormattedResetTimes {
-    formatted_reset_times_at(headers, Local::now())
+    formatted_reset_times_at(headers, &ZonedDateTime::now())
 }
 
 /// Testable core of [`formatted_reset_times_from_headers`] with an injected
@@ -239,7 +249,7 @@ pub fn formatted_reset_times_from_decoded(
 #[must_use]
 fn formatted_reset_times_at(
     headers: &AnthropicRateLimitHeaders,
-    now: DateTime<Local>,
+    now: &ZonedDateTime,
 ) -> FormattedResetTimes {
     let resets_at = headers
         .reset_epoch_seconds

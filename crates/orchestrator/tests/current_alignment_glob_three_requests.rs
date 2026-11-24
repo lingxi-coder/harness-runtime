@@ -702,11 +702,10 @@ async fn native_three_request_glob_reminders_and_tool_results_reach_real_sdk_and
                 .string_at("/uuid")
                 .expect("candidate attachment UUID")
         ));
-        assert!(chrono::DateTime::parse_from_rfc3339(
-            candidate_row
-                .string_at("/timestamp")
-                .expect("candidate attachment timestamp")
-        )
+        assert!((candidate_row
+            .string_at("/timestamp")
+            .expect("candidate attachment timestamp"))
+        .parse::<jiff::Timestamp>()
         .is_ok());
     }
 
@@ -756,11 +755,10 @@ async fn native_three_request_glob_reminders_and_tool_results_reach_real_sdk_and
                 .string_at("/uuid")
                 .expect("candidate tool-result UUID")
         ));
-        assert!(chrono::DateTime::parse_from_rfc3339(
-            candidate_row
-                .string_at("/timestamp")
-                .expect("candidate tool-result timestamp")
-        )
+        assert!((candidate_row
+            .string_at("/timestamp")
+            .expect("candidate tool-result timestamp"))
+        .parse::<jiff::Timestamp>()
         .is_ok());
         assert_eq!(native_row.string_at("/sessionId"), Some(SESSION_UUID));
     }

@@ -490,7 +490,7 @@ fn parse_web_search_output(output: &Source) -> Result<Source, ToolError> {
 /// "<Month> <Year>" (e.g. "June 2026"), matching the knowledge-cutoff date style
 /// — the only non-static byte in the whole string.
 fn web_search_description() -> String {
-    let month_year = chrono::Local::now().format("%B %Y").to_string();
+    let month_year = jiff::ZonedDateTime::now().strftime("%B %Y").to_string();
     // RAW string with real newlines + indentation: a `\n\` line continuation
     // strips the leading "  " of each bullet, so it must NOT be used here. The
     // content is flush-left in the source so the only indentation is the text's.
@@ -521,7 +521,7 @@ fn web_search_description() -> String {
 /// VERBOSE variant this has NO leading and NO trailing newline. RAW Rust string;
 /// the only non-static byte is the `{month_year}` slot.
 fn web_search_description_concise() -> String {
-    let month_year = chrono::Local::now().format("%B %Y").to_string();
+    let month_year = jiff::ZonedDateTime::now().strftime("%B %Y").to_string();
     format!(
         include_str!("templates/claude-code-2.1.319/web-search-lean.md"),
         month_year = month_year
@@ -1006,7 +1006,7 @@ mod tests {
         assert!(d.contains("  - Example format:\n"));
         assert!(d.contains("Usage notes:\n  - Domain filtering can include or block specific websites when supported by the provider\n  - Unsupported providers or search options return an error\n"));
         // Runtime month/year slot: "<Month> <Year>" (e.g. "June 2026").
-        let my = chrono::Local::now().format("%B %Y").to_string();
+        let my = jiff::ZonedDateTime::now().strftime("%B %Y").to_string();
         assert!(d.contains(&format!(
             "The current month is {my}. You MUST use this year"
         )));
@@ -1019,7 +1019,7 @@ mod tests {
         // around the domain-filter param names; `${t}` resolves to "<Month>
         // <Year>" via `U1i()` (= chrono `%B %Y`).
         let c = web_search_description_concise();
-        let my = chrono::Local::now().format("%B %Y").to_string();
+        let my = jiff::ZonedDateTime::now().strftime("%B %Y").to_string();
         assert_eq!(
             c,
             format!(

@@ -1012,11 +1012,12 @@ fn resume_restores_last_assistant_timestamp_sidecar() {
         .message_timing
         .last_assistant_at
         .expect("assistant timestamp restored");
-    let expected: std::time::SystemTime =
-        chrono::DateTime::parse_from_rfc3339("2026-07-19T00:00:03.000Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-            .into();
+    let expected = std::time::SystemTime::try_from(
+        "2026-07-19T00:00:03.000Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(restored, expected);
 }
 
@@ -2190,9 +2191,11 @@ async fn cold_resume_restores_original_display_timestamps_by_uuid() {
     let (_temp, home, cwd, sid, _last, fs) = setup_two_turn_jsonl().await;
     let replayed = replay_session_state(&home, &cwd, sid, fs).await.unwrap();
     for row in &replayed.messages {
-        let expected = chrono::DateTime::parse_from_rfc3339(&row.timestamp)
+        let expected = row
+            .timestamp
+            .parse::<jiff::Timestamp>()
             .unwrap()
-            .timestamp_millis();
+            .as_millisecond();
         assert_eq!(replayed.display_timestamps.get(&row.uuid), Some(&expected));
     }
     assert!(!replayed.display_timestamps.is_empty());

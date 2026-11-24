@@ -1125,7 +1125,7 @@ impl QueryResponseTiming {
                 // This callback runs synchronously at actual SDK dispatch,
                 // after host admission, immediately before the wire call.
                 if self.first_request.is_none() {
-                    self.first_request_wall_ms = Some(chrono::Utc::now().timestamp_millis());
+                    self.first_request_wall_ms = Some(jiff::Timestamp::now().as_millisecond());
                 }
                 self.first_request.get_or_insert(at);
                 self.current_request = Some(at);
@@ -2143,7 +2143,7 @@ impl StreamJsonStream {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp = format!("{:.3}", jiff::Timestamp::now());
         if let Some((display, is_error)) = failure {
             self.enqueue(&Self::build_compact_error_frame(
                 &session_id,
@@ -2288,7 +2288,7 @@ impl StreamJsonStream {
     ) -> Utf16JsonProjection {
         let is_error = result.get_property("error").is_some();
         let uuid = uuid::Uuid::new_v4().to_string();
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp = format!("{:.3}", jiff::Timestamp::now());
         let session_id = self.session_id.lock().await.clone();
         let content_value = model_text
             .string_at("")
@@ -3703,7 +3703,7 @@ impl OutputStream for StreamJsonStream {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp = format!("{:.3}", jiff::Timestamp::now());
         let frame = Self::build_compact_user_frame_projected(
             &session_id,
             summary_uuid,
@@ -4395,7 +4395,7 @@ impl OutputStream for StreamJsonStream {
         let uuid = uuid::Uuid::new_v4().to_string();
         let session_id = self.session_id.lock().await.clone();
         let message = acc.to_message_json(stop_reason);
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp = format!("{:.3}", jiff::Timestamp::now());
         let mut frame = json!({
             "type": "assistant",
             "message": message,

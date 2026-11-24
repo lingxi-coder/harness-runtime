@@ -4093,7 +4093,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             setting_sources: setting_sources_for(&self.cwd),
             n_hooks: 0,
             n_agents: 0,
-            started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            started_at: format!("{:.0}", jiff::Timestamp::now()),
             cwd: self.cwd.clone(),
             // This handle is not coordinator-wired; the count is 0 (T21).
             active_workers: 0,

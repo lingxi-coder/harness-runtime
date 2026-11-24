@@ -328,9 +328,7 @@ fn make_notice(
             api_refusal_category: info.event.api_refusal_category.clone(),
             // Native sHo writes this key as explicit JSON null.
             api_refusal_explanation: None,
-            notice_timestamp: Some(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
+            notice_timestamp: Some(format!("{:.3}", jiff::Timestamp::now())),
             // Host-only profile fields preserve multi-provider restoration.
             // They do not add a model-route marker or change native model
             // restoration (`previousAppStateModel` remains the launch model).
@@ -436,8 +434,8 @@ pub(crate) async fn surface_declined(
     info: &llm_runtime::history::HistoryServerFallback,
     response_message_id: Option<&str>,
 ) -> (lingxi_core::types::MessageId, &'static str) {
-    let timestamp = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+    let timestamp = jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     if info.event.reason == "refusal" {
         let details = llm_runtime::HistoryStopDetails::from_parts(

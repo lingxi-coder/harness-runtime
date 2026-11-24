@@ -130,7 +130,7 @@ fn object(fields: Vec<(&str, Source)>) -> Source {
 /// shape) — matches [`ConversationOrchestrator::to_jsonl_message`]'s timestamp
 /// format so the copied lines are indistinguishable from live-written ones.
 fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    format!("{:.3}", jiff::Timestamp::now())
 }
 
 /// Project `conversation` into resume-loader-compatible JSONL lines for a NEW

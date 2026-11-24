@@ -15,13 +15,12 @@
 //! `/cost --day` and `/cost --month` flags; until then, both buckets equal
 //! the session total.
 //!
-//! The labels (`YYYY-MM-DD` and `YYYY-MM`) ARE correct as of `Utc::now()`.
+//! The labels (`YYYY-MM-DD` and `YYYY-MM`) ARE correct as of `jiff::Timestamp::now()`.
 
 #![forbid(unsafe_code)]
 
 use crate::tracker::{CostState, CostTracker};
 use crate::ModelRef;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -120,9 +119,9 @@ impl CostTracker {
     /// the cumulative session total.
     pub async fn summary(&self) -> CostSummary {
         let state: CostState = self.snapshot().await;
-        let now = Utc::now();
-        let day_label = now.format("%Y-%m-%d").to_string();
-        let month_label = now.format("%Y-%m").to_string();
+        let now = jiff::Timestamp::now();
+        let day_label = now.strftime("%Y-%m-%d").to_string();
+        let month_label = now.strftime("%Y-%m").to_string();
 
         let mut total_tokens = 0u64;
         let mut by_model = HashMap::new();

@@ -14,7 +14,7 @@ sha2 = "0.10"
 semver = "1"
 branding.workspace = true
 client = { path = "../client", features = ["adapter"] }
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { workspace = true }
 core = { path = "../core" }
 futures.workspace = true
 hooks = { path = "../hooks" }

@@ -214,9 +214,11 @@ pub fn restore_silent_clocks(
             continue;
         };
         let outer_id = MessageId::from_uuid(uuid);
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&row.timestamp)
+        let timestamp = row
+            .timestamp
+            .parse::<jiff::Timestamp>()
             .ok()
-            .map(|time| time.timestamp_millis());
+            .map(|time| time.as_millisecond());
         let payload = (row.message_type == "attachment")
             .then_some(row.attachment_projection.as_ref())
             .flatten();
@@ -623,9 +625,10 @@ mod tests {
             row["message"]["id"] = inner.into();
         }
         if let Some(seconds) = seconds {
-            row["timestamp"] = chrono::DateTime::from_timestamp(seconds, 0)
+            row["timestamp"] = jiff::Timestamp::from_second(seconds)
                 .unwrap()
-                .to_rfc3339()
+                .display_with_offset(jiff::tz::Offset::UTC)
+                .to_string()
                 .into();
         }
         if let Some(attachment) = attachment {
@@ -802,9 +805,7 @@ mod tests {
             };
             let elapsed_ms = case["stretch"]["silentSince"].as_str().map(|since| {
                 case["nowMs"].as_i64().unwrap()
-                    - chrono::DateTime::parse_from_rfc3339(since)
-                        .unwrap()
-                        .timestamp_millis()
+                    - since.parse::<jiff::Timestamp>().unwrap().as_millisecond()
             });
             assert_eq!(
                 should_emit_with_elapsed(
@@ -832,10 +833,12 @@ mod tests {
             let mut reminder_timestamps = HashMap::new();
             let mut ids = HashMap::new();
             for row in case["messages"].as_array().unwrap() {
-                let timestamp =
-                    chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str().unwrap())
-                        .unwrap()
-                        .timestamp_millis();
+                let timestamp = row["timestamp"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<jiff::Timestamp>()
+                    .unwrap()
+                    .as_millisecond();
                 let message = match row["type"].as_str().unwrap() {
                     "attachment" => {
                         marks.push(history.len());
@@ -909,11 +912,9 @@ mod tests {
             );
             assert_eq!(
                 actual.silent_since_ms,
-                case["stretch"]["silentSince"].as_str().map(|value| {
-                    chrono::DateTime::parse_from_rfc3339(value)
-                        .unwrap()
-                        .timestamp_millis()
-                }),
+                case["stretch"]["silentSince"]
+                    .as_str()
+                    .map(|value| { value.parse::<jiff::Timestamp>().unwrap().as_millisecond() }),
                 "{case}"
             );
         }

@@ -618,11 +618,9 @@ fn scan_memory_inventory(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|time| time.as_millis())
                 .unwrap_or_default();
-            let date = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
-                i64::try_from(millis).unwrap_or(i64::MAX),
-            )
-            .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-            .unwrap_or_default();
+            let date = jiff::Timestamp::from_millisecond(i64::try_from(millis).unwrap_or(i64::MAX))
+                .map(|date| format!("{date:.3}"))
+                .unwrap_or_default();
             render_existing_memory_file(
                 &filename,
                 &date,

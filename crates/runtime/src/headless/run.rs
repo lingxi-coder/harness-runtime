@@ -755,7 +755,7 @@ async fn run_stream_compact_command(
 ) {
     let started = std::time::Instant::now();
     let uuid = command_uuid.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let timestamp = format!("{:.3}", jiff::Timestamp::now());
     let instructions_source = Utf16JsonProjection::from(instructions);
     let result = runtime
         .orchestrator

@@ -26,7 +26,6 @@ use crate::rollout::record::{
     GitInfo, RolloutItem, RolloutLine, SessionMeta, SessionMetaLine, SessionSource, ThreadId,
 };
 use crate::rollout::SESSIONS_SUBDIR;
-use chrono::{SecondsFormat, Utc};
 use serde_json::Value;
 use std::fs;
 use std::fs::File;
@@ -225,7 +224,7 @@ impl RolloutRecorder {
                 let thread_id = log_file_info.conversation_id;
                 let started_at = log_file_info.timestamp;
 
-                let timestamp = started_at.to_rfc3339_opts(SecondsFormat::Millis, true);
+                let timestamp = format!("{started_at:.3}");
 
                 let context_window = initial_window_id
                     .map(|window_id| serde_json::json!({ "window_id": window_id }));
@@ -497,7 +496,7 @@ fn is_legacy_ghost_snapshot_response_item(value: &Value) -> bool {
 pub(crate) struct LogFileInfo {
     path: PathBuf,
     conversation_id: ThreadId,
-    timestamp: chrono::DateTime<Utc>,
+    timestamp: jiff::Timestamp,
 }
 
 fn precompute_log_file_info(
@@ -507,15 +506,15 @@ fn precompute_log_file_info(
     // Resolve <codex_home>/sessions/YYYY/MM/DD. Codex uses local time; we use
     // UTC for deterministic paths (the bytes that matter are the filename and
     // the meta line, both reproduced).
-    let timestamp = Utc::now();
+    let timestamp = jiff::Timestamp::now();
     let mut dir = config.codex_home().to_path_buf();
     dir.push(SESSIONS_SUBDIR);
-    dir.push(timestamp.format("%Y").to_string());
-    dir.push(timestamp.format("%m").to_string());
-    dir.push(timestamp.format("%d").to_string());
+    dir.push(timestamp.strftime("%Y").to_string());
+    dir.push(timestamp.strftime("%m").to_string());
+    dir.push(timestamp.strftime("%d").to_string());
 
     // Filename: rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl
-    let date_str = timestamp.format("%Y-%m-%dT%H-%M-%S").to_string();
+    let date_str = timestamp.strftime("%Y-%m-%dT%H-%M-%S").to_string();
     let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
     let path = dir.join(filename);
 
@@ -832,7 +831,7 @@ struct RolloutLineRef<'a> {
 
 impl JsonlWriter {
     async fn write_rollout_item(&mut self, rollout_item: &RolloutItem) -> std::io::Result<()> {
-        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let timestamp = format!("{:.3}", jiff::Timestamp::now());
         let line = RolloutLineRef {
             timestamp,
             item: rollout_item,

@@ -752,7 +752,7 @@ async fn replay_case(case: &str, duration_expression: &str) {
         .expect("typed tool-result row");
     assert!(session::jsonl::uuid::validate_uuid(&typed_tool_row.uuid));
     assert!(
-        chrono::DateTime::parse_from_rfc3339(&typed_tool_row.timestamp).is_ok(),
+        typed_tool_row.timestamp.parse::<jiff::Timestamp>().is_ok(),
         "generated timestamp retains RFC3339 encoding: {case}"
     );
     assert!(typed_tool_row.timestamp.ends_with('Z'));
@@ -779,12 +779,11 @@ async fn replay_case(case: &str, duration_expression: &str) {
         ),
         "Native tool-result UUID format is independently checked"
     );
-    assert!(chrono::DateTime::parse_from_rfc3339(
-        expected
-            .native_row
-            .string_at("/timestamp")
-            .expect("Native row timestamp")
-    )
+    assert!((expected
+        .native_row
+        .string_at("/timestamp")
+        .expect("Native row timestamp"))
+    .parse::<jiff::Timestamp>()
     .is_ok());
 
     println!(

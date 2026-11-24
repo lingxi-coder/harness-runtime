@@ -240,8 +240,7 @@ pub fn os_version_string() -> String {
 /// ${date}.`).
 #[must_use]
 pub fn current_date_string() -> String {
-    use chrono::Datelike;
-    let now = chrono::Local::now();
+    let now = jiff::ZonedDateTime::now();
     format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day())
 }
 

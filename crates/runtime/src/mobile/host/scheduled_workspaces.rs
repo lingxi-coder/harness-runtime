@@ -114,7 +114,7 @@ impl ScheduledWorkspace {
             }
             record
         } else {
-            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let date = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
             let slug: String = title
                 .chars()
                 .map(|c| {

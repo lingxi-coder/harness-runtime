@@ -270,34 +270,36 @@ mod format_reset_time_tests {
     //! runner's timezone: the function re-derives local Y/M/D/H/M from the epoch
     //! it is given, which round-trips the components we constructed. The tz
     //! suffix (`reset_time_zone`) renders the host IANA zone name via
-    //! `iana-time-zone` (byte-faithful to TS `getTimeZone()`), which is
+    //! `TimeZone::iana_name` (byte-faithful to TS `getTimeZone()`), which is
     //! host-dependent — so the showTimezone tests assert the structural ` (…)`
     //! shape, not a literal zone string.
     use super::*;
 
-    /// A `DateTime<Local>` for the given local wall-clock components. Tests pass
-    /// `.timestamp()` of this into the formatter; `format_reset_time_at` then
+    /// A local `ZonedDateTime` for the given wall-clock components. Tests pass
+    /// its Unix seconds into the formatter; `format_reset_time_at` then
     /// rebuilds the same local components, so the rendered output matches what
     /// these inputs describe regardless of the machine timezone.
-    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
-        Local.with_ymd_and_hms(y, mo, d, h, mi, 0).single().unwrap()
+    fn local(y: i16, mo: i8, d: i8, h: i8, mi: i8) -> ZonedDateTime {
+        jiff::civil::datetime(y, mo, d, h, mi, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
+            .unwrap()
     }
 
     fn fmt(
-        reset: DateTime<Local>,
-        now: DateTime<Local>,
+        reset: &ZonedDateTime,
+        now: &ZonedDateTime,
         show_tz: bool,
         show_time: bool,
     ) -> Option<String> {
-        format_reset_time_at(Some(reset.timestamp()), now, show_tz, show_time)
+        format_reset_time_at(Some(reset.timestamp().as_second()), now, show_tz, show_time)
     }
 
     #[test]
     fn none_or_zero_timestamp_returns_none() {
         let now = local(2026, 6, 5, 12, 0);
-        assert_eq!(format_reset_time_at(None, now, false, true), None);
+        assert_eq!(format_reset_time_at(None, &now, false, true), None);
         // TS `if (!timestampInSeconds)` treats 0 as falsy.
-        assert_eq!(format_reset_time_at(Some(0), now, false, true), None);
+        assert_eq!(format_reset_time_at(Some(0), &now, false, true), None);
     }
 
     #[test]
@@ -305,7 +307,7 @@ mod format_reset_time_tests {
         // 3:00pm, ~3h out → "3pm".
         let now = local(2026, 6, 5, 12, 0);
         let reset = local(2026, 6, 5, 15, 0);
-        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("3pm"));
+        assert_eq!(fmt(&reset, &now, false, true).as_deref(), Some("3pm"));
     }
 
     #[test]
@@ -313,7 +315,7 @@ mod format_reset_time_tests {
         // 3:30pm, ~3.5h out → "3:30pm".
         let now = local(2026, 6, 5, 12, 0);
         let reset = local(2026, 6, 5, 15, 30);
-        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("3:30pm"));
+        assert_eq!(fmt(&reset, &now, false, true).as_deref(), Some("3:30pm"));
     }
 
     #[test]
@@ -321,11 +323,11 @@ mod format_reset_time_tests {
         // 12am (midnight) and 12pm (noon) — hour12 = 12, not 0.
         let now = local(2026, 6, 5, 23, 0);
         let midnight = local(2026, 6, 6, 0, 0);
-        assert_eq!(fmt(midnight, now, false, true).as_deref(), Some("12am"));
+        assert_eq!(fmt(&midnight, &now, false, true).as_deref(), Some("12am"));
 
         let now2 = local(2026, 6, 5, 10, 0);
         let noon = local(2026, 6, 5, 12, 5);
-        assert_eq!(fmt(noon, now2, false, true).as_deref(), Some("12:05pm"));
+        assert_eq!(fmt(&noon, &now2, false, true).as_deref(), Some("12:05pm"));
     }
 
     #[test]
@@ -334,7 +336,7 @@ mod format_reset_time_tests {
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2026, 6, 7, 15, 30);
         assert_eq!(
-            fmt(reset, now, false, true).as_deref(),
+            fmt(&reset, &now, false, true).as_deref(),
             Some("Jun 7, 3:30pm")
         );
     }
@@ -344,7 +346,10 @@ mod format_reset_time_tests {
         // Reset Jun 7 3:00pm → "Jun 7, 3pm".
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2026, 6, 7, 15, 0);
-        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("Jun 7, 3pm"));
+        assert_eq!(
+            fmt(&reset, &now, false, true).as_deref(),
+            Some("Jun 7, 3pm")
+        );
     }
 
     #[test]
@@ -353,7 +358,7 @@ mod format_reset_time_tests {
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2027, 6, 7, 15, 30);
         assert_eq!(
-            fmt(reset, now, false, true).as_deref(),
+            fmt(&reset, &now, false, true).as_deref(),
             Some("Jun 7, 2027, 3:30pm")
         );
     }
@@ -363,7 +368,7 @@ mod format_reset_time_tests {
         // showTime=false on the far-future branch → "Jun 7" (no time at all).
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2026, 6, 7, 15, 30);
-        assert_eq!(fmt(reset, now, false, false).as_deref(), Some("Jun 7"));
+        assert_eq!(fmt(&reset, &now, false, false).as_deref(), Some("Jun 7"));
     }
 
     #[test]
@@ -371,7 +376,7 @@ mod format_reset_time_tests {
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2027, 6, 7, 15, 30);
         assert_eq!(
-            fmt(reset, now, false, false).as_deref(),
+            fmt(&reset, &now, false, false).as_deref(),
             Some("Jun 7, 2027")
         );
     }
@@ -382,22 +387,22 @@ mod format_reset_time_tests {
         // never " pm".
         let now = local(2026, 6, 5, 1, 0);
         let am = local(2026, 6, 5, 9, 15);
-        let s = fmt(am, now, false, true).unwrap();
+        let s = fmt(&am, &now, false, true).unwrap();
         assert_eq!(s, "9:15am");
         assert!(!s.contains("AM") && !s.contains("PM") && !s.contains(' '));
     }
 
     #[test]
     fn show_timezone_appends_parenthesised_suffix() {
-        // Date/time portion is byte-faithful; the tz suffix is the chrono %Z
-        // offset (documented divergence), so assert the structural shape: the
+        // Date/time portion is byte-faithful; the tz suffix is the host zone
+        // name, which is host-dependent, so assert the structural shape: the
         // base string, a single space, then a non-empty "(…)".
         let now = local(2026, 6, 5, 12, 0);
         let reset = local(2026, 6, 5, 15, 30);
-        let off = fmt(reset, now, false, true).unwrap();
+        let off = fmt(&reset, &now, false, true).unwrap();
         assert_eq!(off, "3:30pm");
 
-        let on = fmt(reset, now, true, true).unwrap();
+        let on = fmt(&reset, &now, true, true).unwrap();
         assert!(on.starts_with("3:30pm ("), "got {on}");
         assert!(on.ends_with(')'), "got {on}");
         // The suffix is exactly " (<tz>)" with a non-empty tz.
@@ -409,7 +414,7 @@ mod format_reset_time_tests {
     fn show_timezone_on_far_future_branch_appends_suffix_after_time() {
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2026, 6, 7, 15, 30);
-        let on = fmt(reset, now, true, true).unwrap();
+        let on = fmt(&reset, &now, true, true).unwrap();
         assert!(on.starts_with("Jun 7, 3:30pm ("), "got {on}");
         assert!(on.ends_with(')'), "got {on}");
     }
@@ -420,12 +425,12 @@ mod format_reset_time_tests {
         // stays on the time-only branch (TS `hoursUntilReset > 24`).
         let now = local(2026, 6, 5, 15, 30);
         let reset = local(2026, 6, 6, 15, 30); // exactly 24h
-        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("3:30pm"));
+        assert_eq!(fmt(&reset, &now, false, true).as_deref(), Some("3:30pm"));
 
         // One minute past 24h flips to the date branch.
         let reset_past = local(2026, 6, 6, 15, 31);
         assert_eq!(
-            fmt(reset_past, now, false, true).as_deref(),
+            fmt(&reset_past, &now, false, true).as_deref(),
             Some("Jun 6, 3:31pm")
         );
     }
@@ -433,8 +438,8 @@ mod format_reset_time_tests {
     #[test]
     fn formatted_reset_times_from_headers_maps_both_windows() {
         let now = local(2026, 6, 5, 10, 0);
-        let resets_at = local(2026, 6, 5, 13, 0).timestamp(); // 1pm, within 24h
-        let overage_at = local(2026, 6, 7, 9, 0).timestamp(); // Jun 7 9am, >24h
+        let resets_at = local(2026, 6, 5, 13, 0).timestamp().as_second(); // 1pm, within 24h
+        let overage_at = local(2026, 6, 7, 9, 0).timestamp().as_second(); // Jun 7 9am, >24h
         let headers = vec![
             (
                 "anthropic-ratelimit-unified-reset".into(),
@@ -448,9 +453,9 @@ mod format_reset_time_tests {
         // `formatted_reset_times_*` calls the formatter with showTimezone=true
         // (matching TS `formatResetTime(resetsAt, true)`), so each string carries
         // the tz suffix. The date/time prefix is byte-faithful; the parenthesised
-        // suffix is the chrono %Z offset (documented divergence), so assert the
+        // suffix is the host zone name (host-dependent), so assert the
         // prefix + shape rather than a literal zone.
-        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), now);
+        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), &now);
         let rt = f.reset_time.as_deref().unwrap();
         assert!(rt.starts_with("1pm ("), "got {rt}");
         assert!(rt.ends_with(')'), "got {rt}");
@@ -482,14 +487,14 @@ mod format_reset_time_tests {
     fn formatted_reset_times_absent_or_non_numeric_headers_yield_none() {
         let now = local(2026, 6, 5, 10, 0);
         // Missing both → all None (Number(undefined) → NaN → undefined).
-        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::default(), now);
+        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::default(), &now);
         assert_eq!(f.reset_time, None);
         assert_eq!(f.overage_reset_time, None);
         assert_eq!(f.reset_is_earlier, None);
 
         // Non-numeric `reset` header → None (Number("soon") → NaN).
         let headers = vec![("anthropic-ratelimit-unified-reset".into(), "soon".into())];
-        let f2 = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), now);
+        let f2 = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), &now);
         assert_eq!(f2.reset_time, None);
         assert_eq!(f2.reset_is_earlier, None);
     }
@@ -497,12 +502,12 @@ mod format_reset_time_tests {
     #[test]
     fn formatted_reset_times_overage_only_picks_overage_window() {
         let now = local(2026, 6, 5, 10, 0);
-        let overage_at = local(2026, 6, 5, 14, 0).timestamp(); // 2pm
+        let overage_at = local(2026, 6, 5, 14, 0).timestamp().as_second(); // 2pm
         let headers = vec![(
             "anthropic-ratelimit-unified-overage-reset".into(),
             overage_at.to_string(),
         )];
-        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), now);
+        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), &now);
         assert_eq!(f.reset_time, None);
         // showTimezone=true → "2pm (<offset>)"; assert prefix/shape.
         let ort = f.overage_reset_time.as_deref().unwrap();

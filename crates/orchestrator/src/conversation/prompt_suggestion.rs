@@ -59,7 +59,7 @@ struct SuggestionQuery {
 }
 
 fn now_ms() -> f64 {
-    chrono::Utc::now().timestamp_millis() as f64
+    jiff::Timestamp::now().as_millisecond() as f64
 }
 
 fn js_whitespace(c: char) -> bool {
@@ -476,7 +476,7 @@ impl ConversationOrchestrator {
                 }
                 migrations::global_config::ensure_first_start_metadata(
                     &path,
-                    &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    &format!("{:.3}", jiff::Timestamp::now()),
                     lingxi_core::host::CLAUDE_CODE_VERSION,
                 )
                 .map_err(|error| std::io::Error::other(error.to_string()))
@@ -504,12 +504,12 @@ impl ConversationOrchestrator {
             .and_then(|m| m.get("firstStartTime"))
             .and_then(Value::as_str)
             .map(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .map(|d| d.timestamp_millis() as f64)
+                s.parse::<jiff::Timestamp>()
+                    .map(|d| d.as_millisecond() as f64)
                     .or_else(|_| {
-                        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| {
-                            d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as f64
-                        })
+                        jiff::civil::Date::strptime("%Y-%m-%d", s)
+                            .and_then(|d| jiff::tz::TimeZone::UTC.to_timestamp(d.into()))
+                            .map(|d| d.as_millisecond() as f64)
                     })
                     .unwrap_or(f64::NAN)
             });

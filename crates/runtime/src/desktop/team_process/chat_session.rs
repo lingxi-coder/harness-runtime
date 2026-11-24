@@ -148,7 +148,7 @@ impl DispatchLedger {
         let writer = self.writer.get().ok_or(TeamProcessError::Worker)?;
         let n = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let event = format!("team-dispatch:{}:{}:{n}", self.task_id, self.epoch);
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now = format!("{:.3}", jiff::Timestamp::now());
         let row = serde_json::json!({"type":"system","subtype":"team_bot_dispatch","uuid":uuid(&event),"sessionId":self.session_id.as_uuid().to_string(),"parentUuid":null,"timestamp":now,"isSidechain":false,"isMeta":true,"isVisibleInTranscriptOnly":true,"message":{"role":"system","content":""},"taskId":self.task_id,"epoch":self.epoch,"sequence":n});
         writer
             .append_json_once_durable(
@@ -337,15 +337,15 @@ async fn project_batch(
         .ok_or(TeamProcessError::Worker)?
         .to_string_lossy()
         .into_owned();
-    let timestamp = chrono::DateTime::from_timestamp_millis(
+    let timestamp = jiff::Timestamp::from_millisecond(
         batch
             .messages
             .last()
             .ok_or(TeamProcessError::Protocol)?
             .created_at as i64,
     )
-    .ok_or(TeamProcessError::Protocol)?
-    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    .map_err(|_| TeamProcessError::Protocol)?;
+    let timestamp = format!("{timestamp:.3}");
     let base = |id: uuid::Uuid| serde_json::json!({"type":"user","uuid":id.to_string(),"parentUuid":null,"sessionId":session_id,"timestamp":timestamp,"cwd":cwd,"version":env!("CARGO_PKG_VERSION"),"isSidechain":false,"userType":"external","message":{"role":"user","content":[]}});
     let sources = if batch.changes.is_empty() {
         batch.messages.clone()
@@ -368,10 +368,9 @@ async fn project_batch(
         }
         let msg = message(batch, &source, files)?;
         let mut row = base(msg.id().as_uuid());
-        row["timestamp"] = chrono::DateTime::from_timestamp_millis(source.created_at as i64)
-            .ok_or(TeamProcessError::Protocol)?
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-            .into();
+        let created_at = jiff::Timestamp::from_millisecond(source.created_at as i64)
+            .map_err(|_| TeamProcessError::Protocol)?;
+        row["timestamp"] = format!("{created_at:.3}").into();
         row["origin"] =
             serde_json::json!({"kind":"shared_chat","batchId":batch.batch_id,"source":source});
         row["message"] = serde_json::json!({"role":"user","content":text(&source)?});
@@ -624,7 +623,7 @@ pub(super) async fn record_result(
         .ok_or(TeamProcessError::Worker)?
         .session_id()
         .map_err(storage_error)?;
-    let row = serde_json::json!({"type":"system","subtype":"team_bot_result","uuid":uuid(&format!("team-result:{task_id}")),"sessionId":session_id.as_uuid().to_string(),"parentUuid":null,"timestamp":chrono::DateTime::from_timestamp_millis(result.finished_at as i64).ok_or(TeamProcessError::Protocol)?.to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"isSidechain":false,"isMeta":true,"isVisibleInTranscriptOnly":true,"message":{"role":"system","content":""},"taskId":task_id,"result":result});
+    let row = serde_json::json!({"type":"system","subtype":"team_bot_result","uuid":uuid(&format!("team-result:{task_id}")),"sessionId":session_id.as_uuid().to_string(),"parentUuid":null,"timestamp":format!("{:.3}", jiff::Timestamp::from_millisecond(result.finished_at as i64).map_err(|_| TeamProcessError::Protocol)?),"isSidechain":false,"isMeta":true,"isVisibleInTranscriptOnly":true,"message":{"role":"system","content":""},"taskId":task_id,"result":result});
     writer
         .append_json_once_durable(
             &format!("team-result:{task_id}"),

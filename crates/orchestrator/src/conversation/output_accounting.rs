@@ -250,8 +250,9 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed();
         let started_at = SystemTime::now().checked_sub(elapsed).unwrap_or(UNIX_EPOCH);
-        let started_at = chrono::DateTime::<chrono::Utc>::from(started_at)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let started_at = jiff::Timestamp::try_from(started_at)
+            .map(|started_at| format!("{started_at:.3}"))
+            .unwrap_or_default();
 
         let (model, profile) = {
             let s = self.session.lock().await;
@@ -446,9 +447,8 @@ fn session_measure_rate_limit(
         "percentUsed":(window.utilization * 1000.0).round() / 10.0,
     });
     if let Ok(seconds) = i64::try_from(window.resets_at) {
-        if let Some(reset) = chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0) {
-            limit["resetsAt"] =
-                serde_json::json!(reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        if let Ok(reset) = jiff::Timestamp::from_second(seconds) {
+            limit["resetsAt"] = serde_json::json!(format!("{reset:.3}"));
         }
     }
     limit
