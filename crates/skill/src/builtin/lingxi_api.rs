@@ -555,6 +555,17 @@ mod tests {
             ),
             ("我只在 iPhone 上有这个 Local App，怎么只发给一个同事？如果后来决定让大家都能安装，要怎么操作？", "local-apps#source-zip"),
             ("我的手机通过远控打开电脑上的应用，我昨天记的数据这次还能继续用吗？", "local-apps#paired-devices"),
+            ("如何添加好友？", "friends#add-friend"),
+            ("How do I add a friend by username?", "friends#add-friend"),
+            ("怎么重置我的好友链接？", "friends#friend-link"),
+            ("如何拉黑一个人？", "friends#block"),
+            ("怎么邀请好友加入团队？", "friends#team-offer"),
+            ("怎么把 Bot 分享给好友？", "friends#friend-bots"),
+            ("如何转让团队所有者？", "teams#roles"),
+            ("如何创建数据集？", "datasets#personal-data"),
+            ("怎么在群里分享数据集？", "datasets#share-data"),
+            ("How do I connect a database as a data source?", "datasets#data-sources"),
+            ("如何给 Local App 绑定数据集？", "datasets#bindings"),
         ] {
             let prompt = render(body(), &question.into());
             let text = prompt.string_at("").unwrap();

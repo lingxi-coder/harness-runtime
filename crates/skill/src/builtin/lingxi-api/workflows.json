@@ -17,5 +17,17 @@
   {"topic":"local-app","page":"local-apps","section":"share-options","queries":["share a local app","share local app","共享 Local App","分享 Local App","共享本地应用","分享本地应用"],"contexts":["Local App","本地应用"],"refinements":[{"section":"source-zip","qualifiers":["only to one person","privately","单独发给","只发给","私下分享","共享给一位同事","分享给一位同事"]},{"section":"market","qualifiers":["for everyone to install","让大家都能安装"]}]},
   {"topic":"local-app","page":"local-apps","section":"market","queries":["publish to the app market","publish to the market","publish to market","install a copy of my app","发布到应用市场","发布到市场","上架应用","让别人安装我的应用"]},
   {"topic":"local-app","page":"local-apps","section":"source-zip","queries":["share a local app privately","share a source zip","export a source zip","import a source zip","私下分享 Local App","导出源码 ZIP","导入源码 ZIP"]},
-  {"topic":"local-app","page":"local-apps","section":"paired-devices","queries":["open my desktop app on my phone","share an app with my phone","手机打开电脑上的应用","远控打开电脑上的应用","在手机上使用桌面应用"]}
+  {"topic":"local-app","page":"local-apps","section":"paired-devices","queries":["open my desktop app on my phone","share an app with my phone","手机打开电脑上的应用","远控打开电脑上的应用","在手机上使用桌面应用"]},
+  {"topic":"teams","page":"teams","section":"roles","queries":["make owner","transfer ownership","make an admin","leave a team","delete a team","转让团队","设为管理员","退出团队","删除团队"]},
+  {"topic":"friends","page":"friends","section":"add-friend","queries":["add a friend","add friend","find a friend","添加好友","加好友","搜索好友"]},
+  {"topic":"friends","page":"friends","section":"friend-link","queries":["friend link","share my friend link","好友链接","分享好友链接"]},
+  {"topic":"friends","page":"friends","section":"requests","queries":["friend request","accept a friend request","好友请求","好友申请"]},
+  {"topic":"friends","page":"friends","section":"block","queries":["block a friend","remove a friend","unfriend","删除好友","拉黑","屏蔽好友"]},
+  {"topic":"friends","page":"friends","section":"friend-bots","queries":["把 Bot 分享给好友","给好友共享 Bot","好友的 Bot"]},
+  {"topic":"friends","page":"friends","section":"team-offer","queries":["invite a friend to a team","invite friends to a team","邀请好友加入团队","邀请好友进团队"]},
+  {"topic":"datasets","page":"datasets","section":"personal-data","queries":["create a dataset","new dataset","创建数据集","新建数据集"]},
+  {"topic":"datasets","page":"datasets","section":"share-data","queries":["share a dataset","share data","共享数据集","分享数据集","分享数据"]},
+  {"topic":"datasets","page":"datasets","section":"conversation-data","queries":["conversation data","会话数据"]},
+  {"topic":"datasets","page":"datasets","section":"data-sources","queries":["connect a database","data source","连接数据库","数据源"]},
+  {"topic":"datasets","page":"datasets","section":"bindings","queries":["bind a dataset","dataset binding","绑定数据集"]}
 ]
