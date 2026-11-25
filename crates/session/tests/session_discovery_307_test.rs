@@ -65,6 +65,18 @@ async fn exact_source_description_keeps_the_selected_copy_and_never_falls_back()
     record_session_cwd_alias(&home, &selected, &b)
         .await
         .unwrap();
+    let stale_alias = describe_session_source(
+        &home,
+        &b.to_string_lossy(),
+        SessionDiscoveryScope::Current,
+        &selected,
+        id,
+    )
+    .await;
+    assert!(matches!(
+        stale_alias,
+        Err(LoaderError::SessionNotFound { .. })
+    ));
     append_relocated(&selected, id, &b);
     let row = describe_session_source(
         &home,

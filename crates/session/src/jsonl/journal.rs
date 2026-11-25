@@ -14,6 +14,7 @@ use lingxi_core::host::FsError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -175,7 +176,8 @@ pub struct QuarantineReport {
 /// Production mutation requires the canonical session's exclusive writer
 /// claim. All cooperating writers must use this type and its `ledger.lock`;
 /// within that boundary clones share a validated-prefix index and appends do
-/// not rescan historical payloads. Metadata changes trigger a full replay, but
+/// not decode historical payloads. On filesystems with whole-second timestamps,
+/// the prefix bytes are also checked before reuse. Metadata changes trigger a full replay, but
 /// the cache does not claim to detect a hostile writer that rewrites bytes and
 /// restores every observable file attribute. The WAL, never this derivative
 /// index, remains authoritative on recovery.
@@ -197,6 +199,7 @@ struct JournalScan {
     replay: JournalReplay,
     locations: std::collections::HashMap<String, JournalRecordLocation>,
     validated_len: u64,
+    prefix_hash: Sha256,
     fingerprint: Option<JournalFileFingerprint>,
 }
 
@@ -222,6 +225,7 @@ struct JournalRecordLocation {
 struct JournalIndex {
     journal_present: bool,
     validated_len: u64,
+    prefix_hash: Sha256,
     last_revision: u64,
     locations: std::collections::HashMap<String, JournalRecordLocation>,
     fingerprint: Option<JournalFileFingerprint>,
@@ -275,10 +279,6 @@ enum JournalScanKind {
 }
 
 impl JournalScanState {
-    fn new() -> Self {
-        Self::after_revision(0)
-    }
-
     fn after_revision(last_revision: u64) -> Self {
         Self {
             entries: Vec::new(),
@@ -346,6 +346,7 @@ impl JournalIndex {
         Self {
             journal_present: scan.replay.journal_present,
             validated_len: scan.validated_len,
+            prefix_hash: scan.prefix_hash.clone(),
             last_revision: scan.replay.last_revision,
             locations: std::mem::take(&mut scan.locations),
             fingerprint: scan.fingerprint.clone(),
@@ -414,6 +415,32 @@ impl JournalFileFingerprint {
         {
             self.created == other.created
         }
+    }
+
+    /// Both timestamps can stay unchanged across ordinary HFS+ writes in the
+    /// same second. The newly opened descriptor starts at byte zero; the suffix
+    /// above the indexed prefix is checked separately.
+    fn matches_validated_prefix(
+        &self,
+        file: &mut fs::File,
+        len: u64,
+        expected: &Sha256,
+    ) -> Result<bool, JournalError> {
+        #[cfg(unix)]
+        if self.changed_nanoseconds != 0 {
+            return Ok(true);
+        }
+        if self
+            .modified
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|elapsed| elapsed.subsec_nanos() != 0)
+        {
+            return Ok(true);
+        }
+        let mut actual = Sha256::new();
+        let read = std::io::copy(&mut file.take(len), &mut actual)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        Ok(read == len && actual.finalize() == expected.clone().finalize())
     }
 }
 
@@ -575,43 +602,33 @@ impl DurableJournal {
                     },
                     locations: std::collections::HashMap::new(),
                     validated_len: 0,
+                    prefix_hash: Sha256::new(),
                     fingerprint: None,
                 });
             }
             Err(error) => return Err(error.into()),
         };
-        let mut scan = self.scan_file_locked(file, 0, 0, None, collect_entries, visitor, true)?;
+        let mut scan = self.scan_file_locked(file, None, collect_entries, visitor, true)?;
         scan.fingerprint = self.current_fingerprint_locked()?;
         Ok(scan)
     }
 
     fn scan_suffix_locked(
         &self,
-        start_offset: u64,
-        last_revision: u64,
-        prior_locations: &std::collections::HashMap<String, JournalRecordLocation>,
+        mut file: fs::File,
+        index: &JournalIndex,
     ) -> Result<JournalScan, JournalError> {
         self.note_scan(JournalScanKind::Suffix);
-        let relative = Path::new(JOURNAL_FILE_NAME);
-        let mut file = open_read_file_pinned(&self.root, relative, Some(&self.identity))?;
         let length = JournalFileFingerprint::from_file(&file)?.len;
-        if length < start_offset {
+        if length < index.validated_len {
             return Err(JournalError::Corrupted {
                 offset: length,
                 reason: "journal shrank before suffix validation".into(),
             });
         }
-        file.seek(SeekFrom::Start(start_offset))
+        file.seek(SeekFrom::Start(index.validated_len))
             .map_err(|error| FsError::Io(error.to_string()))?;
-        let mut scan = self.scan_file_locked(
-            file,
-            start_offset,
-            last_revision,
-            Some(prior_locations),
-            false,
-            None,
-            true,
-        )?;
+        let mut scan = self.scan_file_locked(file, Some(index), false, None, true)?;
         scan.fingerprint = self.current_fingerprint_locked()?;
         Ok(scan)
     }
@@ -619,22 +636,19 @@ impl DurableJournal {
     fn scan_file_locked(
         &self,
         file: fs::File,
-        start_offset: u64,
-        last_revision: u64,
-        prior_locations: Option<&std::collections::HashMap<String, JournalRecordLocation>>,
+        prior: Option<&JournalIndex>,
         collect_entries: bool,
         mut visitor: Option<&mut dyn FnMut(JournalEntry)>,
         repair_final_tail: bool,
     ) -> Result<JournalScan, JournalError> {
         let relative = Path::new(JOURNAL_FILE_NAME);
         let mut reader = BufReader::with_capacity(16 * 1024, file);
-        let mut state = if start_offset == 0 {
-            JournalScanState::new()
-        } else {
-            JournalScanState::after_revision(last_revision)
-        };
+        let mut state =
+            JournalScanState::after_revision(prior.map_or(0, |index| index.last_revision));
+        let prior_locations = prior.map(|index| &index.locations);
+        let mut prefix_hash = prior.map_or_else(Sha256::new, |index| index.prefix_hash.clone());
         let mut line = Vec::new();
-        let mut line_offset = start_offset;
+        let mut line_offset = prior.map_or(0, |index| index.validated_len);
         let mut repaired_final_tail = false;
         let mut missing_final_delimiter = false;
         let mut truncate_final_tail_at = None;
@@ -698,6 +712,8 @@ impl DurableJournal {
                 line_offset = line_offset
                     .checked_add(u64::try_from(physical_record_len).unwrap_or(u64::MAX))
                     .ok_or(JournalError::RevisionOverflow)?;
+                prefix_hash.update(&line);
+                prefix_hash.update(b"\n");
                 line.clear();
             }
         }
@@ -737,6 +753,8 @@ impl DurableJournal {
                     line_offset = line_offset
                         .checked_add(u64::try_from(physical_record_len).unwrap_or(u64::MAX))
                         .ok_or(JournalError::RevisionOverflow)?;
+                    prefix_hash.update(&line);
+                    prefix_hash.update(b"\n");
                     missing_final_delimiter = true;
                 }
                 Err(_) => {
@@ -766,20 +784,32 @@ impl DurableJournal {
             },
             locations: state.seen,
             validated_len: line_offset,
+            prefix_hash,
             fingerprint: None,
         })
     }
 
-    fn current_fingerprint_locked(&self) -> Result<Option<JournalFileFingerprint>, JournalError> {
+    fn current_file_locked(
+        &self,
+    ) -> Result<Option<(fs::File, JournalFileFingerprint)>, JournalError> {
         match open_read_file_pinned(
             &self.root,
             Path::new(JOURNAL_FILE_NAME),
             Some(&self.identity),
         ) {
-            Ok(file) => Ok(Some(JournalFileFingerprint::from_file(&file)?)),
+            Ok(file) => {
+                let fingerprint = JournalFileFingerprint::from_file(&file)?;
+                Ok(Some((file, fingerprint)))
+            }
             Err(FsError::NotFound(_)) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    fn current_fingerprint_locked(&self) -> Result<Option<JournalFileFingerprint>, JournalError> {
+        Ok(self
+            .current_file_locked()?
+            .map(|(_, fingerprint)| fingerprint))
     }
 
     fn replace_index_from_scan(&self, scan: &mut JournalScan) {
@@ -794,41 +824,37 @@ impl DurableJournal {
         &self,
         cached: &mut Option<JournalIndex>,
     ) -> Result<(), JournalError> {
-        let current = self.current_fingerprint_locked()?;
-        let action_is_suffix = cached.as_ref().is_some_and(|index| {
-            matches!((&index.fingerprint, &current), (Some(previous), Some(observed))
-                if index.journal_present
-                    && previous.same_leaf(observed)
-                    && previous.len == index.validated_len
-                    && observed.len > index.validated_len)
-        });
-        let unchanged = cached.as_ref().is_some_and(|index| {
-            index.fingerprint == current
-                && index.validated_len == current.as_ref().map_or(0, |fingerprint| fingerprint.len)
-        });
-        if unchanged {
-            return Ok(());
-        }
-        if action_is_suffix {
-            let index = cached
-                .as_mut()
-                .expect("suffix action requires cached index");
-            let mut scan = self.scan_suffix_locked(
-                index.validated_len,
-                index.last_revision,
-                &index.locations,
-            )?;
-            index.locations.extend(std::mem::take(&mut scan.locations));
-            index.validated_len = scan.validated_len;
-            index.last_revision = scan.replay.last_revision;
-            index.journal_present = scan.replay.journal_present;
-            index.fingerprint = scan.fingerprint;
-            return Ok(());
+        if let Some(index) = cached.as_mut() {
+            match (&index.fingerprint, self.current_file_locked()?) {
+                (None, None) if !index.journal_present && index.validated_len == 0 => return Ok(()),
+                (Some(previous), Some((mut file, observed)))
+                    if previous.same_leaf(&observed)
+                        && previous.len == index.validated_len
+                        && (previous == &observed || observed.len > previous.len) =>
+                {
+                    if observed.matches_validated_prefix(
+                        &mut file,
+                        index.validated_len,
+                        &index.prefix_hash,
+                    )? {
+                        if previous == &observed {
+                            return Ok(());
+                        }
+                        let scan = self.scan_suffix_locked(file, index)?;
+                        index.locations.extend(scan.locations);
+                        index.validated_len = scan.validated_len;
+                        index.prefix_hash = scan.prefix_hash;
+                        index.last_revision = scan.replay.last_revision;
+                        index.journal_present = scan.replay.journal_present;
+                        index.fingerprint = scan.fingerprint;
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
         }
 
-        // Missing/replaced/truncated or metadata-detectable same-length edits
-        // get a complete authoritative rebuild. The cache is not evidence and
-        // is replaced only after the entire scan succeeds.
+        // Publish a rebuilt index only after the authoritative WAL scans successfully.
         let mut scan = self.scan_locked(false, None)?;
         *cached = Some(JournalIndex::from_scan(&mut scan));
         Ok(())
@@ -1125,8 +1151,7 @@ impl DurableJournal {
             .try_clone()
             .map_err(|error| FsError::Io(error.to_string()))?;
         self.note_scan(JournalScanKind::Full);
-        let mut scan =
-            self.scan_file_locked(scan_file, 0, 0, None, false, Some(&mut visitor), false)?;
+        let mut scan = self.scan_file_locked(scan_file, None, false, Some(&mut visitor), false)?;
         let scanned = JournalFileFingerprint::from_file(&file)?;
         if scanned != before || scan.validated_len != before.len {
             return Err(JournalError::Corrupted {
@@ -1137,7 +1162,18 @@ impl DurableJournal {
         let synced = self.sync_durable_prefix_locked(true)?;
         scan.fingerprint =
             self.validate_synced_fingerprint(Some(&before), true, scan.validated_len, synced)?;
-        if self.current_fingerprint_locked()? != scan.fingerprint {
+        let unchanged = match self.current_file_locked()? {
+            Some((mut file, current)) => {
+                Some(&current) == scan.fingerprint.as_ref()
+                    && current.matches_validated_prefix(
+                        &mut file,
+                        scan.validated_len,
+                        &scan.prefix_hash,
+                    )?
+            }
+            None => false,
+        };
+        if !unchanged {
             return Err(JournalError::Corrupted {
                 offset: scan.validated_len,
                 reason: "journal changed after strict replay durability sync".into(),
@@ -1285,6 +1321,7 @@ impl DurableJournal {
                 journal_revision: envelope.journal_revision,
             },
         );
+        index.prefix_hash.update(&line);
         index.validated_len = expected_len;
         index.last_revision = envelope.journal_revision;
         index.journal_present = true;
@@ -1824,6 +1861,46 @@ mod tests {
             journal.append_once("m2", &json!({"total": 2})),
             Err(JournalError::Fs(_))
         ));
+    }
+
+    #[test]
+    fn whole_second_timestamps_check_prefix_bytes_without_consuming_the_suffix() {
+        let (dir, journal) = journal();
+        journal
+            .append_once("m1", &json!("a".repeat(24_000)))
+            .unwrap();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let prefix_len = bytes.len() as u64;
+        let prefix_hash = journal
+            .index
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .prefix_hash
+            .clone();
+        bytes.extend_from_slice(b"pending suffix");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let check = || {
+            let mut file = fs::File::open(&path).unwrap();
+            let mut observed = JournalFileFingerprint::from_file(&file).unwrap();
+            observed.modified = Some(std::time::UNIX_EPOCH);
+            #[cfg(unix)]
+            {
+                observed.changed_nanoseconds = 0;
+            }
+            let matches = observed
+                .matches_validated_prefix(&mut file, prefix_len, &prefix_hash)
+                .unwrap();
+            assert_eq!(file.stream_position().unwrap(), prefix_len);
+            matches
+        };
+        assert!(check());
+        bytes[16_000] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(!check());
     }
 
     #[test]
