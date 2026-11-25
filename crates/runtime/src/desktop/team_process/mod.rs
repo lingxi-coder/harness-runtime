@@ -15,8 +15,8 @@ pub(crate) mod read_tools;
 use crate::desktop::session_state::team_chat::{BotChatCursor, BotChatScope, ChatInputBatch};
 pub use chat_session::{inspect_scope, inspect_task, recover_result};
 pub use checkpoint::{
-    route_supports_continuation, TeamCheckpointCursor, TeamPendingToolCall, TeamTaskCheckpoint,
-    TeamTaskPhase, TeamTaskWait, TeamWaitKind,
+    TeamCheckpointCursor, TeamPendingToolCall, TeamTaskCheckpoint, TeamTaskPhase, TeamTaskWait,
+    TeamWaitKind, route_supports_continuation,
 };
 pub use data::TeamDataRef;
 pub use data_tools::TeamDatasetOffer;
@@ -30,6 +30,7 @@ pub(super) mod model;
 pub use accounts::TeamAccountEnvelope;
 pub use model::TeamModelRoute;
 mod protocol;
+mod visualization;
 mod worker;
 
 use super::team_invocation::{TeamInvocationError, TeamInvocationLimits, TeamInvocationProfile};
@@ -124,6 +125,7 @@ pub struct TeamProcessRequest {
     /// continuation support, where an interrupted write could not be finished.
     pub shared_list: Option<TeamSharedList>,
     pub shared_data: Vec<TeamDatasetOffer>,
+    pub visualizations: bool,
     /// Nobody asked the Bot for this task: offer it the tool that leaves the
     /// message unanswered. The task then ends as `Declined` and posts nothing.
     pub may_decline: bool,
@@ -300,6 +302,8 @@ pub struct TeamProcessResult {
     pub finished_at: u64,
     pub cursor: BotChatCursor,
     pub document: Option<TeamDocumentResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visualization: Option<visualization::Artifact>,
     pub usage: TeamUsage,
 }
 
@@ -404,6 +408,7 @@ impl TeamProcessStart {
             || request.ask_requester
             || request.shared_list.is_some()
             || !request.shared_data.is_empty()
+            || request.visualizations
             || request.may_decline
             || !request.knowledge.is_empty()
         {
@@ -532,6 +537,7 @@ impl TeamProcessStart {
                     })
                     .collect()
             },
+            visualizations: request.visualizations,
             may_decline: request.may_decline,
             addressed: request.addressed,
         };
@@ -729,7 +735,7 @@ async fn broker_exchange(
                     protocol::WorkerFailure::NotContinuable => TeamProcessError::NotContinuable,
                     protocol::WorkerFailure::RouteUnsupported => TeamProcessError::RouteUnsupported,
                     _ => TeamProcessError::Worker,
-                })
+                });
             }
             WorkerFrame::Authorize { id } => {
                 if !protocol::valid_id(&id) || !seen.insert(id.clone()) {
@@ -1008,9 +1014,11 @@ mod usage_tests {
         let encoded = serde_json::to_string(&usage).unwrap();
         let decoded: TeamUsage = serde_json::from_str(&encoded).unwrap();
         assert_eq!(json(&decoded), json(&usage));
-        assert!(serde_json::from_str::<TeamUsage>(
-            r#"{"status":"complete","inputTokens":1,"outputTokens":1}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<TeamUsage>(
+                r#"{"status":"complete","inputTokens":1,"outputTokens":1}"#
+            )
+            .is_err()
+        );
     }
 }

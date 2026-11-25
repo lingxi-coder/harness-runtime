@@ -10,13 +10,13 @@ mod team_account_fixture;
 
 use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
-    inspect_task, TeamContinuation, TeamDatasetOffer, TeamKnowledgeDocument, TeamListApproval,
+    TeamContinuation, TeamDatasetOffer, TeamKnowledgeDocument, TeamListApproval,
     TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamProcessDeadline,
     TeamProcessError, TeamProcessOutcome, TeamProcessRequest, TeamProcessResult, TeamProcessStart,
-    TeamSharedList, TeamTaskPhase, TeamWaitAnswer, TeamWaitKind,
+    TeamSharedList, TeamTaskPhase, TeamWaitAnswer, TeamWaitKind, inspect_task,
 };
 use lingxi_llm_client::protocol::ProtocolFamily;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -131,6 +131,7 @@ impl Task {
             addressed: self.addressed,
             shared_list: self.list.clone(),
             shared_data: self.data.clone(),
+            visualizations: false,
         }
     }
     fn chat_model(
@@ -289,7 +290,10 @@ impl Server {
                         usage(),
                     ]),
                 };
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });
@@ -732,10 +736,12 @@ async fn kill_in_the_middle_of_a_model_response_reissues_that_request_once() {
     for request in &requests {
         assert_legal_sequence(&request.body);
         assert_eq!(request.body.to_string().matches("SOURCE_0001").count(), 1);
-        assert!(!request
-            .body
-            .to_string()
-            .contains("PARTIAL_MUST_NOT_BE_KEPT"));
+        assert!(
+            !request
+                .body
+                .to_string()
+                .contains("PARTIAL_MUST_NOT_BE_KEPT")
+        );
     }
     // No second prompt was added: both requests carry the same user turns.
     let users = |body: &Value| {
@@ -789,14 +795,16 @@ async fn an_epoch_is_single_use_and_a_stale_digest_fails_before_any_dispatch() {
     ));
     assert_eq!(server.count(), 1);
     // A lower epoch is stale as well; epoch 1 can never be reused.
-    assert!(continuation(
-        &root,
-        &task,
-        &server.endpoint,
-        1,
-        &inspected.checkpoint_digest
-    )
-    .is_err());
+    assert!(
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            1,
+            &inspected.checkpoint_digest
+        )
+        .is_err()
+    );
     assert!(matches!(
         TeamProcessStart::prepare(
             &root,
@@ -1121,9 +1129,11 @@ async fn a_question_pauses_the_task_and_only_its_answer_continues_it() {
     let results = tool_results(&second);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["tool_call_id"], "call_fixture_0");
-    assert!(results[0]["content"]
-        .to_string()
-        .contains("ANSWER_SENTINEL Lisbon"));
+    assert!(
+        results[0]["content"]
+            .to_string()
+            .contains("ANSWER_SENTINEL Lisbon")
+    );
     assert_eq!(
         harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
             .unwrap()
@@ -1309,8 +1319,8 @@ async fn team_data_write_survives_a_worker_restart_with_the_same_step() {
 }
 
 #[tokio::test]
-async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_its_call_is_durable(
-) {
+async fn a_killed_list_write_is_repeated_as_the_same_operation_and_never_before_its_call_is_durable()
+ {
     let (_temp, root) = root();
     let task = list_task();
     let server = Server::new(vec![add_milk(3), Reply::Text("Milk is on the list".into())]).await;
@@ -1453,9 +1463,11 @@ async fn a_refused_write_is_an_error_to_the_model_and_its_retry_is_a_new_operati
     assert_eq!(last.len(), 4);
     // Refused inside the worker (schema or validator); it carries no list state.
     assert!(!last[0]["content"].to_string().contains("dataRevision"));
-    assert!(last[1]["content"]
-        .to_string()
-        .contains("DATA_REVISION_CONFLICT"));
+    assert!(
+        last[1]["content"]
+            .to_string()
+            .contains("DATA_REVISION_CONFLICT")
+    );
     assert_legal_sequence(&requests[4].body);
 }
 
@@ -1959,10 +1971,12 @@ async fn a_no_reply_call_beside_an_interrupted_read_still_declines() {
     let inspected = checkpoint(&root, &task);
     assert!(inspected.continuable, "{:?}", inspected.reason);
     assert!(!inspected.pending_tool_calls.is_empty());
-    assert!(inspected
-        .pending_tool_calls
-        .iter()
-        .all(|call| call.read_only));
+    assert!(
+        inspected
+            .pending_tool_calls
+            .iter()
+            .all(|call| call.read_only)
+    );
 
     let result = run_to_end(
         continuation(

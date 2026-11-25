@@ -10,7 +10,7 @@ use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
     TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +97,7 @@ fn request(
         addressed: false,
         shared_list: None,
         shared_data: Vec::new(),
+        visualizations: false,
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
     }
 }
@@ -235,7 +236,10 @@ impl Server {
                     Reply::Error => ("400 Bad Request", "application/json", json!({"error":{"type":"invalid_request_error","message":"SYNTHETIC_PROVIDER_ERROR_MUST_NOT_BE_RETURNED"}}).to_string()),
                     Reply::Hang => unreachable!(),
                 };
-                let response = format!("HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });
@@ -525,9 +529,11 @@ async fn private_data_worker_excludes_shared_history_tools_and_artifacts() {
     .unwrap();
     let records = server.requests.lock().unwrap();
     assert!(records[0].body.to_string().contains("UNIQUE_DATA_PREVIEW"));
-    assert!(records[0].body["tools"]
-        .as_array()
-        .is_none_or(Vec::is_empty));
+    assert!(
+        records[0].body["tools"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
     assert!(!records[1].body.to_string().contains("UNIQUE_DATA_PREVIEW"));
     assert!(!records[1].body.to_string().contains("Private draft"));
 }
@@ -603,18 +609,20 @@ async fn authorization_refusal_dispatches_nothing_and_does_not_commit_input() {
     let server = Server::new(vec![Reply::Text("must not run".into())]).await;
     let broker = Arc::new(Broker::default());
     broker.revoked.store(true, Ordering::Release);
-    assert!(run_broker(
-        &root,
-        request(
+    assert!(
+        run_broker(
             &root,
-            server.endpoint.clone(),
-            uuid::Uuid::new_v4(),
-            batch(0, 1, 0)
-        ),
-        broker
-    )
-    .await
-    .is_err());
+            request(
+                &root,
+                server.endpoint.clone(),
+                uuid::Uuid::new_v4(),
+                batch(0, 1, 0)
+            ),
+            broker
+        )
+        .await
+        .is_err()
+    );
     assert_eq!(
         harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
             .unwrap()
@@ -817,11 +825,13 @@ async fn model_cannot_execute_hallucinated_shell_calls() {
     assert_eq!(result.outcome, TeamProcessOutcome::Completed);
     assert!(!marker.exists());
     let records = server.requests.lock().unwrap();
-    assert!(!records[0].body["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|t| t["name"] == "Bash"));
+    assert!(
+        !records[0].body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "Bash")
+    );
 }
 
 #[tokio::test]
@@ -872,9 +882,11 @@ async fn provider_errors_and_oversized_output_never_become_shared_documents() {
         assert_ne!(result.outcome, TeamProcessOutcome::Completed);
         assert!(result.text.is_empty());
         assert!(result.document.is_none());
-        assert!(!serde_json::to_string(&result)
-            .unwrap()
-            .contains("SYNTHETIC_PROVIDER_ERROR"));
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("SYNTHETIC_PROVIDER_ERROR")
+        );
         // The aborted/failed request's usage may be unrecorded, so such a task
         // can never claim complete accounting.
         assert_ne!(
@@ -944,9 +956,11 @@ async fn preflight_compacts_only_consumed_history_and_counts_authorized_summary_
     denied_request.limits.context_window_tokens = std::num::NonZeroU32::new(32768).unwrap();
     let denied_broker = Arc::new(Broker::default());
     denied_broker.max_authorizations.store(1, Ordering::Release);
-    assert!(run_broker(&root, denied_request, denied_broker.clone())
-        .await
-        .is_err());
+    assert!(
+        run_broker(&root, denied_request, denied_broker.clone())
+            .await
+            .is_err()
+    );
     assert!(denied_broker.authorizations.load(Ordering::Acquire) >= 2);
     assert_eq!(server.requests.lock().unwrap().len(), 1);
     assert_eq!(
@@ -1239,9 +1253,11 @@ async fn files_larger_than_an_ordinary_transcript_row_are_projected_and_sent() {
     assert_eq!(second.outcome, TeamProcessOutcome::Completed);
     let data = base64::engine::general_purpose::STANDARD.encode(&big);
     for record in server.requests.lock().unwrap().iter() {
-        assert!(blocks(&record.body)
-            .iter()
-            .any(|block| block["type"] == "document" && block["source"]["data"] == data));
+        assert!(
+            blocks(&record.body)
+                .iter()
+                .any(|block| block["type"] == "document" && block["source"]["data"] == data)
+        );
     }
 }
 #[tokio::test]

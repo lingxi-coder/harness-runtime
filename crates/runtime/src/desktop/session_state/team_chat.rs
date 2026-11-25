@@ -149,9 +149,57 @@ pub struct ChatSourceMessage {
     pub data_ref: Option<super::lingxi_data::DataRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_ref: Option<super::dataset_resource::ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visualization: Option<ChatVisualization>,
     /// The files the message carries. Their bytes are not here: see `ChatInputBatch::files`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ChatSourceAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChatVisualization {
+    title: String,
+    reference: super::dataset_resource::ResourceRef,
+    bindings: Vec<ChatVisualizationBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ChatVisualizationBinding {
+    alias: String,
+    reference: super::dataset_resource::ResourceRef,
+    mode: ChatVisualizationMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ChatVisualizationMode {
+    Pinned,
+    Live,
+    Edit,
+}
+
+impl ChatVisualization {
+    pub(crate) fn is_valid(&self, message: &str) -> bool {
+        use super::dataset_resource::ResourceRef::PageVersion;
+        let mut aliases = std::collections::BTreeSet::new();
+        matches!(&self.reference, PageVersion { page, .. } if page == message && page.starts_with("viz_"))
+            && self.reference.is_valid()
+            && !self.title.trim().is_empty()
+            && self.title.encode_utf16().count() <= 80
+            && self.bindings.len() <= 4
+            && self.bindings.iter().all(|binding| {
+                (1..=64).contains(&binding.alias.len())
+                    && binding
+                        .alias
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    && aliases.insert(&binding.alias)
+                    && binding.reference.is_valid()
+                    && !matches!(binding.reference, PageVersion { .. })
+            })
+    }
 }
 /// This is the exact model input fact, not a queryable replica of the Chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,12 +310,17 @@ impl ChatInputBatch {
                     && (!message.text.is_empty()
                         || !message.attachments.is_empty()
                         || message.data_ref.is_some()
-                        || message.resource_ref.is_some()))
+                        || message.resource_ref.is_some()
+                        || message.visualization.is_some()))
                 || message
                     .resource_ref
                     .as_ref()
                     .is_some_and(|reference| !reference.is_valid())
                 || (message.resource_ref.is_some() && message.data_ref.is_some())
+                || message
+                    .visualization
+                    .as_ref()
+                    .is_some_and(|value| !value.is_valid(&message.message_id))
                 || message
                     .data_ref
                     .as_ref()
@@ -516,6 +569,7 @@ mod tests {
                     attachments: Vec::new(),
                     data_ref: None,
                     resource_ref: None,
+                    visualization: None,
                 })
                 .collect(),
         }

@@ -1,19 +1,19 @@
 use super::interaction::ChildInteraction;
 use super::protocol::{self, Bootstrap, MAX_FRAME, MAX_RESULT_TEXT};
 use super::{
-    environment, TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessResult,
+    TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessResult, environment,
 };
 use crate::api::{LifecycleService, SessionService};
-use crate::desktop::team_invocation::TeamInvocationProfile;
 use crate::desktop::DesktopConfig;
+use crate::desktop::team_invocation::TeamInvocationProfile;
 use client::adapter::PermissionRequestSink;
 use client::protocol::permission::{PermissionRequest, PermissionResponseDto};
 use lingxi_core::host::{CostSnapshot, OutputStream, TurnOutcome};
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
 use lingxi_core::types::{ConversationMessage, ToolUseId};
 use std::io::{IsTerminal, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use tokio_util::sync::CancellationToken;
 
 pub(super) fn main() -> Result<(), TeamProcessError> {
@@ -56,6 +56,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             || bootstrap.ask_requester
             || bootstrap.shared_list.is_some()
             || !bootstrap.shared_data.is_empty()
+            || bootstrap.visualizations
             || bootstrap.may_decline)
     {
         return Err(TeamProcessError::Protocol);
@@ -171,6 +172,12 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             source: Default::default(),
         })
     });
+    let visualization = bootstrap.visualizations.then(|| {
+        Arc::new(super::visualization::Draft::new(
+            profile.scope_root(),
+            &bootstrap.task_id,
+        ))
+    });
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
@@ -179,6 +186,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         list: list.clone(),
         data: data.clone(),
         no_reply: no_reply.clone(),
+        visualization: visualization.clone(),
     }));
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
@@ -194,7 +202,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,no_reply,bootstrap.private_data).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,no_reply,visualization,bootstrap.private_data).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -286,6 +294,7 @@ async fn run(
     list: Option<Arc<super::list_tools::TeamListTools>>,
     data: Option<Arc<super::data_tools::TeamDataTools>>,
     no_reply: Option<Arc<super::decline_tool::NoReply>>,
+    visualization: Option<Arc<super::visualization::Draft>>,
     private_data: bool,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
@@ -442,10 +451,18 @@ async fn run(
     let prior_dispatches = resumed
         .as_ref()
         .map_or(0, |state| state.checkpoint.dispatches_observed);
-    let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
+    let input = format!(
+        "Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document."
+    );
     let input = match &no_reply {
-        Some(choice) if choice.addressed() => format!("{input} This message was written to you directly: answer it, unless it plainly needs no answer from you (a thank-you or an acknowledgement); only then call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL),
-        Some(_) => format!("{input} Nobody asked you for this message: if no reply from you is wanted, call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL),
+        Some(choice) if choice.addressed() => format!(
+            "{input} This message was written to you directly: answer it, unless it plainly needs no answer from you (a thank-you or an acknowledgement); only then call {} and end your turn without writing anything.",
+            super::checkpoint::NO_REPLY_TOOL
+        ),
+        Some(_) => format!(
+            "{input} Nobody asked you for this message: if no reply from you is wanted, call {} and end your turn without writing anything.",
+            super::checkpoint::NO_REPLY_TOOL
+        ),
         None => input,
     };
     let finish_only = resumed
@@ -510,6 +527,7 @@ async fn run(
                                 outcome: TeamProcessOutcome::Waiting,
                                 text: String::new(),
                                 document: None,
+                                visualization: None,
                                 finished_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map_err(|_| TeamProcessError::Deadline)?
@@ -609,6 +627,11 @@ async fn run(
         outcome,
         document: if outcome == TeamProcessOutcome::Completed && !private_data {
             Some(super::chat_session::document(&task_id, &text))
+        } else {
+            None
+        },
+        visualization: if outcome == TeamProcessOutcome::Completed && !private_data {
+            visualization.and_then(|draft| draft.load())
         } else {
             None
         },

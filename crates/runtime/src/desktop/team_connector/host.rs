@@ -8,7 +8,7 @@ use crate::desktop::team_process::{
 };
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::num::NonZeroU32;
@@ -41,6 +41,7 @@ struct Start {
     ask_requester: Option<bool>,
     shared_list: Option<team_process::TeamSharedList>,
     shared_data: Option<Vec<team_process::TeamDatasetOffer>>,
+    visualizations: Option<bool>,
     may_decline: Option<bool>,
     addressed: Option<bool>,
 }
@@ -90,6 +91,7 @@ impl Start {
             || self.ask_requester.is_some()
             || self.shared_list.is_some()
             || self.shared_data.is_some()
+            || self.visualizations.is_some()
             || self.may_decline.is_some()
             || self.addressed.is_some();
         let all = self.task_id.is_some()
@@ -125,6 +127,7 @@ impl Start {
                 && self.ask_requester.is_none()
                 && self.shared_list.is_none()
                 && self.shared_data.is_none()
+                && self.visualizations.is_none()
                 && self.may_decline.is_none()
                 && self.addressed.is_none();
             if !only_task_and_model {
@@ -180,6 +183,7 @@ impl Start {
             ask_requester: self.ask_requester.unwrap_or(false),
             shared_list: self.shared_list,
             shared_data: self.shared_data.unwrap_or_default(),
+            visualizations: self.visualizations.unwrap_or(false),
             may_decline: self.may_decline.unwrap_or(false),
             addressed: self.addressed.unwrap_or(false),
         })
@@ -573,6 +577,9 @@ fn result_value(result: team_process::TeamProcessResult) -> Value {
     if let Some(document) = result.document {
         value["document"] = json!(document);
     }
+    if let Some(visualization) = result.visualization {
+        value["visualization"] = json!(visualization);
+    }
     value
 }
 fn save_result(root: &Path, task_id: &str, value: &Value) -> Result<(), Error> {
@@ -659,10 +666,12 @@ mod tests {
     use super::*;
     #[test]
     fn retired_protocol_is_not_decoded() {
-        assert!(serde_json::from_value::<Start>(
-            json!({"version":1,"type":"start","mode":"run","target":{}})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<Start>(
+                json!({"version":1,"type":"start","mode":"run","target":{}})
+            )
+            .is_err()
+        );
     }
     #[test]
     fn an_operation_result_says_whether_its_outcome_is_established() {
