@@ -4648,9 +4648,21 @@ impl JsonlWriter {
         if validate_tail_for_mode.is_some_and(|expected| expected != mode) {
             return Ok(profile);
         }
+        // Both mode record names end with `session-mode`. If the value
+        // escapes any of its ASCII characters, the line contains `\u00`.
+        // Keep the exact parser for every candidate, including nested or
+        // malformed lookalikes, and propagate all reader errors as before.
+        let mode_suffix = memchr::memmem::Finder::new(b"session-mode\"");
+        let ascii_escape = memchr::memmem::Finder::new(b"\\u00");
         for line in lines {
             let line = line.map_err(|error| error.to_string())?;
-            if let Ok(row) = Utf16JsonProjection::parse(line.as_ref()) {
+            let line = line.as_ref();
+            if mode_suffix.find(line.as_bytes()).is_none()
+                && ascii_escape.find(line.as_bytes()).is_none()
+            {
+                continue;
+            }
+            if let Ok(row) = Utf16JsonProjection::parse(line) {
                 if matches!(
                     row.string_at("/type"),
                     Some("fixed-session-mode" | "session-mode")
@@ -10566,6 +10578,8 @@ mod tests {
             format!("{fixed}\n{fixed}\n"),
             format!("{fixed}\n{other}\n"),
             format!("{fixed}\n{{\"type\":\"session-mode\",\"sessionId\":\"{id}\",\"sessionMode\":\"code\"}}\n"),
+            format!("{fixed}\n{}\n", r#"{"\u0074ype":"fixed-session-m\u006Fde"}"#),
+            format!("{fixed}\n{}\n", r#"{"type":"session\u002Dmode"}"#),
         ] {
             assert!(JsonlWriter::fixed_session_mode_from_source(&invalid, id).is_err(), "accepted {invalid}");
             assert!(
@@ -10592,7 +10606,8 @@ mod tests {
         let header = format!(
             r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"chat","instructionEpoch":7}}"#
         );
-        let source = format!("{header}\r\n{{\"type\":\"user\",\"text\":\"\\ud800\"}}\r\n\r\n");
+        let user_row = r#"{"type":"user","text":"\ud800","nested":{"type":"fixed-session-mode"}}"#;
+        let source = format!("{header}\r\n{user_row}\r\n\r\n");
         let from_source = JsonlWriter::fixed_session_profile_from_source(&source, id).unwrap();
         let from_reader = JsonlWriter::fixed_session_profile_from_reader(
             std::io::BufReader::with_capacity(3, source.as_bytes()),
