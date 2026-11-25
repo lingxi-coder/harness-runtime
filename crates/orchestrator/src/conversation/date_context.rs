@@ -189,7 +189,7 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra,
         };
-        self.append_pending_transcript_row(writer, &row)
+        self.append_pending_transcript_row(writer, row)
             .await
             .map_err(|error| {
                 OrchestratorError::Internal(format!(

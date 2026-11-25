@@ -47,6 +47,77 @@ fn sdk_json(value: &Value) -> wire::JsonPayload {
     wire::JsonPayload::from_generated_value(value).expect("generated SDK fixture is valid JSON")
 }
 
+#[test]
+fn native_media_limit_counts_serialized_json_bytes() {
+    let mut encoded = NativeMediaBuffer(vec![0; MAX_NATIVE_MEDIA_BYTES]);
+    encoded.0.truncate(MAX_NATIVE_MEDIA_BYTES - 4);
+    serde_json::to_writer(&mut encoded, "\n").unwrap();
+    assert_eq!(&encoded.0[MAX_NATIVE_MEDIA_BYTES - 4..], br#""\n""#);
+    assert_eq!(
+        serde_json::to_writer(&mut encoded, &0)
+            .unwrap_err()
+            .to_string(),
+        "native final result exceeds media limit"
+    );
+}
+
+#[tokio::test]
+async fn native_media_preserves_json_identity_and_rejects_changed_files() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    let id = "native-response:media";
+    let payload =
+        Arc::new(json!({"text":"多语言😀\n\"\\","nested":[true,42],"data":"a".repeat(64 * 1024)}));
+    let bytes = serde_json::to_vec(payload.as_ref()).unwrap();
+    let hash = digest_bytes(&bytes);
+    let name = format!("computer-{}.json", digest(&json!([id, hash])).unwrap());
+    let output = store_payload(&fixture.orch, id, Arc::clone(&payload))
+        .await
+        .unwrap();
+    let path = std::path::Path::new(&output.media_refs[0]);
+    assert_eq!(output.digest, hash);
+    assert_eq!(output.payload["path"].as_str(), path.to_str());
+    assert_eq!(path.file_name().unwrap(), std::ffi::OsStr::new(&name));
+    assert_eq!(load_payload(&output).await.unwrap(), bytes);
+
+    #[cfg(unix)]
+    {
+        let link = path.with_extension("link");
+        std::os::unix::fs::symlink(path, &link).unwrap();
+        let mut linked = output.clone();
+        linked.payload = json!({"path": link});
+        assert!(load_payload(&linked)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("native media reference unsafe or oversized"));
+    }
+    let mut changed = bytes;
+    *changed.last_mut().unwrap() = b']';
+    std::fs::write(path, &changed).unwrap();
+    assert!(load_payload(&output)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("native result media digest mismatch"));
+    assert!(store_payload(&fixture.orch, id, payload)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("native result media identity conflicts"));
+    assert_eq!(std::fs::read(path).unwrap(), changed);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(MAX_NATIVE_MEDIA_BYTES as u64 + 1)
+        .unwrap();
+    assert!(load_payload(&output)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("native media reference unsafe or oversized"));
+}
+
 fn set_continuation_response_id(response: &mut llm_runtime::HistoryResponse) {
     let metadata = &response.provider_metadata;
     let llm_client = metadata
@@ -1139,6 +1210,78 @@ fn result_ids(blocks: &[ContentBlock]) -> Vec<ToolUseId> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn native_batch_shares_binding_file_and_keeps_member_journal_ids() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    fixture.native().await;
+    let blocks = fixture
+        .bind(&openai(json!([
+            {"type": "click", "x": 0, "y": 0, "button": "left"},
+            {"type": "screenshot"}
+        ])))
+        .await
+        .unwrap();
+    let dispatched = fixture.dispatch(blocks).await;
+    let mut records: Vec<_> = fixture
+        .journal
+        .executions
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    records.sort_by_key(|record| record.identity.member_index);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].identity.member_index, 0);
+    assert_eq!(records[1].identity.member_index, 1);
+    assert_eq!(records[0].recovery_binding, records[1].recovery_binding);
+    let path = std::path::Path::new(&records[0].recovery_binding.media_refs[0]);
+    let binding_bytes = std::fs::read(path).unwrap();
+    assert_eq!(
+        digest_bytes(&binding_bytes),
+        records[0].recovery_binding.digest
+    );
+    let saved: StoredExecutionBinding = serde_json::from_slice(&binding_bytes).unwrap();
+    assert_eq!(saved.call.operations.len(), 2);
+    let binding_files = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .filter(|bytes| *bytes == binding_bytes)
+        .count();
+    assert_eq!(binding_files, 1);
+    let execution_ids: Vec<_> = records
+        .iter()
+        .map(ToolExecutionRecord::execution_id)
+        .collect();
+    assert_ne!(execution_ids[0], execution_ids[1]);
+    {
+        let events = fixture.journal.events.lock().unwrap();
+        for id in &execution_ids {
+            assert!(events.contains(&format!("{id}:Started")));
+        }
+    }
+    fixture.publish(&dispatched.results).await;
+    let tool_ids = result_ids(&dispatched.results);
+    prepare_receipts(&fixture.orch, &tool_ids).await.unwrap();
+    {
+        let receipts = fixture.journal.receipts.lock().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts.values().next().unwrap().execution_ids,
+            execution_ids
+        );
+    }
+
+    let member = fixture.orch.computer_runtime.work.lock().await[&tool_ids[1]].clone();
+    std::fs::write(path, b"changed").unwrap();
+    let error = store_execution_binding(&fixture.orch, &member)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("native result media identity conflicts"));
 }
 
 #[tokio::test]
@@ -3738,9 +3881,13 @@ async fn recovery_join_output(
     };
     let mut row = prepare_stored_row(&fixture.orch, &message).await.unwrap();
     row.message.set_field("id", response_id.into()).unwrap();
-    store_payload(&fixture.orch, response_id, &StoredOutput::new(message, row))
-        .await
-        .unwrap()
+    store_payload(
+        &fixture.orch,
+        response_id,
+        Arc::new(StoredOutput::new(message, row)),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

@@ -668,14 +668,14 @@ fn supersedes_ids_for_retained_rows(rows: &[CompletedAssistantRow]) -> Vec<Messa
 }
 
 fn replace_stream_blocks_for_row(
-    turn: &mut PumpedTurn,
+    blocks: &mut Vec<ContentBlock>,
     assistant_block_indices: &mut Vec<(u32, bool)>,
     assistant_block_row_ids: &mut Vec<MessageId>,
     row_id: MessageId,
     content: &[ContentBlock],
 ) {
     update_accepted_stream_blocks_for_row(
-        turn,
+        blocks,
         assistant_block_indices,
         assistant_block_row_ids,
         row_id,
@@ -685,48 +685,51 @@ fn replace_stream_blocks_for_row(
 }
 
 fn update_accepted_stream_blocks_for_row(
-    turn: &mut PumpedTurn,
+    blocks: &mut Vec<ContentBlock>,
     assistant_block_indices: &mut Vec<(u32, bool)>,
     assistant_block_row_ids: &mut Vec<MessageId>,
     row_id: MessageId,
     content: &[ContentBlock],
     new_row_order: Option<(u32, bool)>,
 ) {
-    let mut blocks = Vec::new();
-    let mut indices = Vec::new();
-    let mut row_ids = Vec::new();
-    let mut source_order = None;
-    for ((block, index), current_row_id) in std::mem::take(&mut turn.assistant_blocks)
-        .into_iter()
-        .zip(std::mem::take(assistant_block_indices))
-        .zip(std::mem::take(assistant_block_row_ids))
-    {
-        if current_row_id == row_id {
-            source_order.get_or_insert(index);
-        } else {
-            blocks.push(block);
-            indices.push(index);
-            row_ids.push(current_row_id);
-        }
-    }
-    if let Some(index) = source_order.or(new_row_order) {
-        let position = indices.partition_point(|existing| existing <= &index);
-        // ToolUse blocks remain in the canonical row and the source dispatch
-        // index. This list tracks the non-tool blocks, including Text added by
-        // session.append to an originally tool-only row.
-        for (offset, block) in content
+    let Some(order) = new_row_order.or_else(|| {
+        assistant_block_row_ids
             .iter()
-            .filter(|block| !matches!(block, ContentBlock::ToolUse { .. }))
-            .enumerate()
-        {
-            blocks.insert(position + offset, block.clone());
-            indices.insert(position + offset, index);
-            row_ids.insert(position + offset, row_id);
-        }
+            .position(|id| *id == row_id)
+            .map(|pos| assistant_block_indices[pos])
+    }) else {
+        return;
+    };
+    let end = assistant_block_indices.partition_point(|key| key <= &order);
+    let start = assistant_block_indices[..end].partition_point(|key| key < &order);
+    let mut replace = end..end;
+    if let Some(offset) = assistant_block_row_ids[start..end]
+        .iter()
+        .position(|id| *id == row_id)
+    {
+        let first = start + offset;
+        let count = assistant_block_row_ids[first..end]
+            .iter()
+            .take_while(|id| **id == row_id)
+            .count();
+        // A row's blocks are contiguous. Its replacement follows any other
+        // rows sharing its source order, just as a newly accepted row does.
+        blocks[first..end].rotate_left(count);
+        assistant_block_row_ids[first..end].rotate_left(count);
+        replace.start = end - count;
     }
-    turn.assistant_blocks = blocks;
-    *assistant_block_indices = indices;
-    *assistant_block_row_ids = row_ids;
+
+    // ToolUse stays in the canonical row and dispatch index. Accepted text
+    // added by session.append, including on a tool-only row, belongs here.
+    let projected = content
+        .iter()
+        .filter(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+    let new_len = projected.clone().count();
+    blocks.splice(replace.clone(), projected.cloned());
+    if replace.len() != new_len {
+        assistant_block_indices.splice(replace.clone(), std::iter::repeat_n(order, new_len));
+        assistant_block_row_ids.splice(replace, std::iter::repeat_n(row_id, new_len));
+    }
 }
 
 /// Apply native J as soon as the next eligible completed assistant text row is
@@ -798,13 +801,12 @@ async fn finish_pending_server_stitch(
             candidate.supersedes_row_ids = supersedes_row_ids;
         }
     }
-    let candidate_content = turn.assistant_rows[candidate_position].content.clone();
     replace_stream_blocks_for_row(
-        turn,
+        &mut turn.assistant_blocks,
         assistant_block_indices,
         assistant_block_row_ids,
         candidate_id,
-        &candidate_content,
+        &turn.assistant_rows[candidate_position].content,
     );
 
     let retained_ids: HashSet<MessageId> = stitch.retained_row_ids.iter().copied().collect();
@@ -899,7 +901,6 @@ async fn sync_message_delta_to_rows(
     persist_unlinked_rows: bool,
 ) {
     let mut tool_parents = Vec::new();
-    let mut rewritten_rows = Vec::new();
     for row in &mut turn.assistant_rows {
         row.stop_reason.clone_from(&turn.stop_reason);
         if update_stop_details {
@@ -931,15 +932,12 @@ async fn sync_message_delta_to_rows(
             row.persisted_link = Some(link);
         }
         row.session_append_dispatched = true;
-        rewritten_rows.push((row.row_id, row.content.clone()));
-    }
-    for (row_id, content) in rewritten_rows {
         replace_stream_blocks_for_row(
-            turn,
+            &mut turn.assistant_blocks,
             assistant_block_indices,
             assistant_block_row_ids,
-            row_id,
-            &content,
+            row.row_id,
+            &row.content,
         );
     }
     turn.assistant_tool_parent_uuids.extend(tool_parents);
@@ -2709,41 +2707,36 @@ async fn pump_stream_inner(
                         suppress_live_text = false;
                     }
                 }
+                let row_index = turn
+                    .assistant_rows
+                    .iter()
+                    .rposition(|row| row.row_id == row_id);
                 if let Some(p) = pump.as_mut() {
-                    let accepted_content = if let Some(row) = turn
-                        .assistant_rows
-                        .iter_mut()
-                        .find(|row| row.row_id == row_id)
-                    {
+                    if let Some(index) = row_index {
+                        let row = &mut turn.assistant_rows[index];
                         p.executor.append_assistant_row(row).await;
-                        Some((row.session_append_dispatched, row.content.clone()))
-                    } else {
-                        None
-                    };
-                    if let Some((accepted, content)) = accepted_content {
-                        if accepted {
+                        if row.session_append_dispatched {
                             turn.note_accepted_assistant_row();
                         }
                         update_accepted_stream_blocks_for_row(
-                            &mut turn,
+                            &mut turn.assistant_blocks,
                             &mut assistant_block_indices,
                             &mut assistant_block_row_ids,
                             row_id,
-                            &content,
+                            &turn.assistant_rows[index].content,
                             Some(key),
                         );
                     }
                     if let Some(settlement) = p.settlement.as_deref_mut() {
-                        if let Some(row) =
-                            turn.assistant_rows.iter().find(|row| row.row_id == row_id)
-                        {
-                            settlement.record_assistant_response(row);
+                        if let Some(index) = row_index {
+                            settlement.record_assistant_response(&turn.assistant_rows[index]);
                         } else {
                             settlement.record_assistant_row(row_id);
                         }
                     }
                 }
-                if let Some(row) = turn.assistant_rows.iter().find(|row| row.row_id == row_id) {
+                if let Some(index) = row_index {
+                    let row = &turn.assistant_rows[index];
                     output
                         .emit_accepted_assistant_row(
                             &row.row_id,
@@ -2802,14 +2795,20 @@ async fn pump_stream_inner(
                     if row.session_append_dispatched {
                         turn.note_accepted_assistant_row();
                     }
-                    update_accepted_stream_blocks_for_row(
-                        &mut turn,
-                        &mut assistant_block_indices,
-                        &mut assistant_block_row_ids,
-                        row_id,
-                        &row.content,
-                        Some(llm_runtime::stream_content_order(api_block_index)),
-                    );
+                    if row
+                        .content
+                        .iter()
+                        .any(|block| !matches!(block, ContentBlock::ToolUse { .. }))
+                    {
+                        update_accepted_stream_blocks_for_row(
+                            &mut turn.assistant_blocks,
+                            &mut assistant_block_indices,
+                            &mut assistant_block_row_ids,
+                            row_id,
+                            &row.content,
+                            Some(llm_runtime::stream_content_order(api_block_index)),
+                        );
+                    }
                     if let Some(settlement) = p.settlement.as_deref_mut() {
                         settlement.record_assistant_response(&row);
                     }
@@ -3140,6 +3139,74 @@ mod tests {
 
     fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    #[test]
+    fn accepted_block_replacement_preserves_equal_order_siblings_and_companions() {
+        let text = |s: &str| ContentBlock::Text {
+            text: s.to_owned(),
+            citations: None,
+        };
+        let tool = ContentBlock::ToolUse {
+            id: ToolUseId::from("tool"),
+            name: "Read".into(),
+            input: Utf16JsonProjection::parse("{}").unwrap(),
+            provider_id: None,
+        };
+        let prefix = MessageId::new();
+        let row = MessageId::new();
+        let sibling = MessageId::new();
+        let companion = MessageId::new();
+        let key = (1, false);
+        let mut blocks = vec![text("prefix"), text("old"), text("peer"), text("companion")];
+        let mut ids = vec![prefix, row, sibling, companion];
+        let mut orders = vec![(0, false), key, key, (1, true)];
+
+        update_accepted_stream_blocks_for_row(
+            &mut blocks,
+            &mut orders,
+            &mut ids,
+            row,
+            &[text("first"), tool.clone(), text("second")],
+            Some(key),
+        );
+        assert_eq!(
+            blocks,
+            [
+                text("prefix"),
+                text("peer"),
+                text("first"),
+                text("second"),
+                text("companion")
+            ]
+        );
+        assert_eq!(ids, [prefix, sibling, row, row, companion]);
+        assert_eq!(orders, [(0, false), key, key, key, (1, true)]);
+
+        replace_stream_blocks_for_row(&mut blocks, &mut orders, &mut ids, row, &[tool]);
+        assert_eq!(blocks, [text("prefix"), text("peer"), text("companion")]);
+        assert_eq!(ids, [prefix, sibling, companion]);
+        assert_eq!(orders, [(0, false), key, (1, true)]);
+
+        update_accepted_stream_blocks_for_row(
+            &mut blocks,
+            &mut orders,
+            &mut ids,
+            row,
+            &[text("hook-added")],
+            Some(key),
+        );
+        assert_eq!(
+            blocks,
+            [
+                text("prefix"),
+                text("peer"),
+                text("hook-added"),
+                text("companion")
+            ]
+        );
+        assert_eq!(ids, [prefix, sibling, row, companion]);
+        assert_eq!(orders, [(0, false), key, key, (1, true)]);
     }
 
     fn final_response(

@@ -4583,7 +4583,7 @@ impl JsonlWriter {
         content: &str,
         session_id: &str,
     ) -> Result<FixedSessionProfile, String> {
-        Self::fixed_session_profile_from_lines(content.lines().map(Ok), session_id)
+        Self::fixed_session_profile_from_lines(content.lines().map(Ok), session_id, None)
     }
 
     /// Validate the complete transcript while retaining only one line in memory.
@@ -4591,12 +4591,24 @@ impl JsonlWriter {
         reader: impl std::io::BufRead,
         session_id: &str,
     ) -> Result<FixedSessionProfile, String> {
-        Self::fixed_session_profile_from_lines(reader.lines(), session_id)
+        Self::fixed_session_profile_from_lines(reader.lines(), session_id, None)
+    }
+
+    /// Check the creation header and fully validate candidates for this mode.
+    /// A foreign mode can be excluded as soon as its valid header is read.
+    pub fn reader_matches_fixed_session_mode(
+        reader: impl std::io::BufRead,
+        session_id: &str,
+        mode: ConversationMode,
+    ) -> Result<bool, String> {
+        Self::fixed_session_profile_from_lines(reader.lines(), session_id, Some(mode))
+            .map(|profile| profile.mode == mode)
     }
 
     fn fixed_session_profile_from_lines<S: AsRef<str>>(
         mut lines: impl Iterator<Item = Result<S, std::io::Error>>,
         session_id: &str,
+        validate_tail_for_mode: Option<ConversationMode>,
     ) -> Result<FixedSessionProfile, String> {
         let header = lines
             .next()
@@ -4629,6 +4641,13 @@ impl JsonlWriter {
         if instruction_epoch > (1_u64 << 53) - 1 {
             return Err("invalid instruction epoch".into());
         }
+        let profile = FixedSessionProfile {
+            mode,
+            instruction_epoch,
+        };
+        if validate_tail_for_mode.is_some_and(|expected| expected != mode) {
+            return Ok(profile);
+        }
         for line in lines {
             let line = line.map_err(|error| error.to_string())?;
             if let Ok(row) = Utf16JsonProjection::parse(line.as_ref()) {
@@ -4640,10 +4659,7 @@ impl JsonlWriter {
                 }
             }
         }
-        Ok(FixedSessionProfile {
-            mode,
-            instruction_epoch,
-        })
+        Ok(profile)
     }
 
     /// Distinguish an empty new target from a malformed existing transcript.
@@ -10556,6 +10572,15 @@ mod tests {
                 JsonlWriter::fixed_session_profile_from_reader(invalid.as_bytes(), id).is_err(),
                 "reader accepted {invalid}"
             );
+            assert!(
+                JsonlWriter::reader_matches_fixed_session_mode(
+                    invalid.as_bytes(),
+                    id,
+                    ConversationMode::Chat,
+                )
+                .is_err(),
+                "session listing accepted {invalid}"
+            );
         }
         let non_uuid = r#"{"type":"fixed-session-mode","sessionId":"not-a-uuid","sessionMode":"code","instructionEpoch":0}"#;
         assert!(JsonlWriter::fixed_session_mode_from_source(non_uuid, "not-a-uuid").is_err());
@@ -10578,18 +10603,43 @@ mod tests {
 
         let invalid_utf8 = [source.as_bytes(), &[0xff]].concat();
         assert!(JsonlWriter::fixed_session_profile_from_reader(&invalid_utf8[..], id).is_err());
+        assert!(JsonlWriter::reader_matches_fixed_session_mode(
+            &invalid_utf8[..],
+            id,
+            ConversationMode::Chat,
+        )
+        .is_err());
 
-        struct FailingReader;
-        impl std::io::Read for FailingReader {
+        struct FailingReader<'a>(&'a std::cell::Cell<usize>);
+        impl std::io::Read for FailingReader<'_> {
             fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.set(self.0.get() + 1);
                 Err(std::io::Error::other("tail read failed"))
             }
         }
-        let reader = std::io::BufReader::new(std::io::Read::chain(
-            std::io::Cursor::new(format!("{header}\n").into_bytes()),
-            FailingReader,
-        ));
-        let error = JsonlWriter::fixed_session_profile_from_reader(reader, id).unwrap_err();
+        let tail_reads = std::cell::Cell::new(0);
+        let header = format!("{header}\n");
+        let reader = || {
+            std::io::BufReader::new(std::io::Read::chain(
+                header.as_bytes(),
+                FailingReader(&tail_reads),
+            ))
+        };
+        assert!(!JsonlWriter::reader_matches_fixed_session_mode(
+            reader(),
+            id,
+            ConversationMode::Code,
+        )
+        .unwrap());
+        assert_eq!(tail_reads.get(), 0);
+
+        let error =
+            JsonlWriter::reader_matches_fixed_session_mode(reader(), id, ConversationMode::Chat)
+                .unwrap_err();
+        assert!(error.contains("tail read failed"), "{error}");
+        assert_eq!(tail_reads.get(), 1);
+
+        let error = JsonlWriter::fixed_session_profile_from_reader(reader(), id).unwrap_err();
         assert!(error.contains("tail read failed"), "{error}");
     }
 

@@ -1419,19 +1419,13 @@ fn strip_vertex_model_date(model: &str) -> &str {
 /// returns it too — it does not special-case detached HEAD).
 ///
 /// Uses an async subprocess so the caller's one-shot cache can resolve without
-/// blocking a runtime worker. Dropping the probe terminates its child process.
+/// blocking a runtime worker. A stalled probe leaves the branch unavailable.
 async fn git_branch_for_cwd(cwd: &std::path::Path) -> Option<String> {
-    let output = tokio::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(cwd)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    use crate::prompt::git_status::{git_metadata_before, GIT_PROBE_TIMEOUT};
+
+    let deadline = tokio::time::Instant::now() + GIT_PROBE_TIMEOUT;
+    let output = git_metadata_before(cwd, &["rev-parse", "--abbrev-ref", "HEAD"], deadline).await?;
+    let branch = String::from_utf8_lossy(&output).trim().to_string();
     if branch.is_empty() {
         None
     } else {

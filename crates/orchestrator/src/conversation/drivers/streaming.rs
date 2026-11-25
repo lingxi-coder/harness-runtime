@@ -210,7 +210,7 @@ struct OpenedStreamingIteration<'a> {
     exec: crate::streaming_executor::StreamingToolExecutor<'a>,
     /// Exact query request messages frozen before the stream opened. Streaming
     /// tool dispatch uses this even when its executor starts queued work later.
-    query_history: Vec<ConversationMessage>,
+    query_history: Arc<[ConversationMessage]>,
     retry_scope: ModelCallRetryScope,
     model: String,
     model_profile: Option<String>,
@@ -269,7 +269,7 @@ struct PumpedStreamingIteration<'a> {
     api_success_message_tokens: u64,
     did_fall_back_to_non_streaming: bool,
     /// Exact physical history for the successful stream or its recovery request.
-    cache_request_history: Vec<ConversationMessage>,
+    cache_request_history: Arc<[ConversationMessage]>,
     diagnostic_acknowledgement: Option<MessageId>,
     /// Inline Native context is removed from cache-safe fork history by identity.
     cache_inline_context: Option<ConversationMessage>,
@@ -292,7 +292,7 @@ enum StreamErrorFallback<'a> {
     Recovered {
         pumped: crate::streaming_loop::PumpedTurn,
         executor: crate::streaming_executor::StreamingToolExecutor<'a>,
-        request_history: Vec<ConversationMessage>,
+        request_history: Arc<[ConversationMessage]>,
         cost_receipt: Option<cost::CostResponseReceipt>,
     },
     Declined(MessageId),
@@ -1202,16 +1202,15 @@ impl StreamingTurnDriver<'_> {
         exec: &mut crate::streaming_executor::StreamingToolExecutor<'_>,
         pumped: &crate::streaming_loop::PumpedTurn,
         assistant_id: MessageId,
-        request_history: Vec<ConversationMessage>,
+        request_history: &Arc<[ConversationMessage]>,
         refuse_tools: bool,
     ) -> Result<(), OrchestratorError> {
         let assistant_message = pumped_assistant_message(pumped, assistant_id);
-        let dispatch_query_history: Arc<[ConversationMessage]> = request_history.into();
         let mut prior_tool_uses = Vec::new();
         for tu in &pumped.tool_uses {
             let facts = crate::turn_loop::ToolUseDispatchFacts {
                 native_query_depth: exec.native_query_depth(),
-                query_history: Arc::clone(&dispatch_query_history),
+                query_history: Arc::clone(request_history),
                 assistant_message: assistant_message.clone(),
                 same_turn_tool_uses: prior_tool_uses.clone(),
                 refusal_call_boundary: None,
@@ -1594,7 +1593,7 @@ impl StreamingTurnDriver<'_> {
         // This is the last async-hook generation fence before the physical
         // request; cache persistence and later tool dispatch use this exact
         // projection rather than the earlier pre-fence clone.
-        let mut query_history = snapshot.clone();
+        let mut query_history: Arc<[ConversationMessage]> = Arc::from(snapshot.as_slice());
         let typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&snapshot);
         let task_deliveries = orch.task_deliveries_for_snapshot(&snapshot).await;
         let scalar_user_content_ids = orch
@@ -1722,7 +1721,7 @@ impl StreamingTurnDriver<'_> {
                 turn_reminders = components.reminders.messages.clone();
                 mod_system_prompt = Some(components.system.clone());
                 if let Some(history) = &components.request_history {
-                    query_history = history.clone();
+                    query_history = Arc::from(history.as_slice());
                 }
                 exec = crate::query_model::ROUTE
                     .scope(
@@ -1731,7 +1730,7 @@ impl StreamingTurnDriver<'_> {
                             (components.route.clone(), Arc::clone(&components.policy)),
                             crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
                                 orch,
-                                query_history.clone(),
+                                query_history.to_vec(),
                                 loop_state.native_query_depth,
                                 user_cancel.clone(),
                                 available_tool_names.clone(),
@@ -2022,7 +2021,7 @@ impl StreamingTurnDriver<'_> {
                         response: resp,
                         request_history,
                     } => {
-                        query_history = request_history.clone();
+                        query_history = request_history.into();
                         let (mut pumped_from_recovery, recovery_cost_receipt) =
                             match Self::admit_recovered_response(
                                 orch,
@@ -2081,7 +2080,7 @@ impl StreamingTurnDriver<'_> {
                         }
                         exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
                             orch,
-                            request_history.clone(),
+                            query_history.to_vec(),
                             loop_state.native_query_depth,
                             user_cancel.clone(),
                             available_tool_names.clone(),
@@ -2091,7 +2090,7 @@ impl StreamingTurnDriver<'_> {
                             &mut exec,
                             &pumped_from_recovery,
                             assistant_id,
-                            request_history,
+                            &query_history,
                             refuse_tools,
                         )
                         .await?;
@@ -2341,7 +2340,7 @@ impl StreamingTurnDriver<'_> {
                 profile: non_stream_profile.clone(),
             },
         );
-        let request_history = non_stream_snapshot.clone();
+        let request_history: Arc<[ConversationMessage]> = Arc::from(non_stream_snapshot.as_slice());
         let resp = side_model_request(
             orch,
             user_cancel,
@@ -2481,7 +2480,7 @@ impl StreamingTurnDriver<'_> {
         // normal path registers mid-stream).
         let mut exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
             orch,
-            request_history.clone(),
+            request_history.to_vec(),
             native_query_depth,
             user_cancel.clone(),
             available_tool_names.clone(),
@@ -2491,7 +2490,7 @@ impl StreamingTurnDriver<'_> {
             &mut exec,
             &pumped_from_fallback,
             assistant_id,
-            request_history.clone(),
+            &request_history,
             refuse_tools,
         )
         .await?;
@@ -2662,8 +2661,7 @@ impl StreamingTurnDriver<'_> {
             mut cost_receipt,
             retry_scope: _,
         } = opened_iteration;
-        let mut cache_request_history = query_history.clone();
-        let dispatch_query_history: Arc<[ConversationMessage]> = query_history.clone().into();
+        let mut cache_request_history = Arc::clone(&query_history);
         let cache_inline_context = context_announcements.inline_context.clone();
         let mut assistant_session_append_dispatched =
             matches!(&opened, OpenedModelStream::Recovered(_));
@@ -2736,7 +2734,7 @@ impl StreamingTurnDriver<'_> {
                             ExecutorPump {
                                 executor: &mut exec,
                                 assistant_id,
-                                query_history: Arc::clone(&dispatch_query_history),
+                                query_history: Arc::clone(&query_history),
                                 model_profile: model_profile.clone(),
                                 record_supersedes:
                                     crate::streaming_loop::native_server_fallback_supersedes_enabled(
@@ -2926,7 +2924,16 @@ impl StreamingTurnDriver<'_> {
                                     llm_runtime::model::retry::jittered_delay(base)
                                 }
                             };
-                            tokio::time::sleep(delay).await;
+                            let backoff = tokio::time::sleep(delay);
+                            if let Some(cancel) = user_cancel {
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => return Ok(PumpStreamingOutcome::Interrupted),
+                                    () = backoff => {}
+                                }
+                            } else {
+                                backoff.await;
+                            }
                             tracing::warn!(
                                 attempt = mid_stream_retries,
                                 error = %f.error,
@@ -3512,7 +3519,7 @@ impl StreamingTurnDriver<'_> {
                 Some(stream) => {
                     let exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
                         orch,
-                        query_history.clone(),
+                        query_history.to_vec(),
                         loop_state.native_query_depth,
                         user_cancel.clone(),
                         available_tool_names.clone(),
@@ -4077,7 +4084,7 @@ impl StreamingTurnDriver<'_> {
             opened.skip_global_cache_for_system_prompt = components.skip_global_cache;
             opened.turn_reminders = components.reminders.messages.clone();
             if let Some(history) = &components.request_history {
-                opened.query_history = history.clone();
+                opened.query_history = Arc::from(history.as_slice());
             }
             opened.exec = crate::query_model::ROUTE
                 .scope(
@@ -4089,7 +4096,7 @@ impl StreamingTurnDriver<'_> {
                                 .await;
                             crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
                                 orch,
-                                opened.query_history.clone(),
+                                opened.query_history.to_vec(),
                                 query_depth,
                                 user_cancel.clone(),
                                 opened.available_tool_names.clone(),

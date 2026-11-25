@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Probe the cwd for a git repo. Returns `None` when cwd is not inside a git
 /// repo, the `git` CLI is missing, the repo is unreadable, or HEAD cannot be
@@ -27,7 +27,7 @@ const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
 /// backward compatibility / other callers.
 #[must_use]
 pub fn probe(cwd: &Path) -> Option<GitStatus> {
-    probe_with_deadline(cwd, Instant::now() + SNAPSHOT_TIMEOUT)
+    probe_with_deadline(cwd, Instant::now() + GIT_PROBE_TIMEOUT)
 }
 
 fn probe_with_deadline(cwd: &Path, deadline: Instant) -> Option<GitStatus> {
@@ -100,7 +100,7 @@ pub fn status_value(cwd: &Path) -> Option<String> {
 
 /// One bounded probe supplies both env facts and the rendered attachment.
 pub(crate) fn snapshot(cwd: &Path) -> (Option<GitStatus>, Option<String>) {
-    snapshot_with_deadline(cwd, Instant::now() + SNAPSHOT_TIMEOUT)
+    snapshot_with_deadline(cwd, Instant::now() + GIT_PROBE_TIMEOUT)
 }
 
 fn snapshot_with_deadline(cwd: &Path, deadline: Instant) -> (Option<GitStatus>, Option<String>) {
@@ -148,27 +148,23 @@ fn status_value_from_probe(
     let main_branch = resolve_main_branch(cwd, deadline);
 
     // `git --no-optional-locks status --short` (trimmed) → the Status: body.
-    let status_short = status.trim().to_owned();
+    let status_short = status.trim();
     // Truncate as `m8r` does (`d8r` cap) with the byte-exact marker.
-    let status_body = if status_short.len() > STATUS_TRUNCATE_BYTES {
+    let status_section = if status_short.len() > STATUS_TRUNCATE_BYTES {
         let mut boundary = STATUS_TRUNCATE_BYTES;
         while !status_short.is_char_boundary(boundary) {
             boundary -= 1;
         }
         let head = &status_short[..boundary];
         format!(
-            "{head}\n... (truncated because it exceeds 2k characters. \
+            "Status:\n{head}\n... (truncated because it exceeds 2k characters. \
 If you need more information, run \"git status\" using {})",
             shell_name()
         )
+    } else if status_short.is_empty() {
+        "Status:\n(clean)".to_owned()
     } else {
-        status_short
-    };
-    // `${u||"(clean)"}` — empty status renders "(clean)".
-    let status_body = if status_body.is_empty() {
-        "(clean)".to_string()
-    } else {
-        status_body
+        format!("Status:\n{status_short}")
     };
 
     // `git --no-optional-locks log --oneline -n 5` (trimmed) → Recent commits.
@@ -200,7 +196,7 @@ snapshot in time, and will not update during the conversation."
     if let Some(user) = git_user {
         parts.push(format!("Git user: {user}"));
     }
-    parts.push(format!("Status:\n{status_body}"));
+    parts.push(status_section);
     parts.push(format!("Recent commits:\n{recent_commits}"));
 
     Some(parts.join("\n\n"))
@@ -272,22 +268,84 @@ fn run_git(cwd: &Path, deadline: Instant, args: &[&str]) -> Option<String> {
     run_command_with_deadline(&mut command, deadline)
 }
 
-/// Own the direct child and its process group until all probe output is done.
-/// Drop cleanup also covers errors after spawn and successful Git processes
-/// that leave a credential/helper subprocess running in the background.
+/// Read optional Git metadata without occupying a blocking-pool worker.
+/// Callers may share a deadline across several related commands.
+pub(crate) async fn git_metadata_before(
+    cwd: &Path,
+    args: &[&str],
+    deadline: tokio::time::Instant,
+) -> Option<Vec<u8>> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(permission::auto_mode_producers::GIT_HARDENING_FLAGS)
+        .arg("--no-optional-locks")
+        .args(args)
+        .current_dir(cwd);
+    metadata_output_before(&mut command, deadline).await
+}
+
+async fn metadata_output_before(
+    command: &mut tokio::process::Command,
+    deadline: tokio::time::Instant,
+) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    if tokio::time::Instant::now() >= deadline {
+        return None;
+    }
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    #[cfg(unix)]
+    let group = child.id().map(ProbeProcessGroup);
+    let mut stdout = child.stdout.take()?;
+    let mut bytes = Vec::new();
+    let wait = async {
+        // Close inherited pipes when Git exits, including on cancellation.
+        #[cfg(unix)]
+        let _group = group;
+        child.wait().await
+    };
+    let result = tokio::time::timeout_at(deadline, async {
+        tokio::try_join!(wait, stdout.read_to_end(&mut bytes))
+    })
+    .await;
+    match result {
+        Ok(Ok((status, _))) if status.success() => Some(bytes),
+        Ok(Ok(_)) => None,
+        _ => {
+            let _ = child.kill().await;
+            None
+        }
+    }
+}
+
+/// A successful Git process can leave a helper holding its output pipe.
+#[cfg(unix)]
+struct ProbeProcessGroup(u32);
+
+#[cfg(unix)]
+impl Drop for ProbeProcessGroup {
+    fn drop(&mut self) {
+        if let Ok(pid) = i32::try_from(self.0) {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
 struct ProbeChild(std::process::Child);
 
 impl Drop for ProbeChild {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            if let Ok(pid) = i32::try_from(self.0.id()) {
-                let _ = nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
-        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -314,6 +372,8 @@ fn run_command_with_deadline(command: &mut Command, deadline: Instant) -> Option
             .spawn()
             .ok()?,
     );
+    #[cfg(unix)]
+    let group = ProbeProcessGroup(child.0.id());
     let status = loop {
         match child.0.try_wait() {
             Ok(Some(status)) => break status,
@@ -329,6 +389,8 @@ fn run_command_with_deadline(command: &mut Command, deadline: Instant) -> Option
     // Kill the owned group before reading, even when Git exited successfully.
     // This retires descendants that inherited output handles; no detached
     // output task or thread survives this function.
+    #[cfg(unix)]
+    drop(group);
     drop(child);
     if !status.success() || Instant::now() >= deadline {
         return None;
@@ -415,6 +477,52 @@ mod tests {
             !marker.exists(),
             "automatic probes must not execute fsmonitor"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn metadata_probe_cleans_up_on_deadline_or_caller_cancellation() {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        for cancel in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .arg("-c")
+                .arg(r#"echo $$ > "$1"; exec sleep 60"#)
+                .arg("git-metadata-test")
+                .arg(&pid_file);
+            let deadline = tokio::time::Instant::now() + GIT_PROBE_TIMEOUT;
+            let mut probe = Box::pin(metadata_output_before(&mut command, deadline));
+            assert!(futures::poll!(probe.as_mut()).is_pending());
+            let started = Instant::now();
+            let pid = loop {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<i32>().ok())
+                {
+                    break Pid::from_raw(pid);
+                }
+                assert!(started.elapsed() < Duration::from_secs(5));
+                tokio::task::yield_now().await;
+            };
+            if !cancel {
+                tokio::time::advance(GIT_PROBE_TIMEOUT).await;
+                assert!(probe.as_mut().await.is_none());
+            }
+            drop(probe);
+            let stopped = Instant::now();
+            while kill(pid, None) != Err(Errno::ESRCH) {
+                assert!(
+                    stopped.elapsed() < Duration::from_secs(5),
+                    "Git child survived"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
     }
 
     #[cfg(unix)]

@@ -276,6 +276,43 @@ fn request_prompt_context(prompt_id: MessageId) -> PromptContext {
     }
 }
 
+#[tokio::test]
+async fn staged_presence_and_name_only_announcements_follow_the_current_batch() {
+    fn record(id: MessageId) -> PromptIngressAttachment {
+        let mut row = staged_system_attachment("deferred_tools_record", "");
+        row.payload = Utf16JsonProjection::parse(&format!(
+            r#"{{"type":"deferred_tools_record","nameOnlyAnnouncements":["{id}"]}}"#,
+        ))
+        .unwrap();
+        row
+    }
+    let base_id = MessageId::new();
+    let producer_id = MessageId::new();
+    assert!(!has_staged_prompt_ingress_attachments());
+    assert!(!is_staged_name_only_announcement(producer_id));
+    let context = request_prompt_context(MessageId::new());
+    context.ingress_batch.lock().unwrap().producer_rows.push((
+        "deferred_tools_record".to_owned(),
+        vec![record(producer_id)],
+    ));
+    REQUEST_CONTEXT
+        .scope(context, async {
+            assert!(!has_staged_prompt_ingress_attachments());
+            assert!(!is_staged_name_only_announcement(producer_id));
+            REQUEST_CONTEXT.with(|context| {
+                *context.staged_ingress_attachments.lock().unwrap() = Some(Vec::new());
+            });
+            assert!(has_staged_prompt_ingress_attachments());
+            assert!(is_staged_name_only_announcement(producer_id));
+            assert!(!is_staged_name_only_announcement(base_id));
+            REQUEST_CONTEXT.with(|context| {
+                *context.staged_ingress_attachments.lock().unwrap() = Some(vec![record(base_id)]);
+            });
+            assert!(is_staged_name_only_announcement(base_id));
+        })
+        .await;
+}
+
 struct SkillListingFixture;
 
 #[async_trait]

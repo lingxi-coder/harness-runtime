@@ -2118,11 +2118,8 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         if !crate::prompt::silent_turn::is_enabled(&model) {
             return None;
         }
-        let history = {
-            let s = self.session.lock().await;
-            s.history.clone()
-        };
-        if !Self::step_follows_tool_results(&history) {
+        let session = self.session.lock().await;
+        if !Self::step_follows_tool_results(&session.history) {
             return None;
         }
         let mut marks = self
@@ -2141,12 +2138,14 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             .silent_turn_reminder_timestamps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let history_len = session.history.len();
         let timed = crate::prompt::silent_turn::scan_silent_stretch_with_timestamps(
-            &history,
+            &session.history,
             marks.as_slice(),
             &timestamps,
             &reminder_timestamps,
         );
+        drop(session);
         if !crate::prompt::silent_turn::should_emit_with_elapsed(
             timed.stretch,
             crate::prompt::silent_turn::turns_between_reminders(),
@@ -2155,8 +2154,8 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         ) {
             return None;
         }
-        marks.push(history.len());
-        reminder_timestamps.insert(history.len(), now);
+        marks.push(history_len);
+        reminder_timestamps.insert(history_len, now);
         drop(reminder_timestamps);
         drop(timestamps);
         drop(marks);

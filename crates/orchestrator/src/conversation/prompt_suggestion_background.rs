@@ -28,6 +28,38 @@ fn projection_from_value(value: serde_json::Value) -> Utf16JsonProjection {
         .expect("classifier control JSON is representable as a UTF-16 projection")
 }
 
+fn user_ask(message: &ConversationMessage) -> Option<Utf16JsonProjection> {
+    let ConversationMessage::User {
+        content,
+        is_meta: false,
+        is_compact_summary: false,
+        ..
+    } = message
+    else {
+        return None;
+    };
+    match content.as_slice() {
+        [lingxi_core::types::ContentBlock::Text { text, .. }] => Some(text.clone().into()),
+        [lingxi_core::types::ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        }] => Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(utf16_code_units),
+            utf16_code_units.clone(),
+        )
+        .ok(),
+        _ => None,
+    }
+}
+
+// The sandbox watchdog waits synchronously for its isolated QuickJS thread.
+async fn run_classifier_js(
+    evaluate: impl FnOnce() -> Result<Utf16JsonProjection, hooks::function_hook::FunctionHookError>
+        + Send
+        + 'static,
+) -> Option<Utf16JsonProjection> {
+    tokio::task::spawn_blocking(evaluate).await.ok()?.ok()
+}
+
 fn projection_member_or_default(
     value: Option<&Utf16JsonProjection>,
     pointer: &str,
@@ -105,11 +137,20 @@ impl ConversationOrchestrator {
             return None;
         }
         let heuristic_only = telemetry::feature_flags::flag_bool("tengu_cobalt_wren", false);
-        let (session_id, history, model, profile) = {
+        let (session_id, assistants, latest_ask, model, profile) = {
             let session = self.session.lock().await;
+            let history = session.iter_model_context_history();
+            let latest_ask = history
+                .clone()
+                .rev()
+                .find_map(user_ask)
+                .unwrap_or_else(|| "".into());
             (
                 session.session_id.as_uuid().to_string(),
-                session.model_context_history(),
+                history
+                    .filter_map(javascript::capture_assistant)
+                    .collect::<Vec<_>>(),
+                latest_ask,
                 session.model.clone(),
                 session.model_profile.clone(),
             )
@@ -119,10 +160,7 @@ impl ConversationOrchestrator {
         } else {
             None
         };
-        let count = history
-            .iter()
-            .filter(|message| matches!(message, ConversationMessage::Assistant { .. }))
-            .count();
+        let count = assistants.len();
         let now = jiff::Timestamp::now().as_millisecond();
         let (epoch, start, previous, mins) = {
             let mut state = self.background_suggestion_state();
@@ -174,37 +212,17 @@ impl ConversationOrchestrator {
                 ((now - state.previous_state_since_ms) as f64 / 60000.0).round(),
             )
         };
-        let assembled = javascript::assemble_history(&history, start, |id| {
-            self.is_prompt_suggestion_api_error(id)
+        let assistants: Vec<_> = assistants
+            .into_iter()
+            .map(|(id, content)| (self.is_prompt_suggestion_api_error(&id), content))
+            .collect();
+        let assembled =
+            run_classifier_js(move || javascript::assemble_assistants(assistants, start)).await?;
+        let classifier_previous = previous.clone();
+        let prepared = run_classifier_js(move || {
+            javascript::prepare_assembled(&assembled, &classifier_previous, latest_ask, mins)
         })
-        .ok()?;
-        let latest_ask = history
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                ConversationMessage::User {
-                    content,
-                    is_meta: false,
-                    is_compact_summary: false,
-                    ..
-                } if content.len() == 1 => content.iter().find_map(|block| match block {
-                    lingxi_core::types::ContentBlock::Text { text, .. } => {
-                        Some(Utf16JsonProjection::from(text.clone()))
-                    }
-                    lingxi_core::types::ContentBlock::TextJsUtf16 {
-                        utf16_code_units, ..
-                    } => Utf16JsonProjection::root_string(
-                        String::from_utf16_lossy(utf16_code_units),
-                        utf16_code_units.clone(),
-                    )
-                    .ok(),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .unwrap_or_else(|| Utf16JsonProjection::from(""));
-        let prepared =
-            javascript::prepare_assembled(&assembled, &previous, latest_ask, mins).ok()?;
+        .await?;
         let no_text_result = if prepared
             .at_pointer("/hasText")
             .and_then(|value| value.as_bool())
@@ -345,9 +363,12 @@ impl ConversationOrchestrator {
                     let Some(response_text) = response.text else {
                         continue;
                     };
-                    result = javascript::evaluate_parse_projection(response_text, &previous)
-                        .ok()
-                        .filter(|value| value.at_pointer("").is_some_and(|root| !root.is_null()));
+                    let classifier_previous = previous.clone();
+                    result = run_classifier_js(move || {
+                        javascript::evaluate_parse_projection(response_text, &classifier_previous)
+                    })
+                    .await
+                    .filter(|value| value.at_pointer("").is_some_and(|root| !root.is_null()));
                     if result.is_some() {
                         break;
                     }
@@ -448,9 +469,11 @@ impl ConversationOrchestrator {
     ) {
         let classifier_input = Utf16JsonProjection::object(vec![("text".into(), text.clone())])
             .expect("suggestion classifier input is JSON");
-        if javascript::evaluate_projection_result("safeReply", classifier_input)
-            .ok()
-            .and_then(|value| value.at_pointer("").and_then(|root| root.as_bool()))
+        if run_classifier_js(move || {
+            javascript::evaluate_projection_result("safeReply", classifier_input)
+        })
+        .await
+        .and_then(|value| value.at_pointer("").and_then(|root| root.as_bool()))
             != Some(true)
         {
             return;
@@ -527,5 +550,22 @@ impl ConversationOrchestrator {
             let _ = tokio::fs::remove_file(&temporary).await;
         }
         published
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn classifier_watchdog_runs_off_the_runtime_thread() {
+        let runtime_thread = std::thread::current().id();
+        let result = run_classifier_js(move || {
+            assert_ne!(std::thread::current().id(), runtime_thread);
+            Ok(Utf16JsonProjection::from("classified"))
+        })
+        .await
+        .expect("the blocking worker completed");
+        assert_eq!(result.string_at(""), Some("classified"));
     }
 }

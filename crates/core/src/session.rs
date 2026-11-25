@@ -386,15 +386,20 @@ impl SessionState {
         }
     }
 
+    /// Visit the messages eligible for a model request in transcript order.
+    pub fn iter_model_context_history(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = &ConversationMessage> + Clone {
+        self.history
+            .iter()
+            .filter(|message| !self.model_context_excluded_messages.contains(&message.id()))
+    }
+
     /// Clone the history that may be sent to a model or model-backed
     /// compactor, omitting transcript-only completion envelopes.
     #[must_use]
     pub fn model_context_history(&self) -> Vec<ConversationMessage> {
-        self.history
-            .iter()
-            .filter(|message| !self.model_context_excluded_messages.contains(&message.id()))
-            .cloned()
-            .collect()
+        self.iter_model_context_history().cloned().collect()
     }
 
     /// Replace only the model-visible portion of history while retaining

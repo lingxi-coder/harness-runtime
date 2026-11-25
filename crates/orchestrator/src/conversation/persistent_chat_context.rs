@@ -124,6 +124,7 @@ fn error(code: &str) -> OrchestratorError {
     })
 }
 
+#[cfg(test)]
 fn proof(bytes: &[u8]) -> ChatTranscriptCheckpoint {
     ChatTranscriptCheckpoint {
         byte_len: bytes.len() as u64,
@@ -487,14 +488,18 @@ fn advance_projection(
 /// Pure validation. Receipts never become canonical user/assistant messages.
 /// Each receipt proves its actual earlier bytes, extends the previous covered
 /// prefix, and can summarize only complete, inline rounds from that source.
-pub(crate) fn replay_context_receipts(
+/// The full canonical history comes from the verifier's replay of this capture.
+pub(super) fn replay_context_receipts(
     captured: &CapturedChatTranscript,
+    canonical_history: &[ConversationMessage],
 ) -> Result<Option<ContextReceipt>, String> {
     let (app_id, chat_id) = owner_from_path(captured.path()).ok_or(UNAVAILABLE)?;
     let mut latest: Option<ContextReceipt> = None;
     let mut last_receipt_end = 0usize;
     let mut offset = 0usize;
     let mut synthetic_ids = HashSet::new();
+    let mut prefix_hash = Sha256::new();
+    let mut hashed_len = 0;
     for line in captured.source().split_inclusive('\n') {
         let row = Utf16JsonProjection::parse(line).map_err(|_| UNAVAILABLE)?;
         if row
@@ -532,7 +537,6 @@ pub(crate) fn replay_context_receipts(
                 || length > offset
                 || length < last_receipt_end
                 || !prefix.ends_with('\n')
-                || proof(prefix.as_bytes()) != receipt.source_checkpoint
                 || receipt.previous_receipt_id != latest.as_ref().map(|last| last.receipt_id)
                 || receipt.summary_utf16.is_empty()
                 || receipt.summary_utf16.len() > MAX_SUMMARY_UNITS
@@ -551,6 +555,13 @@ pub(crate) fn replay_context_receipts(
             {
                 return Err(UNAVAILABLE.into());
             }
+            // The previous checkpoint ended before its receipt. This checkpoint
+            // includes that receipt, so only the intervening bytes are new.
+            prefix_hash.update(&prefix.as_bytes()[hashed_len..]);
+            hashed_len = length;
+            if format!("{:x}", prefix_hash.clone().finalize()) != receipt.source_checkpoint.sha256 {
+                return Err(UNAVAILABLE.into());
+            }
             let loaded = session::jsonl::route_lines(prefix);
             let source = crate::resume::replay_persistent_app_chat_session(
                 captured.path().to_path_buf(),
@@ -565,22 +576,12 @@ pub(crate) fn replay_context_receipts(
         }
         offset += line.len();
     }
-    if !synthetic_ids.is_empty() {
-        let raw = crate::resume::replay_persistent_app_chat_session(
-            captured.path().to_path_buf(),
-            captured.source().to_owned(),
-            session::jsonl::route_lines(captured.source()),
-            captured.session_id(),
-        )
-        .map_err(|_| UNAVAILABLE)?;
-        if raw
-            .state
-            .history
+    if !synthetic_ids.is_empty()
+        && canonical_history
             .iter()
             .any(|message| synthetic_ids.contains(&message.id().as_uuid()))
-        {
-            return Err(UNAVAILABLE.into());
-        }
+    {
+        return Err(UNAVAILABLE.into());
     }
     Ok(latest)
 }
@@ -683,8 +684,8 @@ impl ConversationOrchestrator {
             {
                 return Err(UNAVAILABLE.into());
             }
-            let replayed = Self::replay_persistent_chat_snapshot(source)?;
-            (replayed.state.history, replay_context_receipts(source)?)
+            let (replayed, receipt) = Self::replay_persistent_chat_snapshot_with_receipt(source)?;
+            (replayed.state.history, receipt)
         } else {
             (Vec::new(), None)
         };
@@ -726,17 +727,18 @@ impl ConversationOrchestrator {
     pub(crate) fn verify_persistent_chat_context(
         &self,
         captured: &CapturedChatTranscript,
+        restored: Option<&ContextReceipt>,
     ) -> Result<(), String> {
-        let restored = replay_context_receipts(captured)?;
         match &self.persistent_chat_context {
             Some(context) => {
                 if captured.session_id() != context.session_id
                     || captured.path() != context.transcript_path.as_path()
                     || restored
-                        != *context
+                        != context
                             .latest
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref()
                 {
                     return Err(UNAVAILABLE.into());
                 }
@@ -805,15 +807,15 @@ impl ConversationOrchestrator {
             skip_system_prompt_prefix: true,
         };
         context.check(cancel)?;
-        let estimate = |request: &sidequery::SideQueryRequest| {
+        let estimate = |request| {
             context
                 .config
                 .client
-                .estimate_request(sidequery::CanonicalSideQueryRequest::Plain(request.clone()))
+                .estimate_request(sidequery::CanonicalSideQueryRequest::Plain(request))
                 .map(|estimate| estimate.input_tokens)
                 .map_err(|_| error(UNAVAILABLE))
         };
-        let before = estimate(&request)?;
+        let before = estimate(request.clone())?;
         let first = !context
             .prepared
             .swap(true, std::sync::atomic::Ordering::AcqRel);
@@ -873,9 +875,9 @@ impl ConversationOrchestrator {
         validate_covered(&mut receipt, &context.source_history).map_err(|_| error(UNSUPPORTED))?;
         let mut fixed_request = request.clone();
         fixed_request.messages =
-            advance_projection(prior.as_ref(), &receipt, request.messages.clone())
+            advance_projection(prior.as_ref(), &receipt, fixed_request.messages)
                 .map_err(|_| error(UNAVAILABLE))?;
-        if estimate(&fixed_request)? >= threshold {
+        if estimate(fixed_request)? >= threshold {
             // An empty replacement already cannot fit. Do not spend a summary
             // request trying to remove protected/current input or attachments.
             return Err(error(LIMIT));
@@ -902,7 +904,9 @@ impl ConversationOrchestrator {
             self.typed_attachment_ids_for_snapshot(&summary_request.messages);
         summary_request.task_deliveries.clear();
         summary_request.max_tokens = Some(SUMMARY_OUTPUT_TOKENS);
-        if estimate(&summary_request)?.saturating_add(u64::from(SUMMARY_OUTPUT_TOKENS)) > budget {
+        if estimate(summary_request.clone())?.saturating_add(u64::from(SUMMARY_OUTPUT_TOKENS))
+            > budget
+        {
             return Err(error(LIMIT));
         }
         let scope = self
@@ -976,9 +980,11 @@ impl ConversationOrchestrator {
         }
         // Rewrite the assembled request in place: request-local reminders and
         // pinned attachments keep their exact relative positions.
-        request.messages = advance_projection(prior.as_ref(), &receipt, request.messages)
+        let projected = advance_projection(prior.as_ref(), &receipt, request.messages)
             .map_err(|_| error(UNAVAILABLE))?;
-        if estimate(&request)? >= threshold || estimate(&request)? >= before {
+        request.messages = projected.clone();
+        let after = estimate(request)?;
+        if after >= threshold || after >= before {
             return Err(error(LIMIT));
         }
         context.check(cancel)?;
@@ -992,13 +998,13 @@ impl ConversationOrchestrator {
             .capture_persistent_chat_snapshot(false)
             .await
             .map_err(|_| error(UNAVAILABLE))?;
-        let replayed =
-            Self::replay_persistent_chat_snapshot(&captured).map_err(|_| error(UNAVAILABLE))?;
+        let (replayed, restored) = Self::replay_persistent_chat_snapshot_with_receipt(&captured)
+            .map_err(|_| error(UNAVAILABLE))?;
         let live = self.session.lock().await;
         if captured.session_id() != committed.session_id()
             || !captured.source().starts_with(committed.source())
             || live.history != replayed.state.history
-            || replay_context_receipts(&captured).map_err(|_| error(UNAVAILABLE))? != prior
+            || restored != prior
         {
             return Err(error(UNAVAILABLE));
         }
@@ -1017,14 +1023,9 @@ impl ConversationOrchestrator {
             .await
             .map_err(|_| error(UNAVAILABLE))?;
         context.check(cancel)?;
-        let restored = replay_context_receipts(&verified).map_err(|_| error(UNAVAILABLE))?;
-        if restored.as_ref() != Some(&receipt)
-            || Self::replay_persistent_chat_snapshot(&verified)
-                .map_err(|_| error(UNAVAILABLE))?
-                .state
-                .history
-                != live.history
-        {
+        let (replayed, restored) = Self::replay_persistent_chat_snapshot_with_receipt(&verified)
+            .map_err(|_| error(UNAVAILABLE))?;
+        if restored.as_ref() != Some(&receipt) || replayed.state.history != live.history {
             return Err(error(UNAVAILABLE));
         }
         *self.transcript.last_jsonl_uuid.lock().await = Some(receipt.receipt_id.to_string());
@@ -1032,6 +1033,6 @@ impl ConversationOrchestrator {
             .latest
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(receipt);
-        Ok(request.messages)
+        Ok(projected)
     }
 }

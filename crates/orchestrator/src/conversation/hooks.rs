@@ -2107,6 +2107,19 @@ impl ConversationOrchestrator {
         self.fire_user_prompt_submit(prompt, message_id).await
     }
 
+    async fn message_display_hook_context(&self) -> Option<HookContext> {
+        // If the registry is being updated, capture this event's session owner
+        // immediately and let the executor match the updated hooks.
+        if self
+            .hooks
+            .may_have_hooks_for(&hooks::HookEventType::MessageDisplay)
+        {
+            Some(self.lifecycle_hook_ctx(false).await)
+        } else {
+            None
+        }
+    }
+
     /// Fire the `MessageDisplay` hooks at the BEGIN of an assistant-message
     /// stream — the orchestrator twin of claude-code's stream-display state
     /// machine `begin(d)` (BIN off 208862320), which, on each new assistant
@@ -2131,7 +2144,9 @@ impl ConversationOrchestrator {
     /// `MessageDisplay` hook never affects the turn, and firing is a strict
     /// no-op when no `MessageDisplay` hook is registered.
     pub(super) async fn fire_message_display(&self, turn_id: &str, assistant_id: MessageId) {
-        let mut ctx = self.lifecycle_hook_ctx(false).await;
+        let Some(mut ctx) = self.message_display_hook_context().await else {
+            return;
+        };
         let cancellation = CancellationToken::new();
         ctx.idle_compaction_cancellation = Some(cancellation.clone());
         ctx.idle_compaction_process_owner =
@@ -2181,7 +2196,7 @@ impl ConversationOrchestrator {
         turn_id: &str,
         text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Option<ExactHookText> {
-        let ctx = self.lifecycle_hook_ctx(false).await;
+        let ctx = self.message_display_hook_context().await?;
         let agg = self
             .hooks
             .execute(
@@ -5041,6 +5056,34 @@ mod message_display_begin_budget_tests {
     use mobile_linux_api::ProcessError;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    fn display_orchestrator(hooks: Arc<hooks::HookExecutorImpl>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unsubscribed_display_passes_skip_the_session_snapshot() {
+        let orch = display_orchestrator(noop_hook_executor());
+        let _held_session = orch.session.lock().await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            orch.fire_message_display("turn", MessageId::new()).await;
+            let displayed = orch
+                .fire_message_display_completed("turn", &source_string_projection("original"))
+                .await;
+            assert!(displayed.is_none());
+        })
+        .await
+        .expect("unsubscribed display events finish while the session is locked");
+    }
+
     #[derive(Default)]
     struct DisplayRunner {
         owner: std::sync::Mutex<Option<String>>,
@@ -5109,16 +5152,7 @@ mod message_display_begin_budget_tests {
                 Arc::new(tool_api::test_support::BypassSandbox),
             );
         let hooks = Arc::new(executor);
-        let orch = ConversationOrchestrator::new(
-            crate::OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(tool_api::ToolRegistry::new()),
-            hooks.clone(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        );
+        let orch = display_orchestrator(hooks.clone());
         let session_id = orch.session.lock().await.session_id;
         hooks
             .upsert_session_named_hook(

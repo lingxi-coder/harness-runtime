@@ -641,6 +641,73 @@ async fn abandoned_measured_usage_and_replacement_are_recorded_once_each() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn cancellation_during_stream_retry_backoff_preserves_failed_usage() {
+    use std::time::Duration;
+
+    let failed = vec![
+        Ok(message_start_with_usage(
+            "failed",
+            MODEL,
+            usage(100, 0, 0, 0),
+        )),
+        Ok(content_block_start_thinking(0)),
+        Ok(thinking_delta(0, "abandoned reasoning")),
+        Err(LlmError::Transport {
+            message: "ECONNRESET: connection reset by peer".into(),
+        }),
+    ];
+    let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![failed]));
+    let (tx, mut snapshots) = tokio::sync::mpsc::channel(8);
+    let tracker = Arc::new(cost::CostTracker::new(
+        lingxi_core::types::SessionId::new(),
+        Arc::new(cost::PricingCatalog::builtin_reference()),
+        tx,
+    ));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::into_shared(
+        orchestrator(
+            config(),
+            RecoveryApi::new(vec![]),
+            streaming.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            output.clone(),
+        )
+        .with_cost_tracker(tracker),
+    );
+    let cancel = CancellationToken::new();
+    let mut turn = Box::pin(orch.run_turn_streaming_with_cancel("interrupt retry", cancel.clone()));
+    tokio::select! {
+        result = &mut turn => panic!("turn finished before failed-attempt settlement: {result:?}"),
+        snapshot = snapshots.recv() => assert!(snapshot.is_some(), "failed attempt must settle"),
+    }
+    // Enter the 100 ms connection-loss backoff with the failed attempt already paid.
+    tokio::select! {
+        biased;
+        result = &mut turn => panic!("turn finished during backoff: {result:?}"),
+        () = tokio::time::sleep(Duration::from_millis(1)) => {}
+    }
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_millis(20), turn)
+        .await
+        .expect("cancellation must finish before the retry delay elapses")
+        .unwrap();
+    assert_eq!(outcome, crate::TurnOutcome::Cancelled);
+    assert_eq!(streaming.captured_calls().await.len(), 1);
+    let cost = orch.snapshot_cost_real().await;
+    assert_eq!((cost.api_calls, cost.input_tokens), (1, 100));
+    let terminal_reasons: Vec<_> = output
+        .snapshot()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminal_reasons, ["aborted_streaming"]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn dropped_attempt_after_synchronous_handoff_keeps_usage_and_call_count() {
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let tracker = Arc::new(cost::CostTracker::new(

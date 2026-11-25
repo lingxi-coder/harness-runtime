@@ -166,6 +166,8 @@ struct BlockState {
     text_buf: TextBuffer,
     /// Whether accumulated deltas should replace the source block's text field.
     preserved_text_dirty: bool,
+    /// Initial array entries and streamed deltas, populated on the first citation delta.
+    citation_items: Vec<JsonPayload>,
     /// Used for `ToolUse` (raw `partial_json` concat).
     json_buf: Vec<u16>,
     /// Set by `signature_delta` on a `Thinking` block.
@@ -214,6 +216,7 @@ impl BlockAccumulator {
                 kind,
                 text_buf: TextBuffer::Initial(text_buf, text_utf16_code_units),
                 preserved_text_dirty: false,
+                citation_items: Vec::new(),
                 json_buf: Vec::new(),
                 signature: None,
             },
@@ -329,7 +332,7 @@ impl BlockAccumulator {
     }
 
     /// Retain citation deltas on their text block for the persisted assistant row.
-    /// A start event that already supplied a citation value remains authoritative.
+    /// A start event's array seeds the list. Other non-null values are authoritative.
     pub fn append_citation(
         &mut self,
         index: u32,
@@ -340,15 +343,19 @@ impl BlockAccumulator {
             .get_mut(&index)
             .ok_or(StreamingError::BlockNotFound { index })?;
         match &mut state.kind {
-            BlockKind::Text { citations, .. } => match citations {
-                None | Some(None) => {
-                    *citations = Some(Some(append_payload_array(None, &citation)?));
+            BlockKind::Text { citations, .. } => {
+                if state.citation_items.is_empty() {
+                    if let Some(Some(initial)) = citations {
+                        if !initial.is_root_array() {
+                            return Ok(());
+                        }
+                        state.citation_items = serde_json::from_str(initial.as_json_source())
+                            .map_err(|error| StreamingError::JsonPayload(error.to_string()))?;
+                        *citations = None;
+                    }
                 }
-                Some(Some(values)) if values.is_root_array() => {
-                    *values = append_payload_array(Some(values), &citation)?;
-                }
-                Some(Some(_)) => {}
-            },
+                state.citation_items.push(citation);
+            }
             BlockKind::PreservedText(_) => {}
             other => {
                 return Err(StreamingError::TypeMismatch {
@@ -376,7 +383,10 @@ impl BlockAccumulator {
         match &mut state.kind {
             BlockKind::Text {
                 citations: current, ..
-            } => *current = citations,
+            } => {
+                *current = citations;
+                state.citation_items.clear();
+            }
             other => {
                 return Err(StreamingError::TypeMismatch {
                     index,
@@ -461,7 +471,7 @@ impl BlockAccumulator {
         let completed = match state.kind {
             BlockKind::Text { citations, .. } => CompletedBlock::Text {
                 text,
-                citations,
+                citations: assembled_citations(citations, &state.citation_items)?,
                 utf16_code_units: exact_units,
             },
             BlockKind::Thinking => CompletedBlock::Thinking {
@@ -565,17 +575,21 @@ impl BlockAccumulator {
                     Some((*index, block))
                 }
                 BlockKind::Text { citations, .. } if !state.text_buf.display().is_empty() => {
+                    let citations = citations_to_core(
+                        assembled_citations(citations.clone(), &state.citation_items)
+                            .expect("an array of validated citation payloads is valid JSON"),
+                    );
                     Some((
                         *index,
                         match state.text_buf.units() {
                             Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
                                 text: state.text_buf.display().to_owned(),
                                 utf16_code_units: utf16_code_units.to_vec(),
-                                citations: citations_to_core(citations.clone()),
+                                citations,
                             },
                             None => ContentBlock::Text {
                                 text: state.text_buf.display().to_owned(),
-                                citations: citations_to_core(citations.clone()),
+                                citations,
                             },
                         },
                     ))
@@ -614,31 +628,100 @@ fn citations_to_core(
     })
 }
 
-fn append_payload_array(
-    existing: Option<&JsonPayload>,
-    value: &JsonPayload,
-) -> Result<JsonPayload, StreamingError> {
-    let mut source = String::from("[");
-    if let Some(existing) = existing {
-        let length = existing.array_len("").ok_or_else(|| {
-            StreamingError::JsonPayload("citation payload is not an array".into())
-        })?;
-        for index in 0..length {
-            let item = existing.array_item(index).ok_or_else(|| {
-                StreamingError::JsonPayload("citation array item has no source".into())
-            })?;
-            if index > 0 {
-                source.push(',');
+fn assembled_citations(
+    original: Option<Option<JsonPayload>>,
+    items: &[JsonPayload],
+) -> Result<Option<Option<JsonPayload>>, StreamingError> {
+    if items.is_empty() {
+        return Ok(original);
+    }
+    // JsonPayload serializes its exact source, including numeric spellings and UTF-16 escapes.
+    let array = serde_json::to_string(items)
+        .and_then(|source| JsonPayload::parse(&source))
+        .map_err(|error| StreamingError::JsonPayload(error.to_string()))?;
+    Ok(Some(Some(array)))
+}
+
+#[cfg(test)]
+mod citation_tests {
+    use super::*;
+
+    fn text_block(citations: Option<Option<JsonPayload>>) -> BlockAccumulator {
+        let mut acc = BlockAccumulator::new();
+        acc.start_block(
+            0,
+            BlockKind::Text {
+                citations,
+                utf16_code_units: None,
+                initial_text: "visible".into(),
+            },
+        )
+        .unwrap();
+        acc
+    }
+
+    #[test]
+    fn citation_deltas_preserve_exact_source_and_survive_partial_snapshots() {
+        let seed = JsonPayload::parse(r#"[ { "n": 1.00, "s": "\ud800" } , 0e5 ]"#).unwrap();
+        let mut acc = text_block(Some(Some(seed)));
+        acc.append_citation(0, JsonPayload::parse(r#"{"s":"\u0041"}"#).unwrap())
+            .unwrap();
+        let snapshot = acc.incomplete_text_blocks();
+        assert!(matches!(snapshot.as_slice(),
+            [ContentBlock::Text { citations: Some(Some(array)), .. }]
+                if array.string_units("/0/s") == Some(vec![0xd800])
+                    && array.string_at("/2/s") == Some("A")
+        ));
+        acc.append_citation(0, JsonPayload::parse("false").unwrap())
+            .unwrap();
+        let CompletedBlock::Text {
+            citations: Some(Some(array)),
+            ..
+        } = acc.stop_block(0).unwrap()
+        else {
+            panic!("expected text with a citation array");
+        };
+        assert_eq!(
+            array.as_json_source(),
+            r#"[{ "n": 1.00, "s": "\ud800" },0e5,{"s":"\u0041"},false]"#
+        );
+    }
+
+    #[test]
+    fn authoritative_citation_snapshots_replace_deltas_and_preserve_field_presence() {
+        let null = Some(None);
+        let empty = Some(Some(JsonPayload::parse("[ ]").unwrap()));
+        let opaque = Some(Some(JsonPayload::parse(r#"{"provider":true}"#).unwrap()));
+        let new_list = Some(Some(JsonPayload::parse("[2]").unwrap()));
+        for (replacement, with_next_delta) in [
+            (None, new_list.clone()),
+            (null, new_list.clone()),
+            (empty, new_list),
+            (opaque.clone(), opaque),
+        ] {
+            for append_next in [false, true] {
+                let mut acc = text_block(None);
+                acc.append_citation(0, JsonPayload::parse("1").unwrap())
+                    .unwrap();
+                acc.set_text_citations(0, replacement.clone()).unwrap();
+                if append_next {
+                    acc.append_citation(0, JsonPayload::parse("2").unwrap())
+                        .unwrap();
+                }
+                let CompletedBlock::Text { citations, .. } = acc.stop_block(0).unwrap() else {
+                    panic!("expected a text block");
+                };
+                assert_eq!(
+                    &citations,
+                    if append_next {
+                        &with_next_delta
+                    } else {
+                        &replacement
+                    }
+                );
             }
-            source.push_str(item.as_json_source());
-        }
-        if length > 0 {
-            source.push(',');
         }
     }
-    source.push_str(value.as_json_source());
-    source.push(']');
-    JsonPayload::parse(&source).map_err(|error| StreamingError::JsonPayload(error.to_string()))
 }
 
 #[cfg(test)]

@@ -856,7 +856,6 @@ fn replay_captured_session_inner(
         .filter(|message| {
             !message.is_sidechain && (owns(message) || lineage_ids.contains(message.uuid.as_str()))
         })
-        .cloned()
         .collect::<Vec<_>>();
     runtime_metadata.historical_read_fence_attachments = historical_read_fence_attachments(
         transcript_entries,
@@ -865,11 +864,13 @@ fn replay_captured_session_inner(
             .map(|message| message.uuid.clone())
             .collect(),
     );
-    let (display_state, _, _) = build_state_from_jsonl_with_text_projection(
+    let display_history = replay_message_rows(
         session_id,
-        &display_entries,
+        display_entries.iter().copied(),
         !persistent_app_chat,
-    );
+    )
+    .0
+    .history;
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
     // Off-chain hook attachments are intentional, but only the selected
@@ -882,6 +883,7 @@ fn replay_captured_session_inner(
     let profile_epoch = JsonlWriter::fixed_session_profile_from_source(source, &sid_str)
         .map_err(ResumeError::Profile)?
         .instruction_epoch;
+    let (snapshot, rendering) = prompt_state_from_validated_source(source, session_id);
     if persistent_app_chat {
         // The live owner applies this same epoch projection when it resumes.
         // Keep canonical history intact while every App Chat replay consumer
@@ -895,7 +897,6 @@ fn replay_captured_session_inner(
             .collect::<Vec<_>>();
         state.model_context_excluded_messages.extend(obsolete);
     }
-    let (snapshot, rendering) = prompt_state_for_epoch_from_source(source, &sid_str, profile_epoch);
     runtime_metadata.prompt_snapshot = snapshot;
     runtime_metadata.prompt_snapshot_epoch = Some(profile_epoch);
     runtime_metadata.context_rendering_hint = rendering;
@@ -913,6 +914,7 @@ fn replay_captured_session_inner(
     // full source so structured client state survives that display cut.
     let visible_results = display_entries
         .iter()
+        .copied()
         .flat_map(tool_result_ids)
         .collect::<HashSet<_>>();
     let client_state_tool_results = client_state_tool_results_from_rows(
@@ -936,7 +938,7 @@ fn replay_captured_session_inner(
                     .map(|at| (row.uuid.clone(), at.as_millisecond()))
             })
             .collect(),
-        display_history: display_state.history,
+        display_history,
         last_message_uuid: last_uuid,
         messages,
         runtime_metadata,
@@ -1060,9 +1062,8 @@ pub fn context_rendering_hint_from_messages(
     lingxi_core::host::instruction_announcements::latest_snapshot_context_rendering(&attachments)
 }
 
-/// Recover prompt attachments only from the admitted epoch in the captured
-/// source. Session-mode metadata is absent from `messages_in_order`, so its
-/// Only the session's current instruction epoch may supply its prompt snapshot.
+/// Recover prompt attachments when the captured session's fixed profile matches
+/// the expected instruction epoch.
 #[must_use]
 pub fn prompt_state_for_epoch_from_source(
     source: &str,
@@ -1080,6 +1081,16 @@ pub fn prompt_state_for_epoch_from_source(
     {
         return (None, None);
     }
+    prompt_state_from_validated_source(source, target_id)
+}
+
+fn prompt_state_from_validated_source(
+    source: &str,
+    target_id: Uuid,
+) -> (
+    Option<lingxi_core::host::PromptSnapshot>,
+    Option<lingxi_core::host::instructions::InstructionRendering>,
+) {
     let mut matching = String::new();
     for line in source.lines() {
         let Ok(row) = Utf16JsonProjection::parse(line) else {
@@ -1230,11 +1241,28 @@ fn build_state_from_jsonl_with_text_projection(
     messages: &[JsonlMessage],
     project_assistant_text: bool,
 ) -> (SessionState, Option<Uuid>, ResumeRuntimeMetadata) {
+    let (mut state, last_uuid) = replay_message_rows(session_id, messages, project_assistant_text);
+    state.native_request_history = native_request_history_from_messages(messages);
+    todo_state::restore(&mut state);
+    restore_thinking_stripped_ranges(&mut state, messages);
+    let runtime_metadata = resume_runtime_metadata(messages);
+    if transcript_has_open_plan_segment(messages) {
+        state.plan_mode = true;
+        state.plan_reminder_shown = false;
+    }
+    (state, last_uuid, runtime_metadata)
+}
+
+/// Decode history with the same grouping and text projection for canonical and display rows.
+fn replay_message_rows<'a>(
+    session_id: Uuid,
+    messages: impl IntoIterator<Item = &'a JsonlMessage>,
+    project_assistant_text: bool,
+) -> (SessionState, Option<Uuid>) {
     let mut state = SessionState::empty(
         SessionId::from_uuid(session_id),
         crate::config::DEFAULT_MODEL.to_string(),
     );
-    state.native_request_history = native_request_history_from_messages(messages);
     let mut last_uuid: Option<Uuid> = None;
     let mut pending_assistant: Option<PendingAssistant> = None;
     let mut ultracode_state = tool_workflow::UltracodeState::default();
@@ -1610,30 +1638,35 @@ fn build_state_from_jsonl_with_text_projection(
         }
     }
     flush_pending_assistant(&mut state, pending_assistant.take());
-    todo_state::restore(&mut state);
-    restore_thinking_stripped_ranges(&mut state, messages);
-    let runtime_metadata = resume_runtime_metadata(messages);
-    if transcript_has_open_plan_segment(messages) {
-        state.plan_mode = true;
-        state.plan_reminder_shown = false;
-    }
-    (state, last_uuid, runtime_metadata)
+    (state, last_uuid)
 }
 
 /// Claude 2.1.263 mce/uhr/wys: markers only affect preceding assistant
 /// blocks, with partial offsets counted across per-block rows sharing an ID.
 fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlMessage]) {
+    fn strip_marker(message: &JsonlMessage) -> Option<&Utf16JsonProjection> {
+        attachment_projection(message)
+            .filter(|attachment| attachment.string_at("/type") == Some("thinking_stripped"))
+    }
+
     struct Row {
         key: String,
         id: MessageId,
         thinking_before: usize,
         thinking_count: usize,
     }
+    // A marker only covers earlier rows on this replay chain. Avoid decoding
+    // assistant content for ranges that no marker can ever reference.
+    let Some(last_marker) = messages.iter().rposition(|message| {
+        strip_marker(message).is_some() && Uuid::parse_str(&message.uuid).is_ok()
+    }) else {
+        return;
+    };
     let mut rows: Vec<Row> = Vec::new();
     let mut totals = std::collections::HashMap::<String, usize>::new();
     let mut pending: Option<(String, MessageId)> = None;
     let mut group_offsets = std::collections::HashMap::<MessageId, usize>::new();
-    for message in messages {
+    for message in &messages[..=last_marker] {
         let Ok(uuid) = Uuid::parse_str(&message.uuid) else {
             continue;
         };
@@ -1669,12 +1702,9 @@ fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlM
             continue;
         }
         pending = None;
-        let Some(attachment) = attachment_projection(message) else {
+        let Some(attachment) = strip_marker(message) else {
             continue;
         };
-        if attachment.string_at("/type") != Some("thinking_stripped") {
-            continue;
-        }
         state.thinking_signature_stripped = true;
         let partial = if attachment.string_at("/scope") == Some("partial") {
             attachment.at_pointer("/from").and_then(|from| {

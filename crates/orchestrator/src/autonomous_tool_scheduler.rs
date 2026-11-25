@@ -484,9 +484,18 @@ struct Record {
     queued_call: Option<OwnedToolCall>,
     status: Status,
     outcome: Option<ToolOutcome>,
-    pending_context_modifiers: Vec<ToolInvocationContextModifier>,
     context_state: Option<ToolInvocationContextState>,
     call_cancellation: Option<CancellationToken>,
+}
+
+impl Record {
+    fn required_permits(&self, capacity: usize) -> usize {
+        if self.meta.concurrency_safe {
+            1
+        } else {
+            capacity
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -586,6 +595,9 @@ impl ToolScheduler {
             dispatch,
             tasks: JoinSet::new(),
             records: Vec::new(),
+            next_queued: 0,
+            used_permits: 0,
+            pending_safe_layers: Vec::new(),
             generation: 0,
             session_root,
             root,
@@ -874,6 +886,11 @@ struct Actor {
     dispatch: ToolDispatch,
     tasks: JoinSet<(u64, usize, ToolOutcome)>,
     records: Vec<Record>,
+    // A record never re-enters the queue. A blocked head also blocks its suffix.
+    next_queued: usize,
+    // An exclusive call occupies the entire capacity until its task completes.
+    used_permits: usize,
+    pending_safe_layers: Vec<(usize, Vec<ToolInvocationContextModifier>)>,
     generation: u64,
     session_root: CancellationToken,
     root: CancellationToken,
@@ -960,7 +977,6 @@ impl Actor {
                                 queued_call: Some(call),
                                 status: Status::Queued,
                                 outcome: None,
-                                pending_context_modifiers: Vec::new(),
                                 call_cancellation: None,
                             });
                             self.apply_user_interrupts();
@@ -986,7 +1002,6 @@ impl Actor {
                                 queued_call: None,
                                 status: Status::Completed,
                                 outcome: Some(outcome),
-                                pending_context_modifiers: Vec::new(),
                                 call_cancellation: None,
                             });
                             self.wake_waiters();
@@ -1109,56 +1124,30 @@ impl Actor {
             return Ok(());
         }
         self.apply_user_interrupts();
-        loop {
+        while let Some(record) = self.records.get(self.next_queued) {
             if self.root.is_cancelled() || self.stop_scheduling_requested.load(Ordering::Acquire) {
-                return Ok(());
+                break;
             }
-            let executing = self
-                .records
-                .iter()
-                .filter(|record| {
-                    record.generation == self.generation && record.status == Status::Executing
-                })
-                .map(|record| record.meta.concurrency_safe)
-                .collect::<Vec<_>>();
-            let safe_count = executing.iter().filter(|safe| **safe).count();
-            let mut started = false;
-            for index in 0..self.records.len() {
-                let record = &self.records[index];
-                if record.generation != self.generation || record.status != Status::Queued {
-                    continue;
-                }
-                let safe = record.meta.concurrency_safe;
-                if safe && safe_count >= self.max_safe_concurrency {
-                    continue;
-                }
-                let can_execute =
-                    executing.is_empty() || (safe && executing.iter().all(|active| *active));
-                if can_execute {
-                    // Native processQueue applies ended-run layers immediately
-                    // before starting the next eligible call; the final drain
-                    // is the other application boundary when no suffix exists.
-                    self.apply_safe_context_layers()?;
-                    self.apply_user_interrupts();
-                    started = self.start(index).await?;
-                    if !started {
-                        if self.root.is_cancelled()
-                            || self.stop_scheduling_requested.load(Ordering::Acquire)
-                        {
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                    break;
-                }
-                if !safe {
-                    return Ok(());
-                }
+            if record.generation != self.generation || record.status != Status::Queued {
+                self.next_queued += 1;
+                continue;
             }
-            if !started {
-                return Ok(());
+            let permits = record.required_permits(self.max_safe_concurrency);
+            if permits > self.max_safe_concurrency - self.used_permits {
+                break;
             }
+            // Apply ended-run layers just before an eligible call or at final drain.
+            self.apply_safe_context_layers()?;
+            if self.start(self.next_queued).await? {
+                self.used_permits += permits;
+            } else if self.root.is_cancelled()
+                || self.stop_scheduling_requested.load(Ordering::Acquire)
+            {
+                break;
+            }
+            self.next_queued += 1;
         }
+        Ok(())
     }
 
     async fn start(&mut self, index: usize) -> Result<bool, SchedulerStopped> {
@@ -1182,6 +1171,7 @@ impl Actor {
         record.status = Status::Executing;
         call.cancellation = self.root.child_token();
         let call_cancellation = call.cancellation.clone();
+        // Each admitted call picks up all preceding context layers at dispatch.
         call.tool_context_state = self.tool_context_state.clone();
         let dispatch_started_wait = call.dispatch_started_rx.take();
         #[cfg(test)]
@@ -1268,6 +1258,7 @@ impl Actor {
             return Ok(());
         }
         let concurrency_safe = record.meta.concurrency_safe;
+        let permits = record.required_permits(self.max_safe_concurrency);
         let user_cancelled = self
             .user_cancel
             .as_ref()
@@ -1339,24 +1330,15 @@ impl Actor {
                 "tool model preference could not be resolved: {reason}"
             )));
         }
-        let current_state = self.tool_context_state.clone();
-        if let Some(record) = self.records.get_mut(index) {
-            record.pending_context_modifiers = pending_safe_modifiers;
-            record.context_state = current_state.clone();
-            record.outcome = Some(outcome);
-            record.status = Status::Completed;
-            record.call_cancellation = None;
-        }
-        if !concurrency_safe {
-            if let Some(state) = current_state {
-                for queued in self.records.iter_mut().filter(|queued| {
-                    queued.generation == generation && queued.status == Status::Queued
-                }) {
-                    if let Some(call) = queued.queued_call.as_mut() {
-                        call.tool_context_state = Some(state.clone());
-                    }
-                }
-            }
+        let record = &mut self.records[index];
+        record.context_state = self.tool_context_state.clone();
+        record.outcome = Some(outcome);
+        record.status = Status::Completed;
+        record.call_cancellation = None;
+        self.used_permits -= permits;
+        if !pending_safe_modifiers.is_empty() {
+            self.pending_safe_layers
+                .push((index, pending_safe_modifiers));
         }
         Ok(())
     }
@@ -1399,29 +1381,19 @@ impl Actor {
     }
 
     fn apply_safe_context_layers(&mut self) -> Result<(), SchedulerStopped> {
-        if self.records.iter().any(|record| {
-            record.generation == self.generation && record.status == Status::Executing
-        }) {
+        if self.used_permits != 0 || self.pending_safe_layers.is_empty() {
             return Ok(());
         }
         if self.model_context_error.is_some() {
-            for record in &mut self.records {
-                record.pending_context_modifiers.clear();
-            }
+            self.pending_safe_layers.clear();
             return Ok(());
         }
         let previous_state = self.tool_context_state.clone();
         let previously_changed = self.model_context_changed;
         // Apply in registration order only after every executing tool settled.
-        for index in 0..self.records.len() {
-            let modifiers = {
-                let record = &mut self.records[index];
-                if record.generation == self.generation && record.meta.concurrency_safe {
-                    std::mem::take(&mut record.pending_context_modifiers)
-                } else {
-                    Vec::new()
-                }
-            };
+        self.pending_safe_layers
+            .sort_unstable_by_key(|(index, _)| *index);
+        for (index, modifiers) in std::mem::take(&mut self.pending_safe_layers) {
             for modifier in modifiers {
                 let state = self
                     .tool_context_state
@@ -1442,7 +1414,6 @@ impl Actor {
                         self.model_context_changed = previously_changed;
                         self.model_context_error = Some(reason);
                         for record in &mut self.records {
-                            record.pending_context_modifiers.clear();
                             if record.generation == self.generation {
                                 record.context_state = self.tool_context_state.clone();
                             }
@@ -1505,7 +1476,7 @@ impl Actor {
     }
 
     fn wake_waiters(&mut self) {
-        if self.has_tn_ready() || self.is_idle() {
+        if !self.waiters.is_empty() && (self.has_tn_ready() || self.is_idle()) {
             for waiter in self.waiters.drain(..) {
                 let _ = waiter.send(Ok(()));
             }
@@ -1566,6 +1537,9 @@ impl Actor {
         self.root.cancel();
         self.records
             .retain(|record| record.generation != old_generation);
+        self.next_queued = 0;
+        self.used_permits = 0;
+        self.pending_safe_layers.clear();
         self.generation = self.generation.saturating_add(1);
         self.reset_cancel_requested.store(false, Ordering::Release);
         self.stop_scheduling_requested

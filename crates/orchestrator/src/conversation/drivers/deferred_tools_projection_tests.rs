@@ -14,29 +14,29 @@ use uuid::Uuid;
 fn enabled_projection_facts(
     inline_tool_definition_names: &[&str],
 ) -> crate::request_context::DeferredToolsProjectionFacts {
-    crate::request_context::DeferredToolsProjectionFacts {
-        surface_late_tool_additions: true,
-        inline_tool_definition_names: Some(
+    crate::request_context::DeferredToolsProjectionFacts::new(
+        true,
+        Some(
             inline_tool_definition_names
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect(),
         ),
-        deferred_wire_tool_names: Vec::new(),
-    }
+        Vec::new(),
+    )
 }
 
 fn deferred_wire_projection_facts(
     deferred_wire_tool_names: &[&str],
 ) -> crate::request_context::DeferredToolsProjectionFacts {
-    crate::request_context::DeferredToolsProjectionFacts {
-        surface_late_tool_additions: true,
-        inline_tool_definition_names: None,
-        deferred_wire_tool_names: deferred_wire_tool_names
+    crate::request_context::DeferredToolsProjectionFacts::new(
+        true,
+        None,
+        deferred_wire_tool_names
             .iter()
             .map(|name| (*name).to_owned())
             .collect(),
-    }
+    )
 }
 
 fn empty_deferred_placeholder(id: MessageId) -> ConversationMessage {
@@ -496,7 +496,7 @@ fn projection_uses_deferred_wire_names_without_inline_definitions() {
         &source,
         None,
         0,
-        deferred_wire_projection_facts(&["Read"]),
+        &deferred_wire_projection_facts(&["Read"]),
         false,
     )
     .expect("deferred wire names can surface without by-value definitions");
@@ -520,9 +520,9 @@ fn qwr_always_compares_raw_surfaced_and_replaced_source_arrays() {
     let matching_empty_set = crate::request_context::render_deferred_tools_delta_for_request(
         id,
         &no_source_names,
-        Some(&cached_surfaced),
+        Some(cached_surfaced.clone()),
         1,
-        gate_off.clone(),
+        &gate_off,
         false,
     )
     .expect("qWr compares empty source names to Native's empty xr set");
@@ -539,9 +539,9 @@ fn qwr_always_compares_raw_surfaced_and_replaced_source_arrays() {
         crate::request_context::render_deferred_tools_delta_for_request(
             id,
             &surfaced_source,
-            Some(&cached_surfaced),
+            Some(cached_surfaced),
             1,
-            gate_off.clone(),
+            &gate_off,
             false,
         )
         .is_none(),
@@ -560,9 +560,9 @@ fn qwr_always_compares_raw_surfaced_and_replaced_source_arrays() {
         crate::request_context::render_deferred_tools_delta_for_request(
             id,
             &replaced_source,
-            Some(&cached_replaced),
+            Some(cached_replaced),
             1,
-            gate_off,
+            &gate_off,
             false,
         )
         .is_none(),

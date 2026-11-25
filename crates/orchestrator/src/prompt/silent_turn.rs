@@ -291,7 +291,7 @@ pub fn restore_silent_clocks(
 /// One row of the reconstructed oracle message list.
 enum Row {
     Assistant { id: MessageId, spoke: bool },
-    Reminder,
+    Reminder(usize),
     RealUser,
     MetaUser,
     Other,
@@ -478,20 +478,27 @@ pub fn scan_silent_stretch_with_timestamps(
     message_timestamps: &HashMap<MessageId, i64>,
     reminder_timestamps: &HashMap<usize, i64>,
 ) -> TimedSilentStretch {
-    let mut rows = Vec::with_capacity(history.len() + reminder_marks.len());
-    for boundary in 0..=history.len() {
-        for mark in reminder_marks {
-            if *mark == boundary {
-                rows.push((Row::Reminder, reminder_timestamps.get(mark).copied()));
-            }
-        }
-        if let Some(message) = history.get(boundary) {
-            rows.push((
+    let mut marks_per_boundary = HashMap::new();
+    for &mark in reminder_marks {
+        *marks_per_boundary.entry(mark).or_insert(0) += 1;
+    }
+    // A reminder was emitted before the message at its boundary. In reverse,
+    // visit that message first. Duplicate marks share the same boundary clock.
+    let rows = (0..=history.len()).rev().flat_map(|boundary| {
+        let message = history.get(boundary).map(|message| {
+            (
                 row_for(message),
                 message_timestamps.get(&message.id()).copied(),
-            ));
-        }
-    }
+            )
+        });
+        let reminders = marks_per_boundary.get(&boundary).map(|&count| {
+            (
+                Row::Reminder(count),
+                reminder_timestamps.get(&boundary).copied(),
+            )
+        });
+        message.into_iter().chain(reminders)
+    });
 
     let mut turns = 0usize;
     let mut reminders = 0usize;
@@ -501,14 +508,14 @@ pub fn scan_silent_stretch_with_timestamps(
     let mut group_time = None;
     let mut oldest_time = None;
 
-    for (row, timestamp) in rows.iter().rev() {
-        oldest_time = *timestamp;
+    for (row, timestamp) in rows {
+        oldest_time = timestamp;
         if let Row::Assistant {
             id,
             spoke: speaking,
         } = row
         {
-            if current != Some(*id) {
+            if current != Some(id) {
                 if flush_group(
                     &mut current,
                     &mut spoke,
@@ -525,10 +532,10 @@ pub fn scan_silent_stretch_with_timestamps(
                         silent_since_ms: silent_since,
                     };
                 }
-                current = Some(*id);
-                group_time = *timestamp;
+                current = Some(id);
+                group_time = timestamp;
             }
-            spoke |= *speaking;
+            spoke |= speaking;
             continue;
         }
         if flush_group(
@@ -548,15 +555,15 @@ pub fn scan_silent_stretch_with_timestamps(
             };
         }
         match row {
-            Row::Reminder => {
-                reminders += 1;
-                silent_since = silent_since.or(*timestamp);
+            Row::Reminder(count) => {
+                reminders += count;
+                silent_since = silent_since.or(timestamp);
             }
             Row::RealUser => {
-                silent_since = silent_since.or(*timestamp);
+                silent_since = silent_since.or(timestamp);
                 break;
             }
-            Row::MetaUser => silent_since = silent_since.or(*timestamp),
+            Row::MetaUser => silent_since = silent_since.or(timestamp),
             _ => {}
         }
     }
@@ -1196,6 +1203,24 @@ mod tests {
         let s = scan_silent_stretch(&history, &[5]);
         assert_eq!(s.turns_since_last_reminder, 1);
         assert_eq!(s.reminders_in_stretch, 1);
+    }
+
+    #[test]
+    fn unordered_duplicate_marks_count_at_their_original_boundaries() {
+        let history = [
+            silent_assistant(),
+            real_user(),
+            silent_assistant(),
+            tool_result_user(),
+            silent_assistant(),
+            tool_result_user(),
+        ];
+        let marks = [4, 1, usize::MAX, 2, 4, 0];
+        let clocks = HashMap::from([(1, 100), (2, 200), (4, 400), (usize::MAX, 900)]);
+        let timed = scan_silent_stretch_with_timestamps(&history, &marks, &HashMap::new(), &clocks);
+        assert_eq!(timed.stretch.turns_since_last_reminder, 1);
+        assert_eq!(timed.stretch.reminders_in_stretch, 3);
+        assert_eq!(timed.silent_since_ms, Some(400));
     }
 
     #[test]

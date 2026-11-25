@@ -27,8 +27,8 @@ pub(crate) use preparation_commit::{pending_preparation_commit, preparation_comm
 mod deferred_tools_projection;
 
 pub(crate) use deferred_tools_projection::{
-    cached_rendered_row_count, render_deferred_tools_delta_for_request,
-    DeferredToolsProjectionFacts,
+    cached_rendered_row_count, deferred_name_only_announcements,
+    render_deferred_tools_delta_for_request, DeferredToolsProjectionFacts,
 };
 
 tokio::task_local! {
@@ -681,28 +681,36 @@ pub(crate) fn deferred_tools_projection_facts() -> Option<DeferredToolsProjectio
         .flatten()
 }
 
-/// UUIDs whose deferred delta was recorded as a ToolSearch name-only
-/// announcement in the current staged NAr batch. This keeps the initial
-/// request's projection behind Native's per-UUID latch as well as the durable
-/// sidecar gate used after acceptance and cold resume.
-pub(crate) fn staged_name_only_announcement_uuids() -> std::collections::HashSet<String> {
-    staged_prompt_ingress_attachments()
-        .unwrap_or_default()
-        .iter()
-        .filter(|row| row.payload.string_at("/type") == Some("deferred_tools_record"))
-        .flat_map(|row| {
-            (0..row
-                .payload
-                .array_len("/nameOnlyAnnouncements")
-                .unwrap_or_default())
-                .filter_map(|index| {
-                    row.payload
-                        .string_at(&format!("/nameOnlyAnnouncements/{index}"))
-                        .map(str::to_owned)
-                })
-                .collect::<Vec<_>>()
+/// Apply Native's per-UUID latch before the staged record is durably accepted.
+pub(crate) fn is_staged_name_only_announcement(id: MessageId) -> bool {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            let id = id.to_string();
+            let matches = |row: &PromptIngressAttachment| {
+                deferred_name_only_announcements(&row.payload).any(|announced| announced == id)
+            };
+            {
+                let staged = context
+                    .staged_ingress_attachments
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(rows) = staged.as_ref() else {
+                    return false;
+                };
+                if rows.iter().any(&matches) {
+                    return true;
+                }
+            }
+            context
+                .ingress_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .producer_rows
+                .iter()
+                .flat_map(|(_, rows)| rows)
+                .any(matches)
         })
-        .collect()
+        .unwrap_or(false)
 }
 
 async fn finalize_prompt_context_output<T>(
@@ -1531,6 +1539,18 @@ async fn finalize_prompt_ingress_batch_with_enabled(
     });
     drop(ingress_commit);
     Ok(())
+}
+
+pub(crate) fn has_staged_prompt_ingress_attachments() -> bool {
+    REQUEST_CONTEXT
+        .try_with(|context| {
+            context
+                .staged_ingress_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        })
+        .unwrap_or(false)
 }
 
 /// Read the sealed initial ingress batch for each preparation attempt. `None`

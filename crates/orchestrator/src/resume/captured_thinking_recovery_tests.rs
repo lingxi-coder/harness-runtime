@@ -89,6 +89,59 @@ fn captured_replay(root: &Path, session: Uuid, source: &str) -> ReplayedSession 
     .unwrap()
 }
 
+#[test]
+fn captured_replay_applies_each_thinking_marker_on_the_selected_parent_chain() {
+    let root = tempfile::tempdir().unwrap();
+    let session = Uuid::new_v4();
+    let first = Uuid::new_v4();
+    let first_marker = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let second_marker = Uuid::new_v4();
+    let old_branch = Uuid::new_v4();
+    let fresh = Uuid::new_v4();
+    let assistant = |id: Uuid, parent: Option<Uuid>| {
+        serde_json::json!({
+            "type":"assistant", "uuid":id, "parentUuid":parent, "sessionId":session,
+            "message":{"id":id,"role":"assistant","content":[
+                {"type":"thinking","thinking":"first","signature":"valid"},
+                {"type":"thinking","thinking":"second","signature":"later"},
+                {"type":"text","text":"thinking_stripped"}
+            ]}
+        })
+    };
+    let partial = |id: Uuid, parent: Uuid| {
+        serde_json::json!({
+            "type":"attachment","uuid":id,"parentUuid":parent,"sessionId":session,
+            "attachment":{"type":"thinking_stripped","scope":"partial",
+                "from":{"messageId":parent,"thinkingIndex":1}}
+        })
+    };
+    let source = [
+        serde_json::json!({"type":"fixed-session-mode","sessionId":session,"sessionMode":"code","instructionEpoch":0}),
+        assistant(first, None),
+        partial(first_marker, first),
+        assistant(second, Some(first_marker)),
+        // A real marker on an old branch cannot change either partial range.
+        assistant(old_branch, Some(first)),
+        serde_json::json!({"type":"attachment","uuid":Uuid::new_v4(),"parentUuid":old_branch,
+            "sessionId":session,"attachment":{"type":"thinking_stripped","scope":"all"}}),
+        partial(second_marker, second),
+        assistant(fresh, Some(second_marker)),
+    ]
+    .iter()
+    .map(|row| format!("{row}\n"))
+    .collect::<String>();
+    let replayed = captured_replay(root.path(), session, &source);
+    assert_eq!(replayed.last_message_uuid, Some(fresh));
+    assert_eq!(
+        replayed.state.thinking_stripped_messages,
+        HashMap::from([
+            (MessageId::from_uuid(first), 1),
+            (MessageId::from_uuid(second), 1)
+        ])
+    );
+}
+
 #[tokio::test]
 async fn captured_hot_mount_restores_exact_rejected_ranges_and_clears_them_on_clean_resume() {
     for partial in [false, true] {

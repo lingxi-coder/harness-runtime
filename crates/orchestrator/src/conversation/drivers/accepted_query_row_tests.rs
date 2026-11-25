@@ -17,6 +17,40 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 
+#[test]
+fn post_tool_batch_retains_duplicate_and_unmatched_completions_in_arrival_order() {
+    let input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap();
+    let received = ["B", "missing", "A", "B"].map(|id| crate::streaming_loop::ObservedToolUse {
+        id: id.into(),
+        name: "Tool".into(),
+        input: input.clone(),
+        provider_id: None,
+    });
+    let completed = [
+        ("B", "first B"),
+        ("X", "extra X"),
+        ("B", "second B"),
+        ("B", "extra B"),
+        ("A", "first A"),
+    ]
+    .into_iter()
+    .map(|(id, name)| hooks::events::PostToolBatchCall {
+        tool_name: name.into(),
+        tool_input: input.clone(),
+        tool_use_id: id.into(),
+        tool_response: None,
+    })
+    .collect();
+    let ordered = super::order_post_tool_batch_calls(&received, completed);
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|call| call.tool_name.as_str())
+            .collect::<Vec<_>>(),
+        ["first B", "first A", "second B", "extra X", "extra B"]
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CapturedToolCall {
     input: lingxi_core::types::utf16_json::Utf16JsonProjection,
