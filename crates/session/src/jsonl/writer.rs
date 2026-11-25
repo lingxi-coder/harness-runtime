@@ -739,30 +739,33 @@ fn scan_latest_custom_title(
         return Ok(latest_custom_title_from_source(&source, session_id));
     }
     let mut end = len;
-    // Bytes of a line that started before the newer window. Appended to the
-    // next older window so a record split by the window boundary is parsed whole.
-    let mut carry: Vec<u8> = Vec::new();
+    let mut buffer = vec![0; crate::jsonl::LITE_READ_BUF_SIZE];
+    // Preceding windows extend this unfinished line without copying its suffix.
+    let mut reversed_suffix = Vec::new();
     while end > 0 {
         let start = end.saturating_sub(crate::jsonl::LITE_READ_BUF_SIZE as u64);
         let read_len = usize::try_from(end - start)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
         file.seek(SeekFrom::Start(start))?;
-        let mut buf = vec![0u8; read_len];
-        file.read_exact(&mut buf)?;
-        let head = if start > 0 {
-            match buf.iter().position(|byte| *byte == b'\n') {
-                Some(index) => {
-                    let head = buf[..index].to_vec();
-                    buf.drain(..=index);
-                    head
-                }
-                None => std::mem::take(&mut buf),
-            }
+        file.read_exact(&mut buffer[..read_len])?;
+        let window = &buffer[..read_len];
+        end = start;
+        let (head, complete) = if start == 0 {
+            (&[][..], window)
+        } else if let Some(index) = memchr::memchr(b'\n', window) {
+            (&window[..index], &window[index + 1..])
         } else {
-            Vec::new()
+            reversed_suffix.extend(window.iter().rev());
+            continue;
         };
-        buf.extend_from_slice(&carry);
-        let text = match String::from_utf8(buf) {
+        let batch = if reversed_suffix.is_empty() {
+            complete
+        } else {
+            reversed_suffix.extend(complete.iter().rev());
+            reversed_suffix.reverse();
+            &reversed_suffix
+        };
+        let text = match std::str::from_utf8(batch) {
             Ok(text) => text,
             Err(_) => {
                 file.seek(SeekFrom::Start(0))?;
@@ -771,11 +774,11 @@ fn scan_latest_custom_title(
                 return Ok(latest_custom_title_from_source(&source, session_id));
             }
         };
-        if let Some(title) = latest_custom_title_from_source(&text, session_id) {
+        if let Some(title) = latest_custom_title_from_source(text, session_id) {
             return Ok(Some(title));
         }
-        carry = head;
-        end = start;
+        reversed_suffix.clear();
+        reversed_suffix.extend(head.iter().rev());
     }
     Ok(None)
 }
@@ -9718,6 +9721,49 @@ mod tests {
             assert_eq!(identities.by_uuid["native-history"], 0);
             assert_eq!(identities.by_uuid["next-human-message"], 1);
         }
+    }
+
+    #[test]
+    fn title_scan_recovers_the_newest_record_across_multiple_windows() {
+        use std::io::Cursor;
+
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let old = json!({"type": "custom-title", "sessionId": sid, "customTitle": "old"});
+        for (unit, trailing_rows) in [("x", ""), ("界", "\r\n{}\r\n")] {
+            let title = unit.repeat(3 * crate::jsonl::LITE_READ_BUF_SIZE / unit.len() + 7);
+            let new = json!({"type": "custom-title", "sessionId": sid, "customTitle": title});
+            let source = format!("{old}\r\n{new}{trailing_rows}");
+            let found = scan_latest_custom_title(
+                &mut Cursor::new(source.as_bytes()),
+                source.len() as u64,
+                sid,
+            )
+            .unwrap()
+            .flatten()
+            .unwrap();
+            assert!(found.string_at("") == Some(title.as_str()));
+        }
+    }
+
+    #[test]
+    fn title_scan_validates_the_complete_window_before_selecting_a_title() {
+        use std::io::{Cursor, ErrorKind};
+
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let title = json!({"type": "custom-title", "sessionId": sid, "customTitle": "latest"});
+        let scan = |bytes: &[u8]| {
+            scan_latest_custom_title(&mut Cursor::new(bytes), bytes.len() as u64, sid)
+        };
+        let mut bytes = vec![0xff];
+        bytes.resize(crate::jsonl::LITE_READ_BUF_SIZE + 1, b'\n');
+        bytes.extend_from_slice(title.to_string().as_bytes());
+        assert_eq!(
+            scan(&bytes).unwrap().flatten().unwrap().string_at(""),
+            Some("latest")
+        );
+        // An invalid byte in the same batch must trigger the strict full read.
+        bytes[crate::jsonl::LITE_READ_BUF_SIZE - 1] = 0xff;
+        assert_eq!(scan(&bytes).unwrap_err().kind(), ErrorKind::InvalidData);
     }
 
     #[tokio::test]

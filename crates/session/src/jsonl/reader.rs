@@ -538,9 +538,13 @@ impl LoadedTranscript {
         if let Some(message) = self.message_overrides.get(uuid) {
             return Some(message);
         }
-        self.message_indices
-            .get(uuid)
-            .and_then(|index| self.messages_in_order.get(*index))
+        self.message_position(uuid)
+            .and_then(|index| self.messages_in_order.get(index))
+    }
+
+    /// File-order position of the last row with this UUID, including duplicates.
+    pub(super) fn message_position(&self, uuid: &str) -> Option<usize> {
+        self.message_indices.get(uuid).copied()
     }
 
     /// Copy the UUID view on its first mutation, preserving physical source rows.
@@ -851,17 +855,19 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             row.remove_field(PRIVATE_UTF16_KEY)
                 .expect("removing one private object property preserves source values");
         }
-        // Routing needs only this pointer side index. The authoritative flat
-        // row is passed directly to the message decoder; no display Value
-        // mirror is needed here, including for non-scalar source keys.
-        let (utf16_overrides, _) = collect_utf16_overrides(&row);
         let ty = row.string_at("/type").unwrap_or("");
         if is_transcript_message_type(ty) {
             let Ok(mut msg) = JsonlMessage::from_projection(&row) else {
                 out.malformed_line_count += 1;
                 continue;
             };
-            let overrides = utf16_overrides;
+            // A lone surrogate in UTF-8 JSON must come from a \u escape.
+            // Ordinary messages can skip walking the tree for the pointer index.
+            let overrides = if line.contains(r"\u") {
+                collect_utf16_overrides(&row).0
+            } else {
+                Utf16Overrides::new()
+            };
             if overrides.is_empty() {
                 out.utf16_by_uuid.remove(&msg.uuid);
             } else {
@@ -1295,6 +1301,35 @@ mod tests {
         assert!(!non_scalar_key);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides.get("/kept"), Some(&vec![0xdfff]));
+    }
+
+    #[test]
+    fn ordinary_unicode_message_clears_an_overwritten_uuid_override() {
+        let original = attachment_row(r#""attachment":{"text":"\uD800"}"#);
+        let updated = attachment_row(
+            r#""attachment":{"text":"🧪"},"lingxi_exact_json_utf16":{"/attachment/text":[55296]}"#,
+        );
+        let title = r#"{"type":"custom-title","sessionId":"s","customTitle":"\u51b0"}"#;
+        let invalid = r#"{"type":"attachment","uuid":"u-attachment","text":"\uZZZZ"}"#;
+        let loaded = route_line_seq([original.as_str(), title, invalid, updated.as_str()]);
+
+        assert_eq!(loaded.malformed_line_count, 1);
+        assert_eq!(loaded.custom_titles["s"], "冰");
+        assert_eq!(loaded.messages_in_order.len(), 2);
+        let original =
+            crate::jsonl::exact_json::message_utf16_overrides(&loaded.messages_in_order[0]);
+        assert_eq!(original["/attachment/text"], [0xd800]);
+        let updated = loaded.message("u-attachment").unwrap();
+        assert_eq!(
+            updated
+                .attachment_projection
+                .as_ref()
+                .unwrap()
+                .string_at("/text"),
+            Some("🧪")
+        );
+        assert!(!updated.extra.contains_property(PRIVATE_UTF16_KEY));
+        assert!(loaded.utf16_by_uuid.is_empty());
     }
 
     #[test]

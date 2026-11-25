@@ -379,21 +379,21 @@ impl PromptHistoryStore {
 }
 
 /// Yield JSONL lines newest-first without reading a large history file into
-/// one string. Windows match the transcript tail size. A line split by a
-/// window is joined with the next older window before it is yielded.
+/// one string. Keep the unfinished line in reverse byte order so extending
+/// it across any number of windows never copies the accumulated suffix.
 fn visit_jsonl_lines_newest_first(
     path: &Path,
     mut visit: impl FnMut(&str) -> bool,
 ) -> std::io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
 
-    const WINDOW: u64 = 65_536;
+    const WINDOW: usize = 65_536;
     let mut file = fs::File::open(path)?;
     let len = file.metadata()?.len();
     if len == 0 {
         return Ok(());
     }
-    if len <= WINDOW {
+    if len <= WINDOW as u64 {
         let mut source = String::new();
         file.read_to_string(&mut source)?;
         for line in source.lines().rev() {
@@ -404,35 +404,41 @@ fn visit_jsonl_lines_newest_first(
         return Ok(());
     }
     let mut end = len;
-    let mut carry: Vec<u8> = Vec::new();
+    let mut buffer = vec![0u8; WINDOW];
+    let mut reversed_suffix = Vec::new();
+    let mut at_eof = true;
     while end > 0 {
-        let start = end.saturating_sub(WINDOW);
+        let start = end.saturating_sub(WINDOW as u64);
         let read_len = usize::try_from(end - start)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
         file.seek(SeekFrom::Start(start))?;
-        let mut buf = vec![0u8; read_len];
-        file.read_exact(&mut buf)?;
-        let head = if start > 0 {
-            match buf.iter().position(|byte| *byte == b'\n') {
-                Some(index) => {
-                    let head = buf[..index].to_vec();
-                    buf.drain(..=index);
-                    head
-                }
-                None => std::mem::take(&mut buf),
+        let window = &mut buffer[..read_len];
+        file.read_exact(window)?;
+        let mut parts = window.rsplit(|byte| *byte == b'\n').peekable();
+        while let Some(part) = parts.next() {
+            if start > 0 && parts.peek().is_none() {
+                reversed_suffix.extend(part.iter().rev());
+                break;
             }
-        } else {
-            Vec::new()
-        };
-        buf.extend_from_slice(&carry);
-        let text = String::from_utf8(buf)
-            .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned());
-        for line in text.lines().rev() {
-            if !visit(line) {
+            let bytes = if reversed_suffix.is_empty() {
+                part
+            } else {
+                reversed_suffix.extend(part.iter().rev());
+                reversed_suffix.reverse();
+                &reversed_suffix
+            };
+            // Match str::lines for a trailing newline, CRLF and a bare CR at EOF.
+            let line = if at_eof {
+                bytes
+            } else {
+                bytes.strip_suffix(b"\r").unwrap_or(bytes)
+            };
+            if !(at_eof && line.is_empty()) && !visit(&String::from_utf8_lossy(line)) {
                 return Ok(());
             }
+            at_eof = false;
+            reversed_suffix.clear();
         }
-        carry = head;
         end = start;
     }
     Ok(())
@@ -828,6 +834,31 @@ mod tests {
         let merged = fresh.read_merged();
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].display, display);
+    }
+
+    #[test]
+    fn recall_and_count_preserve_multiwindow_utf8_rows_and_their_neighbors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path(), "s-large");
+        // Seven bytes per repetition, so window boundaries split code points.
+        let display = "界🧪".repeat(48 * 1024);
+        for prompt in ["oldest", display.as_str(), "between", display.as_str()] {
+            store.enqueue(prompt);
+        }
+        assert!(store.flush());
+
+        let path = dir.path().join("history.jsonl");
+        let raw = fs::read_to_string(&path).unwrap();
+        let rows = raw.lines().collect::<Vec<_>>().join("\r\n");
+        let fresh = store_in(dir.path(), "s-fresh");
+        for ending in ["\r\n", ""] {
+            fs::write(&path, format!("{rows}{ending}")).unwrap();
+            assert_eq!(
+                fresh.recall_displays(),
+                [display.as_str(), "between", display.as_str(), "oldest"]
+            );
+            assert_eq!(fresh.project_prompt_count(), 4);
+        }
     }
 
     #[test]

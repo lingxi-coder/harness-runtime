@@ -329,15 +329,14 @@ async fn native_321_catalog_keeps_alias_dedup_limits_and_repository_union() {
                     local_path(&home, project).join(format!("{id}.jsonl")),
                 );
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-                let created_ms = row["created_ms"].as_i64().unwrap();
-                let timestamp = format!(
-                    "{:.3}",
-                    jiff::Timestamp::from_millisecond(created_ms).unwrap()
-                );
-                let modified_ms = row["modified_ms"].as_i64().unwrap();
+                // This oracle checks order and ties. Map each fixture millisecond to
+                // a whole second so the filesystem can represent every distinct rank.
+                let created = row["created_ms"].as_i64().unwrap();
+                let modified = row["modified_ms"].as_i64().unwrap();
+                let timestamp = format!("{:.3}", jiff::Timestamp::from_second(created).unwrap());
                 let activity_timestamp = format!(
                     "{:.3}",
-                    jiff::Timestamp::from_millisecond(created_ms.max(modified_ms)).unwrap()
+                    jiff::Timestamp::from_second(created.max(modified)).unwrap()
                 );
                 let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0});
                 let message = serde_json::json!({"type":"user", "uuid":id, "sessionId":id, "parentUuid":null,
@@ -351,14 +350,24 @@ async fn native_321_catalog_keeps_alias_dedup_limits_and_repository_union() {
                     "message":{"role":"assistant", "content":[{"type":"text", "text":"native replay"}]},
                     "cwd":cwd, "isSidechain":false});
                 std::fs::write(&target, format!("{header}\n{message}\n{assistant}\n")).unwrap();
-                filetime::set_file_mtime(
-                    &target,
-                    filetime::FileTime::from_unix_time(
-                        0,
-                        row["modified_ms"].as_u64().unwrap() as u32 * 1_000_000,
-                    ),
-                )
-                .unwrap();
+                filetime::set_file_mtime(&target, filetime::FileTime::from_unix_time(modified, 0))
+                    .unwrap();
+                // Equal modification times are ordered by physical birth time.
+                #[cfg(any(target_os = "macos", windows))]
+                {
+                    #[cfg(target_os = "macos")]
+                    use std::os::macos::fs::FileTimesExt;
+                    #[cfg(windows)]
+                    use std::os::windows::fs::FileTimesExt;
+                    let birth = std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(created.try_into().unwrap());
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&target)
+                        .unwrap()
+                        .set_times(std::fs::FileTimes::new().set_created(birth))
+                        .unwrap();
+                }
             }
         }
         let worktrees: Vec<_> = input["repository_paths"]

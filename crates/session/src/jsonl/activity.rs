@@ -278,11 +278,12 @@ impl Store {
                 options(true),
                 &self.pin,
                 |out| {
-                    use std::io::Write;
+                    use std::io::{BufWriter, Write};
+                    let mut out = BufWriter::new(out);
                     for hash in history {
                         out.write_all(&hash).map_err(error)?;
                     }
-                    Ok(())
+                    out.flush().map_err(error)
                 },
             )?;
         }
