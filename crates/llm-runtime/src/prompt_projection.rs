@@ -39,6 +39,18 @@ fn project_system(
     let Some(context) = request.execution.prompt_cache.as_ref() else {
         return None;
     };
+    if !protocol.is_anthropic_family() {
+        return Some(
+            plain_system(request)
+                .into_owned()
+                .into_iter()
+                .map(|block| prompt::EncodedSystemBlock {
+                    block,
+                    cache_breakpoint: None,
+                })
+                .collect(),
+        );
+    }
     let projection = if request.execution.classifier_system_blocks {
         prompt::project_classifier_system_blocks(&request.input.system, profile, protocol, policy)
     } else {
@@ -107,16 +119,35 @@ pub(crate) fn system_for_route<'a>(
     )
 }
 
+fn plain_system(request: &LlmRequest) -> Cow<'_, [wire::SystemBlock]> {
+    if let Some(context) = request.execution.prompt_cache.as_ref() {
+        if !request.execution.classifier_system_blocks {
+            return Cow::Owned(
+                context
+                    .system
+                    .as_ref()
+                    .and_then(wire::SystemPromptInput::to_system_block)
+                    .into_iter()
+                    .collect(),
+            );
+        }
+    }
+    Cow::Borrowed(&request.input.system)
+}
+
 pub(crate) fn system_for_estimate(request: &LlmRequest) -> Cow<'_, [wire::SystemBlock]> {
-    system_for_route(
-        request,
-        request.execution.prompt_projection_profile.as_ref(),
-        request
-            .execution
-            .context_usage_protocol
-            .or(request.execution.input_protocol)
-            .unwrap_or(wire::ProtocolFamily::AnthropicMessages),
-    )
+    let protocol = request
+        .execution
+        .context_usage_protocol
+        .or(request.execution.input_protocol);
+    match protocol {
+        Some(protocol) if protocol.is_anthropic_family() => system_for_route(
+            request,
+            request.execution.prompt_projection_profile.as_ref(),
+            protocol,
+        ),
+        _ => plain_system(request),
+    }
 }
 
 /// The pinned codec omits output_config in CountTokens mode. Restore its

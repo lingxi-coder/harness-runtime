@@ -1,7 +1,8 @@
 //! Claude Code 2.1.319 Kvn/Pvn media projection. Input is already normalized
 //! and tool-paired; this pass changes only the outgoing request clone.
-use super::*;
+use crate::convert::ConversationMessagesWithSources;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use std::collections::HashSet;
 
 const MEDIA_REMOVED: &str = "[media removed: request limit]";

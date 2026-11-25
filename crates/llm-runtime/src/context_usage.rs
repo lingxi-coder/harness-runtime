@@ -566,6 +566,8 @@ mod tests {
         };
         fn extra(source: &str) -> crate::LlmRequest {
             let mut request = crate::LlmRequest::new("m").with_user_text("hi");
+            request.execution.context_usage_protocol =
+                Some(crate::ProtocolFamily::AnthropicMessages);
             request.execution.anthropic_extra_body = Some(
                 crate::CapturedAnthropicExtraBody::new(
                     Some(JsonPayload::parse(source).unwrap()),
@@ -697,6 +699,7 @@ mod tests {
                 tool_type: None,
                 extra: JsonPayload::parse("null").unwrap(),
             });
+        request.execution.input_protocol = Some(crate::ProtocolFamily::AnthropicMessages);
         request.execution.anthropic_extra_body = Some(crate::CapturedAnthropicExtraBody::new(
             Some(JsonPayload::parse(r#"{"system":"physical","messages":[{"role":"user","content":"fixed"}],"tools":[]}"#).unwrap()),
             AnthropicRequestKind::Main,

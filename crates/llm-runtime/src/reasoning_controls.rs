@@ -11,7 +11,9 @@ pub fn apply_reasoning_selection(
     selection: ReasoningSelection,
 ) -> Result<(), LlmError> {
     lingxi_llm_client::reasoning::apply_reasoning_selection(&mut request.input, target, selection)
-        .map_err(|message| LlmError::InvalidRequest { message })
+        .map_err(|message| LlmError::InvalidRequest { message })?;
+    request.execution.automatic_thinking_budget = false;
+    Ok(())
 }
 
 #[cfg(test)]

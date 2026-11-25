@@ -53,6 +53,21 @@ pub struct RequestMetadata {
     pub user_id: String,
 }
 
+pub(crate) fn anthropic_user_id_metadata(
+    metadata: &JsonPayload,
+    user_id: &str,
+) -> Result<JsonPayload, LlmError> {
+    let empty = JsonPayload::parse("{}").expect("empty object");
+    let metadata = if metadata.is_root_object() {
+        metadata
+    } else {
+        &empty
+    };
+    metadata
+        .with_object_field("user_id", &JsonPayload::string(user_id))
+        .map_err(crate::upstream::error)
+}
+
 impl LlmRequest {
     #[must_use]
     pub fn new(model: impl Into<String>) -> Self {

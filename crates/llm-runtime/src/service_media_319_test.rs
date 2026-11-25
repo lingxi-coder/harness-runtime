@@ -1,6 +1,11 @@
 use super::*;
+use crate::model::user_agent::UserAgentEnv;
+use crate::{
+    ApiService, LlmError, LlmRequest, ModelRuntime, PromptCacheQuerySource, SubscriberState,
+};
 use lingxi_core::types::{MessageId, ToolUseId};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 fn fixture() -> Value {
     serde_json::from_str(include_str!("../tests/fixtures/media_limits_2_1_319.json")).unwrap()

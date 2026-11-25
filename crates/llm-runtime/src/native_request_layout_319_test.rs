@@ -24,22 +24,17 @@ fn main_and_side_requests_match_native_319_template_bytes() {
         };
         let mut overrides = BTreeMap::new();
         let extra_body = case.payload_at("/input/extra").unwrap();
-        crate::native_request_layout::reserve_native_request_properties(
-            &mut body,
-            &extra_body,
-            request_kind,
-        )
-        .unwrap();
         AnthropicRequestPolicy {
             request_kind,
             extra_body,
             ..Default::default()
         }
-        .apply(
+        .apply_with_native_layout(
             &mut body,
             &mut BTreeMap::new(),
             &mut overrides,
             &mut "https://api.anthropic.com/v1/messages".to_owned(),
+            false,
         )
         .unwrap();
         let actual =

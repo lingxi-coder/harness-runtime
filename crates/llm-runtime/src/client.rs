@@ -176,6 +176,38 @@ fn project_route_input<'a>(
             projected = std::borrow::Cow::Owned(portable);
         }
     }
+    if let Some(host_id) = projected.execution.anthropic_user_id.as_deref() {
+        let input_id = projected.input.metadata.string_at("/user_id");
+        if protocol.is_anthropic_family() && input_id.is_none() {
+            let metadata =
+                crate::protocol::anthropic_user_id_metadata(&projected.input.metadata, host_id)?;
+            projected.to_mut().input.metadata = metadata;
+        } else if !protocol.is_anthropic_family() && input_id.as_deref() == Some(host_id) {
+            let metadata = projected
+                .input
+                .metadata
+                .without_object_field("user_id")
+                .map_err(crate::upstream::error)?;
+            projected.to_mut().input.metadata = metadata;
+        }
+    }
+    // The host's automatic Claude mode belongs to its source codec. A
+    // different target uses its own automatic default and retains an explicit
+    // portable effort selection.
+    if !protocol.is_anthropic_family()
+        && projected.execution.automatic_thinking_budget
+        && projected.input.thinking.as_ref().is_some_and(|thinking| {
+            matches!(
+                thinking.mode,
+                Some(
+                    lingxi_llm_client::protocol::ThinkingMode::Adaptive
+                        | lingxi_llm_client::protocol::ThinkingMode::Enabled
+                )
+            ) || thinking.budget.is_some()
+        })
+    {
+        projected.to_mut().set_reasoning(None);
+    }
     let reasoning_block = |block: &lingxi_llm_client::protocol::ContentBlock| {
         matches!(
             block,

@@ -80,7 +80,7 @@ impl DispatchHeaderState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct DispatchAttempt {
     pub value: Option<String>,
     pub first_party: bool,

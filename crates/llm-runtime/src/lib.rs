@@ -28,7 +28,7 @@ extern crate self as llm_runtime;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub use lingxi_llm_client::protocol::Region;
-pub use lingxi_llm_client::providers::anthropic::system_prompt::{PromptText, SystemPromptInput};
+pub use lingxi_llm_client::protocol::{PromptText, SystemPromptInput};
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{
     FrameStream, RawStreamFrame, ResponsesWebSocketTransportSession, StreamingResponse,
@@ -38,7 +38,6 @@ mod attempt_pricing;
 pub use anthropic_extra_body::CapturedAnthropicExtraBody;
 #[cfg(test)]
 mod codec_tests;
-mod native_request_layout;
 #[cfg(test)]
 mod native_request_layout_319_test;
 pub mod native_stream_capture;

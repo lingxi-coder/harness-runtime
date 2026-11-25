@@ -9,6 +9,8 @@ use llm_runtime::{
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
+static ENVIRONMENT: Mutex<()> = Mutex::new(());
+
 struct Environment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl Environment {
     fn own() -> Self {
@@ -184,6 +186,9 @@ fn service(client: Arc<ModelRuntime>, capture: Arc<Capture>) -> ApiService {
 }
 #[tokio::test]
 async fn current_structured_output_gate_reaches_preparation_and_both_physical_drivers() {
+    let _lock = ENVIRONMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _environment = Environment::own();
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/structured_output_2_1_288.json")).unwrap();
@@ -444,4 +449,101 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
         ));
     }
     println!("{preparations} native preparation projections; {captures} physical driver captures; same-service flag transition; other-provider controls OK");
+}
+
+#[tokio::test]
+async fn other_provider_requests_keep_their_schema_and_reasoning_on_the_wire() {
+    let _lock = ENVIRONMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _environment = Environment::own();
+    // Real egress on other families must preserve their schema and reasoning
+    // even while the process has a Claude-specific request override.
+    std::env::set_var(
+        "CLAUDE_CODE_EXTRA_BODY",
+        r#"{"speed":"fast","betas":["fixture-private-beta"]}"#,
+    );
+    for (protocol, model, schema_field, reasoning_field, expected_reasoning) in [
+        (
+            ProtocolFamily::OpenAiResponses,
+            "gpt-5",
+            "/text/format/type",
+            "/reasoning/effort",
+            json!("high"),
+        ),
+        (
+            ProtocolFamily::OpenAiChat,
+            "gpt-5",
+            "/response_format/type",
+            "/reasoning_effort",
+            json!("high"),
+        ),
+        (
+            ProtocolFamily::GeminiGenerateContent,
+            "gemini-2.5-pro",
+            "/generationConfig/responseFormat/text/mimeType",
+            "/generationConfig/thinkingConfig/thinkingBudget",
+            json!(256),
+        ),
+    ] {
+        let mut route = profile(protocol, true);
+        if protocol == ProtocolFamily::OpenAiChat {
+            route.provider_id = ProviderId::OpenAICompatible {
+                name: "fixture-chat".into(),
+            };
+        }
+        let row = &mut route.models[0];
+        row.display_model = model.into();
+        row.request_model = model.into();
+        row.billing_model = model.into();
+        row.capabilities.reasoning = true;
+        let capture = Arc::new(Capture::default());
+        let api = service(
+            Arc::new(
+                ModelRuntime::from_config(ClientConfig {
+                    providers: vec![route],
+                })
+                .unwrap(),
+            ),
+            capture.clone(),
+        );
+        for stream in [false, true] {
+            let mut request = schema_request();
+            request.input.model = model.into();
+            if protocol == ProtocolFamily::GeminiGenerateContent {
+                request.set_reasoning(Some(llm_runtime::ReasoningConfig::Enabled {
+                    budget_tokens: 256,
+                }));
+            } else {
+                request.set_effort(Some(json!("high"))).unwrap();
+            }
+            if stream {
+                let _ = api.stream_request(request).await;
+            } else {
+                let _ = api.execute_side_query_request(request).await;
+            }
+        }
+
+        let calls = capture.0.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{protocol:?} should dispatch in both modes");
+        for call in calls.iter() {
+            let body: Value = serde_json::from_slice(&call.body).unwrap();
+            assert!(
+                body.pointer(schema_field).is_some(),
+                "{protocol:?} schema: {body}"
+            );
+            assert_eq!(
+                body.pointer(reasoning_field),
+                Some(&expected_reasoning),
+                "{protocol:?} reasoning: {body}"
+            );
+            assert!(body.get("speed").is_none());
+            assert!(body.get("betas").is_none());
+            assert!(body.get("output_config").is_none());
+            assert!(call
+                .headers
+                .iter()
+                .all(|(name, _)| !name.to_ascii_lowercase().starts_with("anthropic-")));
+        }
+    }
 }
