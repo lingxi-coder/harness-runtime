@@ -56,6 +56,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             || bootstrap.ask_requester
             || bootstrap.shared_list.is_some()
             || !bootstrap.shared_data.is_empty()
+            || !bootstrap.local_apps.is_empty()
             || bootstrap.may_decline)
     {
         return Err(TeamProcessError::Protocol);
@@ -171,6 +172,15 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             source: Default::default(),
         })
     });
+    super::local_app_tools::validate_offers(&bootstrap.local_apps)?;
+    let local_apps = (!bootstrap.local_apps.is_empty()).then(|| {
+        Arc::new(super::local_app_tools::TeamLocalAppTools {
+            bridge: bridge.clone(),
+            apps: bootstrap.local_apps.clone(),
+            task_id: bootstrap.task_id.clone(),
+            source: Default::default(),
+        })
+    });
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
@@ -178,6 +188,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         ask: ask.clone(),
         list: list.clone(),
         data: data.clone(),
+        local_apps: local_apps.clone(),
         no_reply: no_reply.clone(),
     }));
     let mut cfg = DesktopConfig::default();
@@ -194,7 +205,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,no_reply,bootstrap.private_data).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,local_apps,no_reply,bootstrap.private_data).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -285,6 +296,7 @@ async fn run(
     ask: Option<Arc<super::ask_tool::AskRequester>>,
     list: Option<Arc<super::list_tools::TeamListTools>>,
     data: Option<Arc<super::data_tools::TeamDataTools>>,
+    local_apps: Option<Arc<super::local_app_tools::TeamLocalAppTools>>,
     no_reply: Option<Arc<super::decline_tool::NoReply>>,
     private_data: bool,
 ) -> Result<TeamProcessResult, TeamProcessError> {
@@ -312,6 +324,13 @@ async fn run(
     }
     if let Some(data) = &data {
         let _ = data.source.set(super::list_tools::StepSource {
+            transcript: path.clone(),
+            scope: batch.scope(),
+            batch_id: batch.batch_id.clone(),
+        });
+    }
+    if let Some(apps) = &local_apps {
+        let _ = apps.source.set(super::list_tools::StepSource {
             transcript: path.clone(),
             scope: batch.scope(),
             batch_id: batch.batch_id.clone(),

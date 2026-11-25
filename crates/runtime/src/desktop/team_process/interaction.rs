@@ -61,6 +61,21 @@ impl ChildInteraction {
             })?;
         Ok(bridge)
     }
+    /// A bridge with no parent behind it, already revoked: a request fails at
+    /// once as cancelled and nothing is written. For unit tests of the tools.
+    #[cfg(test)]
+    pub(super) fn revoked() -> Arc<Self> {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        Arc::new(Self {
+            next: AtomicU64::new(1),
+            serial: AsyncMutex::new(()),
+            pending: Mutex::new(None),
+            cancel,
+            root: PathBuf::new(),
+            upper_seq: 0,
+        })
+    }
     fn id(&self) -> Result<String, TeamProcessError> {
         let n = self
             .next

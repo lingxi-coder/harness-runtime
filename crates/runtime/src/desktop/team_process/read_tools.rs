@@ -151,6 +151,8 @@ pub(crate) struct TeamReadTools {
     /// Present when the Bot's publication shares a list with this Chat.
     pub(super) list: Option<Arc<super::list_tools::TeamListTools>>,
     pub(super) data: Option<Arc<super::data_tools::TeamDataTools>>,
+    /// Present when the host offers this run Local Apps.
+    pub(super) local_apps: Option<Arc<super::local_app_tools::TeamLocalAppTools>>,
     /// Present when nobody asked the Bot for this task and it may stay silent.
     pub(super) no_reply: Option<Arc<super::decline_tool::NoReply>>,
 }
@@ -177,6 +179,10 @@ impl TeamReadTools {
                 names.push(super::data_tools::HANDOFF.to_owned());
             }
         }
+        if self.local_apps.is_some() {
+            names.push(super::local_app_tools::TOOLS.to_owned());
+            names.push(super::local_app_tools::CALL.to_owned());
+        }
         if self.no_reply.is_some() {
             names.push(super::checkpoint::NO_REPLY_TOOL.to_owned());
         }
@@ -200,6 +206,9 @@ pub(crate) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamRea
     }
     if let Some(data) = &tools.data {
         super::data_tools::register(registry, data.clone());
+    }
+    if let Some(apps) = &tools.local_apps {
+        super::local_app_tools::register(registry, apps.clone());
     }
     if let Some(choice) = &tools.no_reply {
         super::decline_tool::register(registry, choice.clone());

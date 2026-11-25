@@ -11,6 +11,7 @@ mod data_tools;
 mod decline_tool;
 mod interaction;
 pub(crate) mod list_tools;
+mod local_app_tools;
 pub(crate) mod read_tools;
 use crate::desktop::session_state::team_chat::{BotChatCursor, BotChatScope, ChatInputBatch};
 pub use chat_session::{inspect_scope, inspect_task, recover_result};
@@ -23,6 +24,7 @@ pub use data_tools::TeamDatasetOffer;
 pub use list_tools::{
     TeamListApproval, TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamSharedList,
 };
+pub use local_app_tools::TeamLocalAppOffer;
 pub use read_tools::{
     TeamChatQuery, TeamChatReadRequest, TeamChatReadResult, TeamKnowledgeDocument,
 };
@@ -124,6 +126,11 @@ pub struct TeamProcessRequest {
     /// continuation support, where an interrupted write could not be finished.
     pub shared_list: Option<TeamSharedList>,
     pub shared_data: Vec<TeamDatasetOffer>,
+    /// Offer the Bot the Local Apps the host lets this run use: one tool lists
+    /// the tools of an offered app and one calls them, through the Team
+    /// operation ledger. At most 16 apps. Ignored on routes without
+    /// continuation support, where an interrupted call could not be finished.
+    pub local_apps: Vec<TeamLocalAppOffer>,
     /// Nobody asked the Bot for this task: offer it the tool that leaves the
     /// message unanswered. The task then ends as `Declined` and posts nothing.
     pub may_decline: bool,
@@ -404,6 +411,7 @@ impl TeamProcessStart {
             || request.ask_requester
             || request.shared_list.is_some()
             || !request.shared_data.is_empty()
+            || !request.local_apps.is_empty()
             || request.may_decline
             || !request.knowledge.is_empty()
         {
@@ -532,6 +540,14 @@ impl TeamProcessStart {
                     })
                     .collect()
             },
+            local_apps: {
+                local_app_tools::validate_offers(&request.local_apps)?;
+                if checkpoint::route_supports_continuation(protocol) {
+                    request.local_apps
+                } else {
+                    Vec::new()
+                }
+            },
             may_decline: request.may_decline,
             addressed: request.addressed,
         };
@@ -650,6 +666,7 @@ impl TeamProcessStart {
                 &self.bootstrap.task_id,
                 self.bootstrap.private_data,
                 &self.bootstrap.shared_data,
+                &self.bootstrap.local_apps,
                 self.bootstrap
                     .shared_list
                     .as_ref()
@@ -706,6 +723,7 @@ async fn broker_exchange(
     task_id: &str,
     private_data: bool,
     shared_data: &[TeamDatasetOffer],
+    local_apps: &[TeamLocalAppOffer],
     approval: TeamListApproval,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     use protocol::{ParentFrame, WorkerFrame};
@@ -767,6 +785,13 @@ async fn broker_exchange(
                         | TeamOperationTool::DataWrite
                         | TeamOperationTool::DataHandoff
                 ) && !data_tools::permitted(shared_data, request.tool, &request.arguments)
+                {
+                    return Err(TeamProcessError::Protocol);
+                }
+                if matches!(
+                    request.tool,
+                    TeamOperationTool::LocalAppTools | TeamOperationTool::LocalAppCall
+                ) && !local_app_tools::permitted(local_apps, request.tool, &request.arguments)
                 {
                     return Err(TeamProcessError::Protocol);
                 }
@@ -1012,5 +1037,180 @@ mod usage_tests {
             r#"{"status":"complete","inputTokens":1,"outputTokens":1}"#
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod local_app_broker_tests {
+    use super::protocol::{ParentFrame, WorkerFrame};
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorder {
+        operations: Mutex<Vec<TeamOperationRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl TeamProcessBroker for Recorder {
+        async fn authorize(&self, _: CancellationToken) -> Result<(), TeamProcessError> {
+            Ok(())
+        }
+        async fn read_chat(
+            &self,
+            _: TeamChatReadRequest,
+            _: CancellationToken,
+        ) -> Result<TeamChatReadResult, TeamProcessError> {
+            Err(TeamProcessError::Protocol)
+        }
+        async fn operate(
+            &self,
+            request: TeamOperationRequest,
+            _: CancellationToken,
+        ) -> Result<TeamOperationResult, TeamProcessError> {
+            self.operations.lock().unwrap().push(request);
+            Ok(TeamOperationResult {
+                succeeded: true,
+                result: json!({"content":[{"type":"text","text":"3 notes"}]}),
+            })
+        }
+    }
+
+    fn offers() -> Vec<TeamLocalAppOffer> {
+        vec![TeamLocalAppOffer {
+            id: "notes".into(),
+            name: "Notes".into(),
+            description: None,
+        }]
+    }
+    fn listing(app: &str) -> TeamOperationRequest {
+        TeamOperationRequest {
+            id: "interaction-1".into(),
+            tool: TeamOperationTool::LocalAppTools,
+            logical_step_id: None,
+            approval_ref: None,
+            arguments: json!({"app":app}),
+        }
+    }
+    fn call(app: &str, step: &str) -> TeamOperationRequest {
+        TeamOperationRequest {
+            id: "interaction-1".into(),
+            tool: TeamOperationTool::LocalAppCall,
+            logical_step_id: Some(step.into()),
+            approval_ref: None,
+            arguments: json!({"app":app,"tool":"search","arguments":{"q":"budget"}}),
+        }
+    }
+
+    /// What the parent does with one request of the worker: the error it ends with
+    /// (`None` when it answered) and every request that reached the host.
+    async fn exchange(
+        request: TeamOperationRequest,
+        apps: &[TeamLocalAppOffer],
+        private_data: bool,
+    ) -> (Option<TeamProcessError>, Vec<TeamOperationRequest>) {
+        let broker = Arc::new(Recorder::default());
+        // What the worker writes is what the parent reads, and the other way round.
+        let (mut worker_out, mut parent_reads) = tokio::io::duplex(1 << 20);
+        let (mut parent_writes, mut worker_reads) = tokio::io::duplex(1 << 20);
+        let mut parent = std::pin::pin!(broker_exchange(
+            &mut parent_reads,
+            &mut parent_writes,
+            broker.clone(),
+            CancellationToken::new(),
+            Path::new("/unused"),
+            "task_1",
+            private_data,
+            &[],
+            apps,
+            TeamListApproval::None,
+        ));
+        let worker = async {
+            worker_out
+                .write_all(&protocol::encode(&WorkerFrame::Operate { request }).unwrap())
+                .await
+                .unwrap();
+            worker_out.flush().await.unwrap();
+            protocol::read_frame::<ParentFrame>(&mut worker_reads).await
+        };
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                // The parent ended the exchange without answering.
+                result = &mut parent => (result.err(), None),
+                answered = worker => (None, Some(answered)),
+            }
+        })
+        .await
+        .expect("the exchange ends");
+        let seen = broker.operations.lock().unwrap().clone();
+        match outcome {
+            (error, None) => (error, seen),
+            (_, Some(answered)) => {
+                let Ok(ParentFrame::Operated { id, result }) = answered else {
+                    panic!("only an operation is answered");
+                };
+                assert_eq!(id, "interaction-1");
+                assert!(result.succeeded);
+                // The worker leaving without a result is the only way this exchange ends.
+                drop(worker_out);
+                let ended = tokio::time::timeout(Duration::from_secs(10), parent)
+                    .await
+                    .expect("the exchange ends");
+                assert!(matches!(ended, Err(TeamProcessError::Io(_))), "{ended:?}");
+                (None, seen)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_host_is_asked_only_for_offered_apps() {
+        // An offered app: the request reaches the host exactly as the worker sent it.
+        let (error, seen) = exchange(listing("notes"), &offers(), false).await;
+        assert!(error.is_none());
+        assert_eq!(seen, [listing("notes")]);
+        let (error, seen) = exchange(call("notes", "task_1/t0/c1"), &offers(), false).await;
+        assert!(error.is_none());
+        assert_eq!(seen, [call("notes", "task_1/t0/c1")]);
+
+        // An app that was not offered never reaches the host: the worker is ended.
+        for request in [
+            listing("calendar"),
+            call("calendar", "task_1/t0/c1"),
+            listing("Notes"),
+        ] {
+            let (error, seen) = exchange(request.clone(), &offers(), false).await;
+            assert!(
+                matches!(error, Some(TeamProcessError::Protocol)),
+                "{request:?}"
+            );
+            assert!(seen.is_empty(), "{request:?}");
+        }
+        // Nothing offered, nothing reaches the host, however well formed the request is.
+        for request in [listing("notes"), call("notes", "task_1/t0/c1")] {
+            let (error, seen) = exchange(request.clone(), &[], false).await;
+            assert!(
+                matches!(error, Some(TeamProcessError::Protocol)),
+                "{request:?}"
+            );
+            assert!(seen.is_empty());
+        }
+        // A malformed request, a call without its durable step or for another task, never does either.
+        let mut stepless = call("notes", "task_1/t0/c1");
+        stepless.logical_step_id = None;
+        let foreign = call("notes", "task_2/t0/c1");
+        let mut stepped_listing = listing("notes");
+        stepped_listing.logical_step_id = Some("task_1/t0/c1".into());
+        for request in [stepless, foreign, stepped_listing] {
+            let (error, seen) = exchange(request.clone(), &offers(), false).await;
+            assert!(
+                matches!(error, Some(TeamProcessError::Protocol)),
+                "{request:?}"
+            );
+            assert!(seen.is_empty(), "{request:?}");
+        }
+        // A private Data workspace has no operations at all.
+        let (error, seen) = exchange(listing("notes"), &offers(), true).await;
+        assert!(matches!(error, Some(TeamProcessError::Protocol)));
+        assert!(seen.is_empty());
     }
 }

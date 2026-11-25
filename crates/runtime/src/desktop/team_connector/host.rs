@@ -41,6 +41,7 @@ struct Start {
     ask_requester: Option<bool>,
     shared_list: Option<team_process::TeamSharedList>,
     shared_data: Option<Vec<team_process::TeamDatasetOffer>>,
+    local_apps: Option<Vec<team_process::TeamLocalAppOffer>>,
     may_decline: Option<bool>,
     addressed: Option<bool>,
 }
@@ -90,6 +91,7 @@ impl Start {
             || self.ask_requester.is_some()
             || self.shared_list.is_some()
             || self.shared_data.is_some()
+            || self.local_apps.is_some()
             || self.may_decline.is_some()
             || self.addressed.is_some();
         let all = self.task_id.is_some()
@@ -125,6 +127,7 @@ impl Start {
                 && self.ask_requester.is_none()
                 && self.shared_list.is_none()
                 && self.shared_data.is_none()
+                && self.local_apps.is_none()
                 && self.may_decline.is_none()
                 && self.addressed.is_none();
             if !only_task_and_model {
@@ -180,6 +183,7 @@ impl Start {
             ask_requester: self.ask_requester.unwrap_or(false),
             shared_list: self.shared_list,
             shared_data: self.shared_data.unwrap_or_default(),
+            local_apps: self.local_apps.unwrap_or_default(),
             may_decline: self.may_decline.unwrap_or(false),
             addressed: self.addressed.unwrap_or(false),
         })
@@ -691,5 +695,98 @@ mod tests {
             writer: Mutex::new(std::io::stdout()),
         };
         assert!(bridge.accept(response).is_err());
+    }
+
+    /// A private storage root: canonical, owned by the caller, closed to everyone else.
+    fn private_root() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        (directory, root)
+    }
+    fn start(root: &Path, kind: &str, extra: Value) -> Result<Start, serde_json::Error> {
+        let mut value = json!({"version":3,"type":kind,"storageRoot":root,"workerExecutable":"/unused-worker",
+            "scope":{"teamId":"team00001","sharedBotId":"sharedbot001","conversationId":"chat00001","sessionEpoch":1}});
+        for (key, field) in extra.as_object().unwrap() {
+            value[key] = field.clone();
+        }
+        serde_json::from_value(value)
+    }
+    fn model() -> Value {
+        json!({"model_id":"fixture","model_provider":"fixture","model_protocol":"open_ai_chat",
+            "model_profile":{"provider_id":"fixture","profile_name":"fixture-openai-chat","base_url":"https://fixture.invalid/v1",
+                "protocol":"open_ai_chat","auth":"api_key","credential":{"source":"host_managed","key":"team-selected-model"},
+                "models":[{"display_model":"fixture","request_model":"fixture","billing_model":"fixture",
+                    "capability_support":{"streaming":"supported","tools":"supported"}}],"extra":{}},
+            "model_endpoint":"https://fixture.invalid/v1"})
+    }
+    /// Everything a `run` carries.
+    fn run_fields() -> Value {
+        json!({"taskId":"task_00000001","invocationId":"4e2a1b5c-6d7e-4f80-9a1b-2c3d4e5f6a7b","instructions":"persona",
+            "inputBatchRef":{"path":"/unused/a.json","sha256":"0".repeat(64),"bytes":2},"knowledge":[],
+            "deadlineAt":1,"model":model(),
+            "credentials":{"provider_accounts":{"storeScope":"fixture","configRevision":0,"accounts":[]},
+                "provider_account_home":"/unused","provider_account_profiles":[]},
+            "limits":{"max_turns":4,"context_window_tokens":8192,"output_tokens_per_request":1024,"physical_dispatches":4}})
+    }
+    fn apps() -> Value {
+        json!([{"id":"notes","name":"Notes","description":"Meeting notes"},{"id":"calendar","name":"Calendar"}])
+    }
+
+    #[test]
+    fn local_apps_are_part_of_a_run_and_a_continue_and_of_nothing_else() {
+        let (_directory, root) = private_root();
+        let with = |kind: &str, mut fields: Value| {
+            fields["localApps"] = apps();
+            start(&root, kind, fields).unwrap().validate()
+        };
+        assert!(with("run", run_fields()).is_ok());
+        let mut resumed = run_fields();
+        resumed["continuation"] = json!({"epoch":2,"expected_checkpoint_digest":"0".repeat(64)});
+        assert!(with("continue", resumed).is_ok());
+        // The offer reaches the process request as the host sent it.
+        let mut fields = run_fields();
+        fields["localApps"] = apps();
+        let parsed = start(&root, "run", fields).unwrap();
+        assert_eq!(
+            parsed
+                .local_apps
+                .as_ref()
+                .map(|apps| apps.iter().map(|a| a.id.as_str()).collect::<Vec<_>>()),
+            Some(vec!["notes", "calendar"])
+        );
+        // Without the key the run has no Local Apps.
+        let plain = start(&root, "run", run_fields()).unwrap();
+        assert!(plain.validate().is_ok());
+        assert!(plain.local_apps.is_none());
+        // An inspection takes no capability.
+        assert!(with("inspect_scope", json!({})).is_err());
+        assert!(with("inspect_result", json!({"taskId":"task_00000001"})).is_err());
+        assert!(with(
+            "inspect_task",
+            json!({"taskId":"task_00000001","model":model()})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_offer_with_unknown_keys_is_not_a_start() {
+        let (_directory, root) = private_root();
+        let mut fields = run_fields();
+        fields["localApps"] = json!([{"id":"notes","name":"Notes","path":"/Users/owner/notes"}]);
+        assert!(start(&root, "run", fields).is_err());
+        let mut fields = run_fields();
+        fields["localApps"] = json!([{"id":"notes"}]);
+        assert!(start(&root, "run", fields).is_err());
+        let mut fields = run_fields();
+        fields["local_apps"] = apps();
+        assert!(
+            start(&root, "run", fields).is_err(),
+            "the start message is camelCase"
+        );
     }
 }

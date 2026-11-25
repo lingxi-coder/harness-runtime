@@ -20,11 +20,12 @@ pub(super) const LIST_PROPOSE_TOOL: &str = "TeamListProposeChange";
 /// The Bot's choice to leave an unasked message unanswered. A call changes
 /// nothing outside the process, so an unfinished one is replayed like a read.
 pub(super) const NO_REPLY_TOOL: &str = "TeamNoReply";
-pub(super) const READ_ONLY_TOOLS: [&str; 5] = [
+pub(super) const READ_ONLY_TOOLS: [&str; 6] = [
     "TeamChatHistory",
     "TeamKnowledge",
     LIST_READ_TOOL,
     super::data_tools::READ,
+    super::local_app_tools::TOOLS,
     NO_REPLY_TOOL,
 ];
 /// The one tool whose unfinished call is a question to the task's requester.
@@ -531,6 +532,7 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
                         LIST_PROPOSE_TOOL,
                         super::data_tools::WRITE,
                         super::data_tools::HANDOFF,
+                        super::local_app_tools::CALL,
                     ]
                     .contains(&c.tool_name.as_str())
             }) =>
@@ -886,6 +888,84 @@ mod tests {
         let state = eval(&empty, true, CHAT);
         assert!(!state.declined);
         assert!(state.final_answer.is_none());
+    }
+    #[test]
+    fn a_local_app_call_survives_a_restart_like_a_data_write_and_a_listing_replays_like_a_read() {
+        use super::super::local_app_tools::{CALL, TOOLS};
+        let step = format!("{TASK}/t0/c0");
+        // Unfinished: the host may have run it. It stays continuable because the
+        // host names its operation by this step; it is a write, not a read.
+        let open = lines(vec![
+            batch_row(),
+            dispatch_row(1),
+            prompt_row(),
+            call_row("m1", &[("provider_call_a", CALL)], "tool_use"),
+        ]);
+        let state = eval(&open, true, CHAT);
+        let c = &state.checkpoint;
+        assert!(c.continuable, "{:?}", c.reason);
+        assert_eq!(c.pending_tool_calls.len(), 1);
+        assert_eq!(c.pending_tool_calls[0].tool_name, "TeamLocalAppCall");
+        assert!(!c.pending_tool_calls[0].read_only);
+        assert_eq!(c.pending_tool_calls[0].logical_step_id, step);
+        assert_eq!(state.pending[0].tool_name, CALL);
+        // Every process names the same step, whatever the provider called the call.
+        assert_eq!(
+            pending_step(&scope(), TASK, BATCH, &open, "provider_call_a"),
+            Some(step.clone())
+        );
+        let renamed = open.replace("provider_call_a", "another_provider_id");
+        assert_eq!(
+            pending_step(&scope(), TASK, BATCH, &renamed, "another_provider_id"),
+            Some(step)
+        );
+        // A call that is not on the transcript has no step to name.
+        assert_eq!(pending_step(&scope(), TASK, BATCH, &open, "unknown"), None);
+
+        // A listing changes nothing: it is replayed like a read.
+        let listing = lines(vec![
+            batch_row(),
+            prompt_row(),
+            call_row("m1", &[("c1", TOOLS)], "tool_use"),
+        ]);
+        let listed = eval(&listing, true, CHAT).checkpoint;
+        assert!(listed.continuable, "{:?}", listed.reason);
+        assert!(listed.pending_tool_calls[0].read_only);
+
+        // The finished listing beside the unfinished call of the same response.
+        let mixed = lines(vec![
+            batch_row(),
+            prompt_row(),
+            call_row("m1", &[("c1", TOOLS), ("c2", CALL)], "tool_use"),
+            result_row("c1"),
+        ]);
+        let c = eval(&mixed, true, CHAT).checkpoint;
+        assert!(c.continuable, "{:?}", c.reason);
+        assert_eq!(c.pending_tool_calls.len(), 1);
+        assert_eq!(
+            c.pending_tool_calls[0].logical_step_id,
+            format!("{TASK}/t0/c1")
+        );
+
+        // Only the Team tools that name their operation are exempt: any other write is not.
+        let other = lines(vec![
+            batch_row(),
+            prompt_row(),
+            call_row("m1", &[("c1", CALL), ("c2", "Bash")], "tool_use"),
+        ]);
+        let c = eval(&other, true, CHAT).checkpoint;
+        assert!(!c.continuable);
+        assert_eq!(c.reason, Some("pending_write_tool"));
+
+        // A finished call is a persisted result: nothing is pending and nothing runs again.
+        let done = lines(vec![
+            batch_row(),
+            prompt_row(),
+            call_row("m1", &[("c1", CALL)], "tool_use"),
+            result_row("c1"),
+        ]);
+        let c = eval(&done, true, CHAT).checkpoint;
+        assert!(c.continuable && c.pending_tool_calls.is_empty());
     }
     #[test]
     fn phases_route_and_digest() {

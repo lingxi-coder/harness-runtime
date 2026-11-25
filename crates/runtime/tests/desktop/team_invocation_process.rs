@@ -8,7 +8,8 @@ mod team_account_fixture;
 
 use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
-    TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
+    TeamLocalAppOffer, TeamProcessDeadline, TeamProcessError, TeamProcessOutcome,
+    TeamProcessRequest, TeamProcessStart,
 };
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -97,6 +98,7 @@ fn request(
         addressed: false,
         shared_list: None,
         shared_data: Vec::new(),
+        local_apps: Vec::new(),
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
     }
 }
@@ -487,6 +489,19 @@ async fn private_data_worker_excludes_shared_history_tools_and_artifacts() {
     std::fs::set_permissions(&admission, std::fs::Permissions::from_mode(0o600)).unwrap();
     input.messages[0].text = "UNIQUE_DATA_PREVIEW".into();
     let scope = input.scope();
+    // A private run has no operations at all: an offer of Local Apps is refused before any
+    // process starts, while the same request without it is prepared.
+    let mut offered = request(&private_root, server.endpoint.clone(), id, input.clone());
+    offered.knowledge.clear();
+    offered.local_apps = vec![TeamLocalAppOffer {
+        id: "notes".into(),
+        name: "Notes".into(),
+        description: None,
+    }];
+    assert!(matches!(
+        TeamProcessStart::prepare_private(&private_root, offered),
+        Err(TeamProcessError::Protocol)
+    ));
     let mut private = request(&private_root, server.endpoint.clone(), id, input);
     private.knowledge.clear();
     let broker = Arc::new(Broker::default());
@@ -576,6 +591,80 @@ async fn readonly_history_and_published_knowledge_reach_real_model_without_owner
     let final_input = records[2].body.to_string();
     assert!(final_input.contains("SOURCE_0001"));
     assert!(final_input.contains("PUBLISHED_KNOWLEDGE_SENTINEL"));
+}
+#[tokio::test]
+async fn local_apps_are_not_offered_on_a_route_that_cannot_resume_a_call() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Text("No apps here".into())]).await;
+    let mut req = request(
+        &root,
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(0, 1, 0),
+    );
+    // Only a route whose interrupted task can be continued may call an app: a call that
+    // died in flight could otherwise never be finished.
+    req.local_apps = vec![TeamLocalAppOffer {
+        id: "notes".into(),
+        name: "Notes".into(),
+        description: Some("Meeting notes".into()),
+    }];
+    let result = run(&root, req).await.unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    let records = server.requests.lock().unwrap();
+    let names = records[0].body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from(["TeamChatHistory", "TeamKnowledge"])
+    );
+    assert!(!records[0].body.to_string().contains("TeamLocalApp"));
+    assert!(!records[0].body.to_string().contains("Meeting notes"));
+}
+#[tokio::test]
+async fn an_invalid_local_app_offer_is_refused_before_any_process_starts() {
+    let (_temp, root) = root();
+    let offer = |id: &str, name: &str| TeamLocalAppOffer {
+        id: id.into(),
+        name: name.into(),
+        description: None,
+    };
+    let too_many: Vec<_> = (0..17).map(|n| offer(&format!("app_{n}"), "App")).collect();
+    for offers in [
+        too_many,
+        vec![offer("notes", "Notes"), offer("notes", "Again")],
+        vec![offer("", "Notes")],
+        vec![offer("notes", "  ")],
+        vec![offer(&"a".repeat(129), "Notes")],
+        vec![offer("notes", &"n".repeat(121))],
+        vec![TeamLocalAppOffer {
+            description: Some("d".repeat(2001)),
+            ..offer("notes", "Notes")
+        }],
+    ] {
+        let mut req = request(
+            &root,
+            "http://127.0.0.1:9".into(),
+            uuid::Uuid::new_v4(),
+            batch(0, 1, 0),
+        );
+        req.local_apps = offers;
+        assert!(matches!(
+            TeamProcessStart::prepare(&root, req),
+            Err(TeamProcessError::Protocol)
+        ));
+    }
+    // Nothing was admitted.
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .session_revision,
+        0
+    );
 }
 #[tokio::test]
 async fn static_capacity_failure_keeps_cursor_zero_and_dispatches_nothing() {

@@ -134,6 +134,24 @@ fn inspect_task_and_continue_reject_malformed_bootstraps_before_any_io() {
             "run",
             json!({"taskId":"task_00000001","continuation":{"epoch":2,"expected_checkpoint_digest":"0".repeat(64)}}),
         ),
+        // An inspection takes no capability: Local Apps belong to a run or a continuation.
+        (
+            "inspect_scope",
+            json!({"localApps":[{"id":"notes","name":"Notes"}]}),
+        ),
+        (
+            "inspect_result",
+            json!({"taskId":"task_00000001","localApps":[{"id":"notes","name":"Notes"}]}),
+        ),
+        (
+            "inspect_task",
+            json!({"taskId":"task_00000001","model":chat_model(),"localApps":[{"id":"notes","name":"Notes"}]}),
+        ),
+        // An offer has exactly an id, a name and an optional description.
+        (
+            "inspect_scope",
+            json!({"localApps":[{"id":"notes","name":"Notes","path":"/Users/owner/notes"}]}),
+        ),
     ] {
         let (result, success) = invoke_with(3, false, kind, extra);
         assert!(!success, "{kind}");

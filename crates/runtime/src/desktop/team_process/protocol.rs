@@ -44,6 +44,9 @@ pub(super) struct Bootstrap {
     pub shared_list: Option<super::TeamSharedList>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_data: Vec<super::TeamDatasetOffer>,
+    /// Register the Local App tools for this process: the apps the host lets this run use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_apps: Vec<super::TeamLocalAppOffer>,
     /// Register the no-reply tool for this process.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub may_decline: bool,
@@ -301,6 +304,84 @@ pub(super) fn validate_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// The smallest bootstrap a worker accepts to read: every required key, no optional one.
+    fn bootstrap_json() -> serde_json::Value {
+        json!({
+            "version":3,"storage_root":"/tmp/team","task_id":"task_0001","instructions":"persona",
+            "scope":{"teamId":"team_0001","sharedBotId":"sharedbot_01","conversationId":"chat_0001","sessionEpoch":1},
+            "invocation_id":"4e2a1b5c-6d7e-4f80-9a1b-2c3d4e5f6a7b",
+            "input_batch_ref":{"path":"/tmp/team/a.json","sha256":"0".repeat(64),"bytes":2},
+            "knowledge_ref":{"path":"/tmp/team/b.json","sha256":"0".repeat(64),"bytes":2},
+            "max_turns":4,"context_window_tokens":8192,"output_tokens_per_request":1024,
+            "physical_dispatches":4,"deadline_unix_ms":1,
+            "model_provider":"fixture","model_protocol":"open_ai_chat","model_id":"fixture",
+            "endpoint":"https://fixture.invalid/v1",
+            "model_profile":{"provider_id":"fixture","profile_name":"fixture-openai-chat","base_url":"https://fixture.invalid/v1",
+                "protocol":"open_ai_chat","auth":"api_key","credential":{"source":"host_managed","key":"team-selected-model"},
+                "models":[{"display_model":"fixture","request_model":"fixture","billing_model":"fixture",
+                    "capability_support":{"streaming":"supported","tools":"supported"}}],"extra":{}},
+            "credentials":{"provider_accounts":{"storeScope":"fixture","configRevision":0,"accounts":[]},
+                "provider_account_home":"/tmp/team/home","provider_account_profiles":[]}
+        })
+    }
+
+    #[test]
+    fn local_apps_are_optional_in_the_bootstrap_and_strict_when_present() {
+        let parse = |value: serde_json::Value| serde_json::from_value::<Bootstrap>(value);
+        // Omitted: the process offers no Local App tool, and an empty list is not even written.
+        let without = parse(bootstrap_json()).unwrap();
+        assert!(without.local_apps.is_empty());
+        assert!(serde_json::to_value(&without)
+            .unwrap()
+            .get("local_apps")
+            .is_none());
+        let mut value = bootstrap_json();
+        value["local_apps"] = json!([]);
+        assert!(parse(value).unwrap().local_apps.is_empty());
+
+        let mut value = bootstrap_json();
+        value["local_apps"] = json!([
+            {"id":"notes","name":"Notes","description":"Meeting notes"},
+            {"id":"calendar","name":"Calendar"}
+        ]);
+        let with = parse(value.clone()).unwrap();
+        assert_eq!(with.local_apps.len(), 2);
+        assert_eq!(with.local_apps[0].id, "notes");
+        assert_eq!(
+            with.local_apps[0].description.as_deref(),
+            Some("Meeting notes")
+        );
+        assert_eq!(with.local_apps[1].description, None);
+        crate::desktop::team_process::local_app_tools::validate_offers(&with.local_apps).unwrap();
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["local_apps"],
+            value["local_apps"]
+        );
+
+        // Unknown keys are refused, inside an offer and beside the list.
+        let mut value = bootstrap_json();
+        value["local_apps"] = json!([{"id":"notes","name":"Notes","path":"/Users/owner/notes"}]);
+        assert!(parse(value).is_err());
+        let mut value = bootstrap_json();
+        value["local_apps"] = json!([{"id":"notes"}]);
+        assert!(parse(value).is_err());
+        let mut value = bootstrap_json();
+        value["local_app_extras"] = json!([]);
+        assert!(parse(value).is_err());
+
+        // Parsing says nothing about the limits; the worker checks them before it registers a tool.
+        let mut value = bootstrap_json();
+        value["local_apps"] = json!((0..17)
+            .map(|n| json!({"id":format!("app_{n}"),"name":"App"}))
+            .collect::<Vec<_>>());
+        let crowded = parse(value).unwrap();
+        assert!(
+            crate::desktop::team_process::local_app_tools::validate_offers(&crowded.local_apps)
+                .is_err()
+        );
+    }
 
     #[test]
     fn terminal_result_rejects_corrupt_document_or_oversized_chat_summary() {

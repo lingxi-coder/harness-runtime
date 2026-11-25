@@ -62,6 +62,10 @@ pub enum TeamOperationTool {
     DataRead,
     DataWrite,
     DataHandoff,
+    /// Read: the tools of one offered Local App.
+    LocalAppTools,
+    /// Write: one tool of one offered Local App, run once by the host.
+    LocalAppCall,
 }
 
 /// One request to the host's shared-list service. `logical_step_id` is present
@@ -108,6 +112,15 @@ impl TeamOperationRequest {
                         .as_deref()
                         .is_none_or(|step| valid_step(task_id, step))
                     && super::data_tools::request_dataset(self.tool, &self.arguments).is_some()
+            }
+            (TeamOperationTool::LocalAppTools, None)
+            | (TeamOperationTool::LocalAppCall, Some(_)) => {
+                self.approval_ref.is_none()
+                    && self
+                        .logical_step_id
+                        .as_deref()
+                        .is_none_or(|step| valid_step(task_id, step))
+                    && super::local_app_tools::request_app(self.tool, &self.arguments).is_some()
             }
             _ => false,
         };
@@ -571,6 +584,158 @@ mod tests {
         assert!(validate_write(
             &json!({"expectedDataRevision":1,"changes":[{"op":"add","text":"Milk"}],"force":true})
         )
+        .is_err());
+    }
+
+    #[test]
+    fn a_local_app_call_names_its_durable_step_and_a_listing_carries_nothing() {
+        let request = |tool, step: Option<&str>, approval_ref: Option<String>, arguments| {
+            TeamOperationRequest {
+                id: "interaction-1".into(),
+                tool,
+                logical_step_id: step.map(str::to_owned),
+                approval_ref,
+                arguments,
+            }
+        };
+        let valid = |request: TeamOperationRequest| {
+            request.validate("task_1", TeamListApproval::None).is_ok()
+        };
+        let list = json!({"app":"notes"});
+        let call = json!({"app":"notes","tool":"search","arguments":{"q":"budget"}});
+        let own = super::super::checkpoint::wait_id("task_1/t0/c1");
+
+        // A listing changes nothing: no step, no approval, exactly the app.
+        let listing = |step, approval_ref, arguments| {
+            request(
+                TeamOperationTool::LocalAppTools,
+                step,
+                approval_ref,
+                arguments,
+            )
+        };
+        assert!(valid(listing(None, None, list.clone())));
+        assert!(!valid(listing(Some("task_1/t0/c0"), None, list.clone())));
+        assert!(!valid(listing(None, Some(own.clone()), list.clone())));
+        for arguments in [
+            json!({}),
+            call.clone(),
+            json!({"app":""}),
+            json!({"app":"a".repeat(129)}),
+            json!({"app":"notes","force":true}),
+            json!("notes"),
+        ] {
+            assert!(
+                !valid(listing(None, None, arguments.clone())),
+                "{arguments}"
+            );
+        }
+
+        // A call is an operation of the ledger: the durable step of its tool call, no approval.
+        let calling = |step, approval_ref, arguments| {
+            request(
+                TeamOperationTool::LocalAppCall,
+                step,
+                approval_ref,
+                arguments,
+            )
+        };
+        assert!(valid(calling(Some("task_1/t0/c1"), None, call.clone())));
+        for step in [
+            None,
+            Some("task_2/t0/c1"),
+            Some("task_1/t0"),
+            Some("task_1/tx/c1"),
+            Some("task_1/t0/c1/x"),
+        ] {
+            assert!(!valid(calling(step, None, call.clone())), "{step:?}");
+        }
+        assert!(!valid(calling(
+            Some("task_1/t0/c1"),
+            Some(own.clone()),
+            call.clone()
+        )));
+        // A list's approval rule is not a Local App's.
+        assert!(calling(Some("task_1/t0/c1"), None, call.clone())
+            .validate("task_1", TeamListApproval::Requester)
+            .is_ok());
+        for arguments in [
+            list.clone(),
+            json!({"app":"notes","tool":"search"}),
+            json!({"app":"notes","tool":"search","arguments":[]}),
+            json!({"app":"notes","tool":"","arguments":{}}),
+            json!({"app":"notes","tool":"search","arguments":{},"approval":true}),
+            json!({"app":"notes","tool":"search","arguments":{"text":"x".repeat(MAX_OPERATION_JSON)}}),
+        ] {
+            assert!(
+                !valid(calling(Some("task_1/t0/c1"), None, arguments.clone())),
+                "{arguments}"
+            );
+        }
+        // The interaction id still has to be a valid one.
+        let mut bad_id = calling(Some("task_1/t0/c1"), None, call);
+        bad_id.id = String::new();
+        assert!(!valid(bad_id));
+        // A call is not a write of another kind, nor the other way round.
+        assert!(!valid(request(
+            TeamOperationTool::DataWrite,
+            Some("task_1/t0/c1"),
+            None,
+            json!({"app":"notes","tool":"search","arguments":{}})
+        )));
+        assert!(!valid(request(
+            TeamOperationTool::ListWrite,
+            Some("task_1/t0/c1"),
+            None,
+            json!({"app":"notes","tool":"search","arguments":{}})
+        )));
+    }
+
+    #[test]
+    fn local_app_operations_have_their_wire_names_and_results_stay_bounded() {
+        assert_eq!(
+            serde_json::to_value(TeamOperationTool::LocalAppTools).unwrap(),
+            json!("local_app_tools")
+        );
+        assert_eq!(
+            serde_json::to_value(TeamOperationTool::LocalAppCall).unwrap(),
+            json!("local_app_call")
+        );
+        let listing = TeamOperationRequest {
+            id: "interaction-2".into(),
+            tool: TeamOperationTool::LocalAppTools,
+            logical_step_id: None,
+            approval_ref: None,
+            arguments: json!({"app":"notes"}),
+        };
+        assert_eq!(
+            serde_json::to_value(&listing).unwrap(),
+            json!({"id":"interaction-2","tool":"local_app_tools","arguments":{"app":"notes"}})
+        );
+        let call: TeamOperationRequest = serde_json::from_value(json!({
+            "id":"interaction-3","tool":"local_app_call","logical_step_id":"task_1/t0/c1",
+            "arguments":{"app":"notes","tool":"search","arguments":{}}}))
+        .unwrap();
+        assert_eq!(call.tool, TeamOperationTool::LocalAppCall);
+        assert!(call.validate("task_1", TeamListApproval::None).is_ok());
+
+        // What the host answers: a listing and an MCP-style call result, each an object under the cap.
+        for result in [
+            json!({"tools":[{"name":"search","description":"Find notes","inputSchema":{"type":"object"}}]}),
+            json!({"content":[{"type":"text","text":"3 notes"}],"isError":false}),
+        ] {
+            assert!(TeamOperationResult {
+                succeeded: true,
+                result
+            }
+            .validate()
+            .is_ok());
+        }
+        assert!(TeamOperationResult {
+            succeeded: true,
+            result: json!({"content":[{"type":"text","text":"x".repeat(MAX_OPERATION_JSON)}]})
+        }
+        .validate()
         .is_err());
     }
 
