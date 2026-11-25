@@ -3184,7 +3184,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // a real 429 does.
             LlmError::RateLimited { .. } => {
                 let raw = err.to_string();
-                let source = self.api.last_rate_limit_error_message().unwrap_or(raw);
+                let source = self.api.rate_limit_error_message(err).unwrap_or(raw);
                 if crate::api_error_copy::is_long_context_credit_message(&source) {
                     crate::api_error_copy::usage_credits_required_for_1m_context(false)
                 } else {
@@ -3249,7 +3249,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     pub(super) fn enrich_api_error(&self, err: OrchestratorError) -> OrchestratorError {
-        enrich_rate_limited_error(err, self.api.last_rate_limit_error_message())
+        let message = match &err {
+            OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => {
+                self.api.rate_limit_error_message(error)
+            }
+            _ => None,
+        };
+        enrich_rate_limited_error(err, message)
     }
 
     /// Advance the session-scoped Ultracode state at the one prompt-ingress

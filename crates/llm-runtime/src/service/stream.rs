@@ -14,8 +14,8 @@ use crate::service::request::{
     MessagesCreateRequest, QuerySourceCategory,
 };
 use crate::service::retry::{
-    allows_account_switch, allows_automatic_replay, guard_max_tokens_adjustment,
-    rate_limit_cannot_clear, reasoning_budget,
+    allows_account_switch, allows_continuation_recovery, allows_route_replay,
+    bind_rate_limit_retry_policy, guard_max_tokens_adjustment, reasoning_budget,
 };
 use crate::service::usage::{frozen_stream_quote, prepared_output_budget_observation};
 use crate::service::{ApiService, ACCOUNT_CALL_CLIENT};
@@ -30,6 +30,8 @@ mod events;
 
 /// State threaded through the `futures::stream::unfold` loop in `drive_stream`.
 struct StreamState {
+    allow_replay: bool,
+    diagnostics: crate::history::ResponseDiagnostics,
     account_coordinator: Option<crate::accounts::AttemptCoordinator>,
     account_retry_scope: ModelCallRetryScope,
     account_retry_after: Option<Duration>,
@@ -51,7 +53,7 @@ struct StreamState {
     safety: crate::safety_observation::SafetyObservation,
     attempt: crate::model_attempt::WireAttempt,
     decoder: crate::history_projection::HistoryProjector,
-    frames: lingxi_llm_client::ModelStream,
+    frames: Option<lingxi_llm_client::ModelStream>,
     native_stream_capture: Option<crate::native_stream_capture::AttemptCapture>,
     native_thinking_resumption_refused: Arc<NativeThinkingResumptionRefusalLatch>,
     pricing: Option<lingxi_llm_client::FrozenPricing>,
@@ -121,26 +123,31 @@ impl ApiService {
         query_source_label: Option<&str>,
         model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = system.map(native_custom_system_prompt_source).transpose()?;
-        let mut request = self.build_request(
-            model,
-            profile,
-            system.as_ref(),
-            messages,
-            tools,
-            true,
-            max_tokens,
-            false,
-            PromptCacheQuerySource::Subagent,
-        )?;
-        request.set_effort(effort)?;
-        request.execution.query_source = query_source_label.map(str::to_string);
-        request.execution.model_attempt = model_attempt;
-        // Child tool choice belongs to this request, independently of a
-        // shared service's main-loop structured-output configuration.
-        request
-            .set_tool_choice(forced_tool.map(|name| crate::ToolChoice::Tool { name: name.into() }));
-        self.drive_stream(request).await
+        self.with_account_call_snapshot(async {
+            let system = system.map(native_custom_system_prompt_source).transpose()?;
+            let mut request = self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                true,
+                max_tokens,
+                false,
+                PromptCacheQuerySource::Subagent,
+            )?;
+            request.set_effort(effort)?;
+            request.execution.query_source = query_source_label.map(str::to_string);
+            request.execution.model_attempt = model_attempt;
+            // Child tool choice belongs to this request, independently of a
+            // shared service's main-loop structured-output configuration.
+            request.set_tool_choice(
+                forced_tool.map(|name| crate::ToolChoice::Tool { name: name.into() }),
+            );
+            self.drive_stream_with_wrap_up(request, super::BoundWrapUpHint::current(self))
+                .await
+        })
+        .await
     }
 
     /// Stream a background memory fork through the existing request builder,
@@ -153,18 +160,22 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         forced_tool: Option<String>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        if request.system.is_none() {
-            request.system = fallback_system
-                .as_ref()
-                .map(native_custom_system_prompt_source)
-                .transpose()?;
-        }
-        let (mut request, _) = crate::computer::without_computer_request(|| {
-            self.build_main_message_request(request, true)
-        })?;
-        request.set_effort(effort)?;
-        request.set_tool_choice(forced_tool.map(|name| crate::ToolChoice::Tool { name }));
-        self.drive_stream(request).await
+        self.with_account_call_snapshot(async {
+            if request.system.is_none() {
+                request.system = fallback_system
+                    .as_ref()
+                    .map(native_custom_system_prompt_source)
+                    .transpose()?;
+            }
+            let (mut request, _) = crate::computer::without_computer_request(|| {
+                self.build_main_message_request(request, true)
+            })?;
+            request.set_effort(effort)?;
+            request.set_tool_choice(forced_tool.map(|name| crate::ToolChoice::Tool { name }));
+            self.drive_stream_with_wrap_up(request, super::BoundWrapUpHint::current(self))
+                .await
+        })
+        .await
     }
 
     // ── Stream drive (Step 2) ─────────────────────────────────────────────────
@@ -189,71 +200,92 @@ impl ApiService {
         req: LlmRequest,
     ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>>
     {
+        self.drive_stream_with_wrap_up(req, None)
+    }
+
+    fn drive_stream_with_wrap_up(
+        &self,
+        req: LlmRequest,
+        wrap_up: Option<super::BoundWrapUpHint>,
+    ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>>
+    {
         Box::pin(async move {
             let mut req = req;
+            self.capture_thinking_recovery(&mut req);
             crate::anthropic_extra_body::capture(&mut req)?;
-            let client = self.client.account_call_snapshot().await?;
+            let scope = if req.execution.side_query_max_retries.is_some() {
+                ModelCallRetryScope::default()
+            } else {
+                ModelCallRetryScope::current_or_new()
+            };
+            let (client, deadline) = self.account_call_client(&scope, true).await?;
             let owner = Arc::as_ptr(&self.client) as usize;
             ACCOUNT_CALL_CLIENT
                 .scope((owner, client), async move {
-                    let pooled = self.client().has_account_pool();
-                    let scope = ModelCallRetryScope::current_or_new();
-                    if pooled {
-                        if let Some(error) = scope.account_replay_error() {
-                            return Err(error);
+                    let mut dispatched_route_allows_replay = true;
+                    let drive = async {
+                        let mut coordinator = None;
+                        let result =
+                            crate::model::request_trace::stream(boxed_model_future(|| {
+                                self.drive_stream_inner(
+                                    req,
+                                    wrap_up,
+                                    &mut dispatched_route_allows_replay,
+                                    &mut coordinator,
+                                )
+                            }))
+                            .await;
+                        if let Some(coordinator) = coordinator.as_mut() {
+                            coordinator.release().await;
                         }
-                    }
-                    let deadline =
-                        if pooled {
-                            Some(scope.account_deadline(
-                                crate::model::request_timeout::non_stream_timeout()?,
-                            ))
-                        } else {
-                            None
-                        };
-                    let drive = crate::model::request_trace::stream(boxed_model_future(|| {
-                        self.drive_stream_inner(req)
-                    }));
+                        result
+                    };
                     if let Some(deadline) = deadline {
                         let stream = tokio::time::timeout_at(deadline, scope.run(drive))
                             .await
-                            .map_err(|_| LlmError::TransportTimeout {
-                            message: "logical account call deadline exceeded".into(),
-                        })??;
+                            .unwrap_or_else(|_| {
+                                Err(LlmError::TransportTimeout {
+                                    message: "logical account call deadline exceeded".into(),
+                                })
+                            })
+                            .map_err(|error| {
+                                error.with_route_replay(dispatched_route_allows_replay)
+                            })?;
                         // The deadline includes response reading. Once an item has
                         // been delivered, this wrapper only ends the stream; it never
                         // re-enters account selection or replays prior output.
                         let bounded: BoxStream<'static, Result<HistoryEvent, LlmError>> =
                             Box::pin(futures::stream::unfold(
-                                (stream, false, scope),
-                                move |(mut stream, done, retry_scope)| async move {
-                                    if done {
-                                        return None;
-                                    }
+                                (Some(stream), scope),
+                                move |(stream, retry_scope)| async move {
+                                    let mut stream = stream?;
                                     match tokio::time::timeout_at(
                                         deadline,
                                         futures::StreamExt::next(&mut stream),
                                     )
                                     .await
                                     {
-                                        Ok(Some(item)) => {
-                                            Some((item, (stream, false, retry_scope)))
-                                        }
+                                        Ok(Some(item)) => Some((item, (Some(stream), retry_scope))),
                                         Ok(None) => None,
                                         Err(_) => {
                                             let error = LlmError::TransportTimeout {
                                                 message: "logical account call deadline exceeded"
                                                     .into(),
                                             };
+                                            let error = error
+                                                .with_route_replay(dispatched_route_allows_replay);
                                             retry_scope.record_account_stream_error(&error);
-                                            Some((Err(error), (stream, true, retry_scope)))
+                                            drop(stream);
+                                            Some((Err(error), (None, retry_scope)))
                                         }
                                     }
                                 },
                             ));
                         Ok(bounded)
                     } else {
-                        scope.run(drive).await
+                        scope.run(drive).await.map_err(|error| {
+                            error.with_route_replay(dispatched_route_allows_replay)
+                        })
                     }
                 })
                 .await
@@ -264,18 +296,11 @@ impl ApiService {
     async fn drive_stream_inner(
         &self,
         mut req: LlmRequest,
+        wrap_up: Option<super::BoundWrapUpHint>,
+        dispatched_route_allows_replay: &mut bool,
+        account_coordinator: &mut Option<crate::accounts::AttemptCoordinator>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let retain_native_stream_frames = crate::native_stream_capture::requested();
-        if req.execution.thinking_recovery_scope.is_none() {
-            req.execution.thinking_recovery_scope = Some(self.thinking_recovery_scope());
-        }
-        // All stream retries belong to this query and use its captured Native
-        // sticky-beta identity; later resets affect only fresh queries.
-        let native_tbc_attempt = req
-            .execution
-            .thinking_recovery_scope
-            .as_ref()
-            .map(|scope| scope.native_thinking_binding_controls_attempt());
         self.capture_request_session_id(&mut req).await;
         if req.execution.request_credentials.is_none()
             && self.native_api_system_route(&req.input.model, req.profile.as_deref())
@@ -288,40 +313,33 @@ impl ApiService {
                 Some(self.protocol_for_model(&req.input.model, req.profile.as_deref())?);
         }
         let request_id = new_telemetry_id();
-        let allow_replay = allows_automatic_replay(&req);
         telemetry::emit_started(&self.analytics, &req.input.model, &request_id, true).await;
         if let Some(query_source) = req.execution.query_source.as_deref() {
             telemetry::emit_query_source(&self.analytics, &req.input.model, query_source).await;
         }
 
-        // Batch-5 Task 3: live subscriber state, resolved ONCE per drive call
-        // (see `drive_non_stream_seeded_with_chain` for the granularity note).
         let sub = self.effective_subscriber();
-        let mut state = RetryState {
-            is_subscriber: sub.is_subscriber,
-            is_enterprise: sub.is_enterprise,
-            // Subscription / free-tier rate limits fail fast (see non-stream drive).
-            rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.input.model),
-            ..RetryState::default()
-        };
+        let mut state = RetryState::default();
         // Stream path uses settings-based retry control (same precedence as non-stream).
-        let ctl = resolve_retry_control_with_settings(
+        let mut ctl = resolve_retry_control_with_settings(
             &req.input.model,
             None, // fallback not used on stream connect-phase
             sub.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        let retry_scope = ModelCallRetryScope::current_or_new();
-        let mut account_coordinator = self.make_account_coordinator(&req, &retry_scope).await?;
-        if account_coordinator.is_some() && req.execution.api_attempts_left.is_none() {
-            req.execution.api_attempts_left = Some(retry_scope.account_api_budget());
+        if let Some(max) = req.execution.side_query_max_retries {
+            ctl.max_retries = ctl.max_retries.min(max);
         }
+        let retry_scope = ModelCallRetryScope::current_or_new();
+        *account_coordinator = self.make_account_coordinator(&req, &retry_scope).await?;
+        self.configure_api_attempt_budget(&mut req, &retry_scope, account_coordinator.is_some());
 
         let ctl = retry_scope.configure(&ctl, &mut state);
         let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
         let context_1m_scope = req.execution.thinking_recovery_scope.clone();
         let mut connections = super::retry::ConnectionRetry::new();
+        let logical_reasoning = super::retry::LogicalReasoning::capture(&req);
         let mut max_tokens_adjusted = false;
         let mut any_dispatched = false;
         // Native `oSe` is per query, not per HTTP attempt.
@@ -356,10 +374,15 @@ impl ApiService {
             ConversationLease::auxiliary(&self.side_sessions)
         });
         let mut continuation_recovered = false;
+        let rate_limit_account_epoch = self.rate_limit_account_epoch();
 
         loop {
+            let previous_account = req.execution.selected_account.clone();
             self.select_attempt_account(account_coordinator.as_mut(), &retry_scope, &mut req)
                 .await?;
+            if previous_account.is_some() && previous_account != req.execution.selected_account {
+                logical_reasoning.restore(&mut req);
+            }
 
             self.clamp_scope_output(&mut req, any_dispatched)?;
             self.apply_native_main_thinking_policy(&mut req)?;
@@ -373,10 +396,50 @@ impl ApiService {
                     .as_ref()
                     .zip(context_1m_attempt_key.as_ref())
                     .is_some_and(|(scope, key)| scope.context_1m_refused_for(key));
-            let request_client = self.bind_attempt_route(&mut req, true).await?;
-            let mut prepared = match request_client
-                .prepare_on(&req, self.transport.clone())
-                .await
+            let classifier_timeout = req
+                .execution
+                .classifier_attempt_timeout_ms
+                .map(Duration::from_millis);
+            let mut classifier_attempt_deadline =
+                classifier_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+            let note = if let Some(hint) = wrap_up.as_ref() {
+                match self.client().subagent_wrap_up_note(&mut req, hint).await {
+                    Ok(note) => note,
+                    Err(error) => {
+                        if self
+                            .retry_after_preparation_failure(
+                                &req,
+                                account_coordinator.as_mut(),
+                                &error,
+                                &retry_scope,
+                            )
+                            .await?
+                        {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            let (request_client, projected) = crate::execution::classifier_attempt_bound(
+                classifier_attempt_deadline,
+                self.bind_attempt_route(&mut req, true, any_dispatched, note),
+            )
+            .await?;
+            let mut prepared = match crate::execution::classifier_attempt_bound(
+                classifier_attempt_deadline,
+                request_client.prepare_on(
+                    projected.as_ref().unwrap_or(&req),
+                    self.transport.clone(),
+                    crate::execution::PreparationDispatchPolicy {
+                        quota: self.scope_output_quota.clone(),
+                        prior_dispatch: any_dispatched,
+                    },
+                ),
+            )
+            .await
             {
                 Ok(p) => p,
                 Err(e) => {
@@ -394,37 +457,40 @@ impl ApiService {
                     return Err(e);
                 }
             };
-            prepared.native_thinking_binding_controls_attempt = native_tbc_attempt.clone();
+            bind_rate_limit_retry_policy(&mut state, sub, &prepared);
             connections.capture(
                 &prepared.route.resolved_route,
                 account_coordinator.is_none(),
             );
             tracing::debug!(model = %req.input.model, event = "request_prepared");
-            let (dispatch_attempt, server_fallback_parameter_added) = self
-                .finish_attempt_preparation(&req, &mut prepared, &retry_scope, dispatch, true)
-                .await?;
+            let (dispatch_attempt, server_fallback_parameter_added) = crate::execution::classifier_attempt_bound(
+                classifier_attempt_deadline,
+                self.finish_attempt_preparation(&req, &mut prepared, &retry_scope, dispatch, true),
+            )
+            .await?;
 
-            let provider = &prepared.route.resolved_route.provider_id;
-            let body_bytes = prepared.provider_request.wire_body_bytes()?.len();
-            let classifier_timeout = req
-                .execution
-                .classifier_attempt_timeout_ms
-                .map(Duration::from_millis);
+            let mut allow_replay = allows_route_replay(&req, &prepared);
+            let draft = crate::ModelRuntime::shared_stream_draft(&mut prepared)?;
             let first_byte_timeout = if classifier_timeout.is_some() {
                 // The absolute classifier deadline below owns both phases.
                 None
             } else {
                 self.stream_first_byte_timeout_override.or_else(|| {
+                    let body_bytes = prepared
+                        .provider_request
+                        .body_bytes
+                        .as_ref()
+                        .map_or_else(|| draft.request().body.len(), Vec::len);
                     crate::model::stream_watchdog::resolve_stream_first_byte_timeout(
-                        provider, body_bytes,
+                        &prepared.route.resolved_route.provider_id,
+                        body_bytes,
                     )
                 })
             };
-            let mut classifier_attempt_deadline =
-                classifier_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
-
             let mut attempt = crate::model_attempt::WireAttempt::new(None);
             let mut admission = super::attempt::AttemptAdmission::new(self, &req);
+            let mut rate_limit_headers = None;
+            let mut prompt_cache_header_order = None;
 
             // Open stream through the prepared-call path so injected headers are
             // preserved while OpenAI Responses providers can reuse a WebSocket
@@ -449,17 +515,23 @@ impl ApiService {
                         classifier_attempt_deadline,
                         crate::execution::first_byte_bound(
                             first_byte_timeout,
-                            request_client.prepare_shared_stream(prepared, responses_ws_session),
+                            request_client.prepare_shared_stream(
+                                prepared,
+                                draft,
+                                responses_ws_session,
+                            ),
                         ),
                     )
                     .await?;
                     let remaining = first_byte_timeout
                         .map(|timeout| timeout.saturating_sub(preparing.elapsed()));
+                    allow_replay = allows_route_replay(&req, &prepared);
                     self.validate_scope_output(&prepared)?;
                     // Budget/queue admission is host work, outside the network
                     // watchdog. Its wait must not masquerade as a provider timeout.
                     let admission_started = tokio::time::Instant::now();
                     attempt = self.begin_model_attempt(&req, &prepared).await?;
+                    admission.authorize_quota().await?;
                     if let Some(deadline) = classifier_attempt_deadline.as_mut() {
                         *deadline += admission_started.elapsed();
                     }
@@ -469,15 +541,32 @@ impl ApiService {
                         classifier_attempt_deadline,
                         crate::execution::first_byte_bound(remaining, async {
                             admission.check_computer_submission()?;
-                            admission.authorize_quota().await?;
                             request_client
-                                .open_shared_stream(prepared, responses_ws_session, &mut || {
-                                    admission.mark_dispatch(
-                                        &mut attempt,
-                                        &observations,
-                                        &mut any_dispatched,
-                                    )
-                                })
+                                .open_shared_stream(
+                                    prepared,
+                                    responses_ws_session,
+                                    &mut |prepared| {
+                                        admission.mark_dispatch(
+                                            &mut attempt,
+                                            &observations,
+                                            &mut any_dispatched,
+                                        )?;
+                                        if !allow_replay {
+                                            retry_scope.forbid_route_replay();
+                                        }
+                                        *dispatched_route_allows_replay = allow_replay;
+                                        Ok(self.admit_rate_limit_route(
+                                            rate_limit_account_epoch,
+                                            prepared,
+                                        ))
+                                    },
+                                    &mut |binding, response| {
+                                        prompt_cache_header_order =
+                                            Some(self.anthropic.prompt_cache_overage.observe_headers());
+                                        rate_limit_headers = self
+                                            .observe_rate_limit_headers(binding, response.status());
+                                    },
+                                )
                                 .await
                         }),
                     )
@@ -607,7 +696,10 @@ impl ApiService {
                             return Err(transport_err);
                         }
                     }
-                    if let Some(next) = connections.advance(&mut req, &mut state, &transport_err) {
+                    if let Some(next) =
+                        connections.advance(&mut req, &mut state, &retry_scope, &transport_err)
+                    {
+                        logical_reasoning.restore(&mut req);
                         tracing::info!(
                             event = "connection_failover",
                             next_connection = %next,
@@ -734,7 +826,7 @@ impl ApiService {
                         self.observe_native_thinking_resumption_refusal(&decode_err);
                         safety.error(&decode_err);
                         let recover_continuation = !continuation_recovered
-                            && allow_replay
+                            && allows_continuation_recovery(&req, &prepared)
                             && conversation_lease
                                 .as_mut()
                                 .expect("conversation lease")
@@ -788,7 +880,7 @@ impl ApiService {
                             &decode_err,
                             response_status,
                         ) {
-                            Self::refuse_native_thinking_binding_controls(&mut req, &mut prepared);
+                            Self::refuse_native_thinking_binding_controls(&mut prepared);
                             continue;
                         }
                         if let Some(retried) = self
@@ -830,24 +922,36 @@ impl ApiService {
                         // actual retry delay from the real response headers
                         // (retry-after / anthropic-ratelimit-*).  Absent hints leave delay selection to the retry policy.
                         let mut effective_err = decode_err.clone();
+                        let response_id = crate::execution::extract_response_request_id(
+                            prepared.route.protocol,
+                            crate::execution::response_provider_id(
+                                &prepared.route.resolved_route.provider_id,
+                            ),
+                            &response_headers,
+                        );
+                        let mut rate_limit_message = None;
+                        let mut pending_overage = None;
                         let pending_429 = if let LlmError::RateLimited { retry_after, .. } =
                             decode_err.classification_source()
                         {
                             // Task 6 (batch 5): same 429-error-header capture
                             // as the non-stream path (errors.ts:471-516).
-                            let pending = self.record_rate_limit_from_429_for_route(
+                            let observation = self.record_rate_limit_from_429_for_route(
                                 &response_headers,
                                 Some(&body_json),
-                                &req.input.model,
+                                &prepared.route.resolved_route.request_model,
                                 outgoing_client_request_id.as_deref(),
                                 prepared.route.protocol,
                                 crate::execution::response_provider_id(
                                     &prepared.route.resolved_route.provider_id,
                                 ),
+                                rate_limit_headers,
                             );
-                            self.stage_prompt_cache_overage_from_429(
+                            rate_limit_message = observation.message;
+                            pending_overage = self.stage_prompt_cache_overage_from_429(
                                 &response_headers,
                                 prepared.prompt_cache.as_ref(),
+                                prompt_cache_header_order,
                             );
                             let delay = retry_after.or_else(|| {
                                 Self::resolve_retry_after(
@@ -865,7 +969,7 @@ impl ApiService {
                             {
                                 *effective_retry_after = delay;
                             }
-                            pending
+                            observation.pending
                         } else {
                             None
                         };
@@ -899,7 +1003,7 @@ impl ApiService {
                         // SDK stateful execution still requires an explicit host decision.
                         if allow_replay && account_coordinator.is_none() && retry_scope.request_http_model_fallback(response_status, lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&body_json))
                         {
-                            return Err(decode_err);
+                            return Err(decode_err.with_response_diagnostics(response_id, rate_limit_message));
                         }
                         if allow_replay
                             && self.repair_fast_model_rejection(
@@ -957,7 +1061,8 @@ impl ApiService {
                                 Self::status_of(&decode_err),
                             )
                             .await;
-                            return Err(decode_err);
+                            return Err(decode_err
+                                .with_response_diagnostics(response_id, rate_limit_message));
                         }
                         if !allow_replay
                             || (account_coordinator.is_none() && crate::model::retry_scope::http_retry_decline_is_terminal(
@@ -971,7 +1076,7 @@ impl ApiService {
                                 decode_err.classification_source(),
                                 LlmError::RateLimited { .. }
                             ) {
-                                self.promote_pending_429(pending_429, prepared.prompt_cache.as_ref());
+                                self.promote_pending_429(pending_429, pending_overage);
                             }
                             telemetry::emit_failed(
                                 &self.analytics,
@@ -981,7 +1086,7 @@ impl ApiService {
                                 Self::status_of(&decode_err),
                             )
                             .await;
-                            return Err(decode_err);
+                            return Err(decode_err.with_response_diagnostics(response_id, rate_limit_message));
                         }
 
                         // 2.1.198 `V_c`/`G_c`/`s_f` + `Ygf` — stream connect
@@ -1040,7 +1145,8 @@ impl ApiService {
                                 if allows_account_switch(&req) {
                                     continue;
                                 }
-                                return Err(effective_err);
+                                return Err(effective_err
+                                    .with_response_diagnostics(response_id, rate_limit_message));
                             }
                             // Unknown transport settlement cannot be replayed under a
                             // different account or by the standalone retry driver.
@@ -1048,12 +1154,14 @@ impl ApiService {
                                 effective_err.classification_source(),
                                 LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
                             ) {
-                                return Err(effective_err);
+                                return Err(effective_err
+                                    .with_response_diagnostics(response_id, rate_limit_message));
                             }
                         }
                         if let Some(next) =
-                            connections.advance(&mut req, &mut state, &effective_err)
+                            connections.advance(&mut req, &mut state, &retry_scope, &effective_err)
                         {
+                            logical_reasoning.restore(&mut req);
                             tracing::info!(
                                 event = "connection_failover",
                                 next_connection = %next,
@@ -1079,6 +1187,7 @@ impl ApiService {
                                     &response_headers,
                                     ctl.watchdog,
                                     prepared.prompt_cache.as_ref(),
+                                    prompt_cache_header_order,
                                 );
                                 self.report_and_sleep_retry(&effective_err, delay, &state, &ctl)
                                     .await;
@@ -1125,7 +1234,7 @@ impl ApiService {
                             decode_err.classification_source(),
                             LlmError::RateLimited { .. }
                         ) {
-                            self.promote_pending_429(pending_429, prepared.prompt_cache.as_ref());
+                            self.promote_pending_429(pending_429, pending_overage);
                         }
                         // Terminal twin for the connect-phase emit_started
                         // (mirrors the non-stream terminal arms).
@@ -1137,22 +1246,30 @@ impl ApiService {
                             Self::status_of(&decode_err),
                         )
                         .await;
-                        return Err(decode_err);
+                        return Err(
+                            decode_err.with_response_diagnostics(response_id, rate_limit_message)
+                        );
                     }
 
-                    self.record_rate_limit_from_headers_for_route(
+                    let provider_request_id = self.record_rate_limit_from_headers_for_route(
                         &response_headers,
                         outgoing_client_request_id.as_deref(),
                         prepared.route.protocol,
                         crate::execution::response_provider_id(
                             &prepared.route.resolved_route.provider_id,
                         ),
+                        rate_limit_headers,
                     );
                     self.record_prompt_cache_overage_from_headers(
                         &response_headers,
                         prepared.prompt_cache.as_ref(),
+                        prompt_cache_header_order,
                     );
-                    *self.last_retry_count.lock().unwrap() = retry_scope.retry_count();
+                    let diagnostics = crate::history::ResponseDiagnostics::new(
+                        provider_request_id,
+                        retry_scope.retry_count(),
+                    );
+                    *self.last_retry_count.lock().unwrap() = diagnostics.retries;
                     let response_metadata =
                         lingxi_llm_client::providers::response_headers::stream_metadata_for_route(
                             crate::upstream::family(&prepared.route.protocol),
@@ -1177,7 +1294,7 @@ impl ApiService {
                     decoder.local_tool_search_admitted = prepared.local_tool_search_admitted;
                     crate::history_projection::attach_output_budget(
                         &mut decoder.metadata,
-                        prepared_output_budget_observation(&prepared, &req.input),
+                        prepared_output_budget_observation(&prepared, &req.input, allow_replay),
                     )?;
                     if let Some(binding) = prepared.computer_binding.as_ref() {
                         crate::history_projection::attach_computer_binding(
@@ -1363,7 +1480,10 @@ impl ApiService {
                                     if allows_account_switch(&req) {
                                         continue;
                                     }
-                                    return Err(first_err.clone());
+                                    return Err(first_err.clone().with_response_diagnostics(
+                                        diagnostics.provider_request_id(),
+                                        None,
+                                    ));
                                 }
                                 // Unknown execution/settlement never authorizes
                                 // the dispatch-header repair on pooled calls.
@@ -1384,7 +1504,10 @@ impl ApiService {
                                         continue;
                                     }
                                 }
-                                return Err(first_err.clone());
+                                return Err(first_err.clone().with_response_diagnostics(
+                                    diagnostics.provider_request_id(),
+                                    None,
+                                ));
                             }
                             // Native x2 body classification requires a connection cause;
                             // SDK timeout/abort errors alone do not supply that cause.
@@ -1418,6 +1541,8 @@ impl ApiService {
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
                     let stream_state = StreamState {
+                        allow_replay,
+                        diagnostics,
                         account_derived_token: req
                             .profile
                             .as_deref()
@@ -1458,7 +1583,7 @@ impl ApiService {
                         safety: safety.clone(),
                         attempt,
                         decoder,
-                        frames,
+                        frames: Some(frames),
                         native_stream_capture,
                         native_thinking_resumption_refused: self
                             .anthropic
@@ -1509,27 +1634,30 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         speed: Option<String>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = self.build_main_request(
-            model,
-            profile,
-            system.as_ref(),
-            messages,
-            tools,
-            true,
-            None,
-            false,
-            PromptCacheQuerySource::Unspecified,
-            None,
-            &[],
-            &std::collections::HashSet::new(),
-            &std::collections::HashMap::new(),
-        )?;
-        req.set_effort(effort)?;
-        // (fast mode) `Some("fast")` from the main loop lights the fast-mode
-        // beta via `beta_context`; `None` keeps the body byte-identical.
-        req.set_speed(speed)?;
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = self.build_main_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                true,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+                None,
+                &[],
+                &std::collections::HashSet::new(),
+                &std::collections::HashMap::new(),
+            )?;
+            req.set_effort(effort)?;
+            // (fast mode) `Some("fast")` from the main loop lights the fast-mode
+            // beta via `beta_context`; `None` keeps the body byte-identical.
+            req.set_speed(speed)?;
+            self.drive_stream(req).await
+        })
+        .await
     }
 
     /// Structured-output streaming call (provider-neutral). The drive logic of
@@ -1546,25 +1674,28 @@ impl ApiService {
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = self.build_request(
-            model,
-            profile,
-            system.as_ref(),
-            messages,
-            tools,
-            true,
-            None,
-            false,
-            PromptCacheQuerySource::Subagent,
-        )?;
-        req.set_effort(effort)?;
-        if let Some(name) = forced_tool {
-            req.set_tool_choice(Some(crate::ToolChoice::Tool {
-                name: name.to_string(),
-            }));
-        }
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                true,
+                None,
+                false,
+                PromptCacheQuerySource::Subagent,
+            )?;
+            req.set_effort(effort)?;
+            if let Some(name) = forced_tool {
+                req.set_tool_choice(Some(crate::ToolChoice::Tool {
+                    name: name.to_string(),
+                }));
+            }
+            self.drive_stream(req).await
+        })
+        .await
     }
 
     /// Like [`Self::stream`], but ALSO threads a per-turn output-token ceiling
@@ -1586,21 +1717,24 @@ impl ApiService {
         max_tokens: Option<u32>,
         query_source_label: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = self.build_request(
-            model,
-            profile,
-            system.as_ref(),
-            messages,
-            tools,
-            true,
-            max_tokens,
-            false,
-            PromptCacheQuerySource::Subagent,
-        )?;
-        req.set_effort(effort)?;
-        req.execution.query_source = query_source_label.map(str::to_string);
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                true,
+                max_tokens,
+                false,
+                PromptCacheQuerySource::Subagent,
+            )?;
+            req.set_effort(effort)?;
+            req.execution.query_source = query_source_label.map(str::to_string);
+            self.drive_stream(req).await
+        })
+        .await
     }
 
     /// Like [`Self::stream_forced`], with the same per-turn output-token
@@ -1618,25 +1752,28 @@ impl ApiService {
         max_tokens: Option<u32>,
         query_source_label: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = self.build_request(
-            model,
-            profile,
-            system.as_ref(),
-            messages,
-            tools,
-            true,
-            max_tokens,
-            false,
-            PromptCacheQuerySource::Subagent,
-        )?;
-        req.set_effort(effort)?;
-        if let Some(name) = forced_tool {
-            req.set_tool_choice(Some(crate::ToolChoice::Tool {
-                name: name.to_string(),
-            }));
-        }
-        req.execution.query_source = query_source_label.map(str::to_string);
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                true,
+                max_tokens,
+                false,
+                PromptCacheQuerySource::Subagent,
+            )?;
+            req.set_effort(effort)?;
+            if let Some(name) = forced_tool {
+                req.set_tool_choice(Some(crate::ToolChoice::Tool {
+                    name: name.to_string(),
+                }));
+            }
+            req.execution.query_source = query_source_label.map(str::to_string);
+            self.drive_stream(req).await
+        })
+        .await
     }
 }

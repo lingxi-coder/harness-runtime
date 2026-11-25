@@ -23,6 +23,28 @@ pub(crate) fn wire_error(error: LlmError) -> wire::LlmError {
         LlmError::FileUploadOutcomeUnknown { message } => {
             wire::LlmError::FileUploadOutcomeUnknown { message }
         }
+        LlmError::ResponseBodyLimitExceeded {
+            status,
+            request_id,
+            limit_bytes,
+        } => wire::LlmError::ProviderResponse {
+            status,
+            request_id,
+            body: Box::new(serde_json::json!({
+                (crate::upstream::RESPONSE_BODY_LIMIT_BYTES_FIELD): limit_bytes,
+            })),
+            classification: wire::LlmErrorKind::RequestTooLarge,
+            retry_after: None,
+        },
+        LlmError::ResponseBodyInterrupted { status, request_id } => {
+            wire::LlmError::ProviderResponse {
+                status,
+                request_id,
+                body: Box::new(serde_json::json!({"response_body_interrupted": true})),
+                classification: wire::LlmErrorKind::StreamInterrupted,
+                retry_after: None,
+            }
+        }
         LlmError::UnsupportedCapability { capability } => wire::LlmError::UnsupportedCapability {
             message: capability,
         },
@@ -131,17 +153,97 @@ impl sdk::Transport for PreparationOnly {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct PreparationDispatchPolicy {
+    pub(crate) quota: Option<Arc<crate::ScopeOutputQuota>>,
+    pub(crate) prior_dispatch: bool,
+}
+
+pub(crate) struct PreparationOptions {
+    pub(crate) mode: sdk::RequestMode,
+    pub(crate) fast_capability: Option<wire::CapabilitySupport>,
+    pub(crate) dispatch: PreparationDispatchPolicy,
+}
+
+struct PreparationAdmission {
+    admission: Option<crate::RequestDispatchAdmission>,
+    attempts: Option<crate::ApiAttemptsLeft>,
+    policy: PreparationDispatchPolicy,
+    failure: std::sync::Mutex<Option<LlmError>>,
+}
+
+tokio::task_local! {
+    static PREPARATION_ADMISSION: Arc<PreparationAdmission>;
+}
+
+impl PreparationAdmission {
+    fn check(&self) -> Result<(), LlmError> {
+        let quota = self.policy.quota.as_deref();
+        if self
+            .admission
+            .as_ref()
+            .is_some_and(|admission| !admission.is_admitted())
+            || quota.is_some_and(crate::ScopeOutputQuota::is_revoked)
+        {
+            return Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: self.policy.prior_dispatch,
+            });
+        }
+        if self
+            .attempts
+            .as_ref()
+            .is_some_and(|budget| budget.remaining() == 0)
+            || quota.is_some_and(|quota| quota.remaining_dispatches() == 0)
+        {
+            return Err(LlmError::ApiAttemptsExhausted);
+        }
+        Ok(())
+    }
+
+    async fn authorize(&self) -> Result<(), LlmError> {
+        self.check()?;
+        if let Some(quota) = self.policy.quota.as_ref() {
+            let authorization = quota.authorize_dispatch().await;
+            self.check()?;
+            authorization?;
+        }
+        Ok(())
+    }
+}
+
+/// Preparation may send file data after asynchronous SDK work. Keep its gate
+/// scoped to this draft so cached clients and background file cleanup can be
+/// reused across requests.
+pub(crate) async fn authorize_preparation_io(method: &str) -> Result<(), wire::LlmError> {
+    // Deleting a file the SDK already uploaded is cleanup, including after
+    // the host revokes permission for further preparation.
+    if method.eq_ignore_ascii_case("DELETE") {
+        return Ok(());
+    }
+    if let Ok(admission) = PREPARATION_ADMISSION.try_with(Arc::clone) {
+        if let Err(error) = admission.authorize().await {
+            *admission.failure.lock().expect("preparation admission") = Some(error);
+            return Err(wire::LlmError::InvalidRequest {
+                message: "host rejected request preparation dispatch".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// SDK clients are shared by effective immutable provider configuration and
 /// transport. Model selection is request-local, so changing models does not
 /// create another SDK client or connection pool.
 #[derive(Default)]
-pub(crate) struct ClientCache(std::sync::Mutex<Vec<CachedClient>>);
+pub(crate) struct ClientCache(std::sync::Mutex<std::collections::VecDeque<CachedClient>>);
 struct CachedClient {
     profile: wire::ProviderProfile,
     transport: Arc<dyn sdk::Transport>,
     client: sdk::LlmClient,
 }
 impl ClientCache {
+    const CAPACITY: usize = 128;
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.0.lock().unwrap().len()
@@ -152,11 +254,13 @@ impl ClientCache {
         transport: Arc<dyn sdk::Transport>,
     ) -> Result<sdk::LlmClient, LlmError> {
         let mut entries = self.0.lock().expect("SDK client cache");
-        if let Some(entry) = entries
-            .iter()
-            .find(|entry| entry.profile == *profile && Arc::ptr_eq(&entry.transport, &transport))
-        {
-            return Ok(entry.client.clone());
+        if let Some(position) = entries.iter().position(|entry| {
+            entry.profile == *profile && Arc::ptr_eq(&entry.transport, &transport)
+        }) {
+            let entry = entries.remove(position).expect("cached client position");
+            let client = entry.client.clone();
+            entries.push_back(entry);
+            return Ok(client);
         }
         let region = profile
             .regions
@@ -177,11 +281,16 @@ impl ClientCache {
         .map_err(|error| LlmError::InvalidRequest {
             message: error.to_string(),
         })?;
-        entries.push(CachedClient {
+        let evicted = (entries.len() == Self::CAPACITY)
+            .then(|| entries.pop_front())
+            .flatten();
+        entries.push_back(CachedClient {
             profile: profile.clone(),
             transport,
             client: client.clone(),
         });
+        drop(entries);
+        drop(evicted);
         Ok(client)
     }
 }
@@ -199,9 +308,13 @@ pub(crate) async fn prepare(
     request: &crate::LlmRequest,
     transport: Option<Arc<dyn Transport>>,
     authenticator: Arc<dyn sdk::Authenticator>,
-    preparation: (sdk::RequestMode, Option<wire::CapabilitySupport>),
+    preparation: PreparationOptions,
 ) -> Result<(sdk::RequestDraft, ProviderRequest), LlmError> {
-    let (mode, fast_capability) = preparation;
+    let PreparationOptions {
+        mode,
+        fast_capability,
+        dispatch,
+    } = preparation;
     // This exact connection was already selected by the application's policy.
     // Keep the route auth strategy for provider body policy, while credentials
     // are still applied by the host after its final body/header policies.
@@ -238,7 +351,10 @@ pub(crate) async fn prepare(
     );
     let request = classifier_input.as_ref();
     let mut input = crate::upstream::request(request, profile.protocol)?;
-    input.model.clone_from(&route.display_model);
+    input.model =
+        crate::registry::row_selector(&profile, &route.display_model, &route.request_model)
+            .ok_or(LlmError::ModelUnavailable)?
+            .to_owned();
     if let Some(layout) = &request.execution.classifier_cache_layout {
         crate::classifier_cache::project(
             &mut input,
@@ -276,43 +392,64 @@ pub(crate) async fn prepare(
         &request.input.model,
         native_hq_model_provider_family,
     );
-    let mut draft = Box::pin(
-        client.prepare_draft_on(
-            &profile.profile_name,
-            &input,
-            &sdk::RequestOptions {
-                automatic_thinking_budget: request.execution.automatic_thinking_budget,
-                anthropic_request_kind,
-                native_anthropic_endpoint_admission,
-                native_anthropic_context: sdk::NativeAnthropicContextInput {
-                    context_1m_beta_suppressed: request.execution.context_1m_beta_suppressed,
-                    native_thinking_binding_controls_beta_requested: request
-                        .execution
-                        .native_thinking_binding_controls_beta_requested,
-                    native_lsn_manual_budget: request.execution.native_lsn_manual_budget,
-                    native_hq_model_source,
-                    native_hq_model_provider_family,
-                    ..Default::default()
-                },
-                native_anthropic_request_context: request
-                    .execution
-                    .native_anthropic_request_context
-                    .clone(),
-                message_text_utf16_overrides: request
-                    .execution
-                    .message_json_string_overrides
-                    .clone(),
-                fast_capability,
-                authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),
-                account_scope: request.execution.account_scope.clone(),
-                file_account_scope: request.execution.file_account_scope.clone(),
-                ..Default::default()
-            },
-            mode,
-        ),
-    )
-    .await
-    .map_err(crate::upstream::error)?;
+    let admission = Arc::new(PreparationAdmission {
+        admission: request.execution.request_dispatch_admission.clone(),
+        attempts: request.execution.api_attempts_left.clone(),
+        policy: dispatch,
+        failure: std::sync::Mutex::new(None),
+    });
+    let mut draft = PREPARATION_ADMISSION
+        .scope(
+            admission.clone(),
+            Box::pin(
+                client.prepare_draft_on(
+                    &profile.profile_name,
+                    &input,
+                    &sdk::RequestOptions {
+                        automatic_thinking_budget: request.execution.automatic_thinking_budget,
+                        anthropic_request_kind,
+                        native_anthropic_endpoint_admission,
+                        native_anthropic_context: sdk::NativeAnthropicContextInput {
+                            context_1m_beta_suppressed: request
+                                .execution
+                                .context_1m_beta_suppressed,
+                            native_thinking_binding_controls_beta_requested: request
+                                .execution
+                                .native_thinking_binding_controls_beta_requested,
+                            native_lsn_manual_budget: request.execution.native_lsn_manual_budget,
+                            native_hq_model_source,
+                            native_hq_model_provider_family,
+                            ..Default::default()
+                        },
+                        native_anthropic_request_context: request
+                            .execution
+                            .native_anthropic_request_context
+                            .clone(),
+                        message_text_utf16_overrides: request
+                            .execution
+                            .message_json_string_overrides
+                            .clone(),
+                        fast_capability,
+                        authenticator: Some(sdk::client::options::RequestAuthenticator(
+                            authenticator,
+                        )),
+                        account_scope: request.execution.account_scope.clone(),
+                        file_account_scope: request.execution.file_account_scope.clone(),
+                        ..Default::default()
+                    },
+                    mode,
+                ),
+            ),
+        )
+        .await
+        .map_err(|error| {
+            admission
+                .failure
+                .lock()
+                .expect("preparation admission")
+                .take()
+                .unwrap_or_else(|| crate::upstream::error(error))
+        })?;
     draft
         .apply_request_body_auth_policy(body_auth_strategy)
         .map_err(crate::upstream::error)?;
@@ -505,6 +642,29 @@ impl HostAuthenticator {
             })?;
         self.client.capture_request_credential(snapshot).await
     }
+    pub(crate) fn captured_credential_revision(&self) -> Option<u64> {
+        self.snapshot
+            .as_ref()?
+            .credential_revision
+            .get()
+            .copied()
+            .flatten()
+    }
+
+    /// Identify an already captured API key or Anthropic bearer without exposing its
+    /// material or loading credentials during dispatch.
+    pub(crate) fn captured_unversioned_credential_identity(&self) -> Option<String> {
+        let credential = self.snapshot.as_ref()?.credential.get()?.as_ref()?;
+        match credential {
+            crate::Credential::ApiKey(_)
+            | crate::Credential::BearerToken(_)
+            | crate::Credential::AnthropicOAuth { .. } => {
+                crate::computer::credential_account_scope(Some(credential)).ok()
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn for_request(
         client: crate::ModelRuntime,
         profile: String,
@@ -710,6 +870,52 @@ pub(crate) async fn next_batch_with_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn preparation_rechecks_admission_after_async_quota_authorization() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let active = Arc::new(AtomicBool::new(true));
+        let host = active.clone();
+        let quota = Arc::new(crate::ScopeOutputQuota::new(
+            128u32.try_into().unwrap(),
+            1u32.try_into().unwrap(),
+        ));
+        quota
+            .set_dispatch_authorization(Arc::new(move || {
+                let host = host.clone();
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    host.store(false, Ordering::Release);
+                    Ok(())
+                })
+            }))
+            .unwrap();
+        let admission = Arc::new(PreparationAdmission {
+            admission: Some(crate::RequestDispatchAdmission::new(move || {
+                active.load(Ordering::Acquire)
+            })),
+            attempts: None,
+            policy: PreparationDispatchPolicy {
+                quota: Some(quota.clone()),
+                prior_dispatch: true,
+            },
+            failure: std::sync::Mutex::new(None),
+        });
+        PREPARATION_ADMISSION
+            .scope(admission.clone(), async {
+                assert!(authorize_preparation_io("POST").await.is_err());
+                assert!(authorize_preparation_io("DELETE").await.is_ok());
+            })
+            .await;
+        assert!(matches!(
+            admission.failure.lock().unwrap().as_ref(),
+            Some(LlmError::RequestDispatchRejected {
+                prior_dispatch: true
+            })
+        ));
+        assert_eq!(quota.remaining_dispatches(), 1);
+    }
 
     #[test]
     fn native_hq_model_family_requires_exact_provider_and_protocol() {

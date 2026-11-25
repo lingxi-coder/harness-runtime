@@ -453,7 +453,9 @@ pub(super) fn safe_llm_error_code(error: &llm_runtime::LlmError) -> &'static str
         | LlmError::Overloaded { .. } => {
             provider_http_status_code(error.http_status()).unwrap_or("model_provider_failed")
         }
-        LlmError::MalformedToolInput { .. } => "model_invalid_response",
+        LlmError::MalformedToolInput { .. }
+        | LlmError::ResponseBodyInterrupted { .. }
+        | LlmError::ResponseBodyLimitExceeded { .. } => "model_invalid_response",
         _ => "model_api_failed",
     }
 }

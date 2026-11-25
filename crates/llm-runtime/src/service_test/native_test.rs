@@ -237,9 +237,7 @@ async fn native_hq_unknown_400_retires_tbc_only_after_gb_and_jk_are_known_false(
     assert_eq!(transport.seen_count(), 2);
     assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
     assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
-    assert!(scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
+    assert!(bedrock_tbc_state(&scope).beta_rejected);
 }
 
 #[tokio::test]
@@ -298,9 +296,7 @@ async fn native_hq_known_error_keeps_tbc_when_generic_claim_matches() {
         &transport.seen_headers(0),
         "thinking-binding-controls-2026-08-01"
     ));
-    assert!(!scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
+    assert!(!bedrock_tbc_state(&scope).beta_rejected);
 }
 
 #[tokio::test]
@@ -365,9 +361,7 @@ async fn native_hq_n_b_refusal_fallback_target_keeps_tbc() {
         &transport.seen_headers(0),
         "thinking-binding-controls-2026-08-01"
     ));
-    assert!(!scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
+    assert!(!bedrock_tbc_state(&scope).beta_rejected);
 }
 
 #[tokio::test]
@@ -386,7 +380,7 @@ async fn native_tbc_h3_fact_and_final_authentication_share_one_selected_key_snap
 
     let mut prepared = service
         .client
-        .prepare_on(&request, transport)
+        .prepare_on(&request, transport, Default::default())
         .await
         .expect("preparation captures the selected key");
     assert_eq!(prepared.native_tbc_first_party_h3, Some(false));
@@ -416,6 +410,9 @@ async fn native_tbc_h3_fact_and_final_authentication_share_one_selected_key_snap
 async fn model_validation_request_is_minimal_and_never_retries() {
     use lingxi_llm_client::protocol::{CacheBreakpoint, CachePosition, CacheTtl, JsonPayload};
 
+    // Dreamy Frost adds v2d even to auxiliary first-party requests. This
+    // default-off assertion must not overlap the dispatch matrix's flag writes.
+    let _dispatch_flags = cedar_lattice_read();
     let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _restore = CacheEnvRestore::clear(&["CLAUDE_CODE_EXTRA_BODY"]);
     for extra in [
@@ -638,7 +635,7 @@ async fn ordinary_context_1m_default_first_party_refusal_is_terminal_without_lat
 }
 
 #[tokio::test]
-async fn ordinary_context_1m_generic_refusal_retries_when_sticky_tbc_is_on_u6_route() {
+async fn foundry_context_1m_retry_does_not_inherit_tbc_from_bedrock() {
     let _cache_env_lock = CACHE_ENV_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -667,11 +664,35 @@ async fn ordinary_context_1m_generic_refusal_retries_when_sticky_tbc_is_on_u6_ro
         model,
         transport.clone(),
     );
-    // This conversation has prior Native `sent` membership from an earlier
-    // eligible route. Foundry is in U6 but cannot newly register via sl;
-    // it still preserves `kc=J_(nt,uB)` for this request.
     let scope = crate::thinking_scope::ThinkingRecoveryScope::default();
-    scope.mark_native_thinking_binding_controls_beta_sent();
+    let bedrock_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+    let bedrock = make_adapter_for_protocol_with_transport(
+        ProtocolFamily::BedrockClaude,
+        ProviderId::BedrockClaude,
+        "https://bedrock.example.test",
+        "bedrock",
+        model,
+        bedrock_transport.clone(),
+    );
+    let mut previous = LlmRequest::new(model).with_user_text("Previous turn");
+    previous.profile = Some("bedrock".into());
+    previous.execution.thinking_recovery_scope = Some(scope.clone());
+    previous.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+        mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+        ..Default::default()
+    });
+    bedrock
+        .execute_non_stream_request(
+            previous,
+            crate::NonStreamingRequestClass::Main,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(request_header_has_beta(
+        &bedrock_transport.seen_headers(0),
+        "thinking-binding-controls-2026-08-01"
+    ));
     let mut request = LlmRequest::new(model).with_user_text("Hi");
     request.profile = Some("foundry".into());
     request.execution.thinking_recovery_scope = Some(scope.clone());
@@ -691,18 +712,15 @@ async fn ordinary_context_1m_generic_refusal_retries_when_sticky_tbc_is_on_u6_ro
 
     let tbc = "thinking-binding-controls-2026-08-01";
     assert_eq!(transport.seen_count(), 2);
-    assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
+    assert!(!request_header_has_beta(&transport.seen_headers(0), tbc));
     assert!(request_header_has_beta(
         &transport.seen_headers(0),
         crate::model::betas::CONTEXT_1M
     ));
-    assert!(request_header_has_beta(&transport.seen_headers(1), tbc));
+    assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
     assert!(!request_header_has_beta(
         &transport.seen_headers(1),
         crate::model::betas::CONTEXT_1M
-    ));
-    assert!(!scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
     ));
     assert!(scope.context_1m_refused(&native_foundry_model_key(
         &model.encode_utf16().collect::<Vec<_>>()
@@ -779,10 +797,8 @@ async fn ordinary_context_1m_generic_refusal_prefers_tbc_qee_then_retires_only_t
         &transport.seen_body(1),
         crate::model::betas::CONTEXT_1M
     ));
-    assert!(scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
-    assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+    assert!(bedrock_tbc_state(&scope).beta_rejected);
+    assert!(!bedrock_tbc_state(&scope).beta_sent);
     assert!(!scope.context_1m_refused(&model.encode_utf16().collect::<Vec<_>>()));
 
     let mut same_conversation = LlmRequest::new(model).with_user_text("Next");
@@ -886,10 +902,8 @@ async fn late_tbc_refusal_after_context_reset_does_not_poison_fresh_request() {
     assert_eq!(transport.seen_count(), 2);
     assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
     assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
-    assert!(!scope.native_thinking_binding_controls_state().beta_sent);
-    assert!(!scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
+    assert!(!bedrock_tbc_state(&scope).beta_sent);
+    assert!(!bedrock_tbc_state(&scope).beta_rejected);
 
     let mut fresh_request = LlmRequest::new(model).with_user_text("After reset");
     fresh_request.profile = Some("bedrock".into());
@@ -908,10 +922,8 @@ async fn late_tbc_refusal_after_context_reset_does_not_poison_fresh_request() {
         .expect("a fresh query can register TBC in the reset conversation");
     assert_eq!(transport.seen_count(), 3);
     assert!(request_header_has_beta(&transport.seen_headers(2), tbc));
-    assert!(scope.native_thinking_binding_controls_state().beta_sent);
-    assert!(!scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
+    assert!(bedrock_tbc_state(&scope).beta_sent);
+    assert!(!bedrock_tbc_state(&scope).beta_rejected);
 }
 
 #[tokio::test]
@@ -1085,9 +1097,14 @@ async fn native_tbc_first_party_uses_separate_tf_kxt_and_sl_facts() {
         .expect("the canonical tf/KXt path sends the planned Native beta");
     assert!(request_header_has_beta(&transport.seen_headers(0), tbc));
     assert!(
-        canonical_scope
-            .native_thinking_binding_controls_state()
-            .beta_sent
+        fixture_tbc_state(
+            &canonical_scope,
+            ProviderId::AnthropicFirstParty,
+            "canonical-profile",
+            "https://api.anthropic.com",
+            ProtocolFamily::AnthropicMessages
+        )
+        .beta_sent
     );
 
     // With the env absent, tf/sl are true but KXt still depends on
@@ -1114,9 +1131,14 @@ async fn native_tbc_first_party_uses_separate_tf_kxt_and_sl_facts() {
         .expect("an unresolved KXt fact does not prevent the ordinary request");
     assert!(!request_header_has_beta(&transport.seen_headers(1), tbc));
     assert!(
-        !default_scope
-            .native_thinking_binding_controls_state()
-            .beta_sent
+        !fixture_tbc_state(
+            &default_scope,
+            ProviderId::AnthropicFirstParty,
+            "native-default",
+            "https://api.anthropic.com",
+            ProtocolFamily::AnthropicMessages
+        )
+        .beta_sent
     );
 
     // The captured Native assume setting can make sl true while a custom
@@ -1156,9 +1178,14 @@ async fn native_tbc_first_party_uses_separate_tf_kxt_and_sl_facts() {
         .expect("a source endpoint assumption does not fabricate KXt");
     assert!(!request_header_has_beta(&transport.seen_headers(2), tbc));
     assert!(
-        !assumed_scope
-            .native_thinking_binding_controls_state()
-            .beta_sent
+        !fixture_tbc_state(
+            &assumed_scope,
+            ProviderId::AnthropicFirstParty,
+            "assumed-proxy",
+            "https://proxy.example.test",
+            ProtocolFamily::AnthropicMessages
+        )
+        .beta_sent
     );
 }
 
@@ -2579,9 +2606,7 @@ async fn native_295_mctc_model_unsupported_retries_and_latches_only_canonical_mo
         .expect("different model remains eligible");
     assert!(other_model_transport.seen_headers(0)["anthropic-beta"].contains(mctc));
 
-    // Model support is provider-route scoped as well as canonical-model
-    // scoped in this multi-provider runtime. A direct Anthropic refusal
-    // must not suppress the same model on Foundry.
+    // Foundry cannot encode tool-change rows even with explicit host feature gates.
     let foundry_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
     let foundry_service = make_adapter_for_protocol_with_transport(
         ProtocolFamily::FoundryClaude,
@@ -2609,8 +2634,8 @@ async fn native_295_mctc_model_unsupported_retries_and_latches_only_canonical_mo
     foundry_service
         .messages_create(foundry_request)
         .await
-        .expect("same canonical model remains eligible on another provider route");
-    assert!(foundry_transport.seen_headers(0)["anthropic-beta"].contains(mctc));
+        .expect("Foundry accepts the request without tool-change betas");
+    assert!(!foundry_transport.seen_headers(0)["anthropic-beta"].contains(mctc));
 }
 
 #[tokio::test]
@@ -2686,7 +2711,7 @@ async fn native_295_mctc_and_inline_beta_gates_are_independent_in_main_headers()
 }
 
 #[tokio::test]
-async fn native_295_mctc_and_inline_beta_gates_apply_to_foundry_main_route() {
+async fn foundry_main_route_excludes_tool_changes_and_inline_tools() {
     use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
     use lingxi_llm_client::NativeAnthropicRequestContext;
 
@@ -2711,10 +2736,7 @@ async fn native_295_mctc_and_inline_beta_gates_apply_to_foundry_main_route() {
 
     let mctc = Beta::MidConversationToolChanges.header();
     let inline_tools = "inline-tools-2026-09-15";
-    for (profile, inline_gate, expect_inline) in [
-        ("foundry-mctc-only", false, false),
-        ("foundry-inline-on", true, true),
-    ] {
+    for (profile, inline_gate) in [("foundry-mctc-only", false), ("foundry-inline-on", true)] {
         let model = "claude-sonnet-5-5-r62-foundry-feature-gate";
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let service = make_adapter_for_protocol_with_transport(
@@ -2726,6 +2748,11 @@ async fn native_295_mctc_and_inline_beta_gates_apply_to_foundry_main_route() {
             profile,
             model,
             transport.clone(),
+        );
+        assert!(!service.supports_native_mid_conversation_system(model, Some(profile)));
+        assert_eq!(
+            service.native_mid_conversation_tool_change_supported(model, Some(profile)),
+            Some(false)
         );
         let mut request = crate::MessagesCreateRequest::new(
             model,
@@ -2748,12 +2775,8 @@ async fn native_295_mctc_and_inline_beta_gates_apply_to_foundry_main_route() {
             .expect("the selected Foundry feature gates do not prevent dispatch");
 
         let header = &transport.seen_headers(0)["anthropic-beta"];
-        assert!(header.contains(mctc), "{profile}: {header}");
-        assert_eq!(
-            header.contains(inline_tools),
-            expect_inline,
-            "{profile}: {header}"
-        );
+        assert!(!header.contains(mctc), "{profile}: {header}");
+        assert!(!header.contains(inline_tools), "{profile}: {header}");
     }
 }
 
@@ -3176,7 +3199,7 @@ async fn native_295_tty_main_request_projections_match_prepared_host_calls() {
             .get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
             .and_then(serde_json::Value::as_str)
             .is_some_and(crate::structured_output::bool_value);
-        let mctc_route = matches!(input["provider"].as_str(), Some("firstParty" | "foundry"));
+        let mctc_route = first_party;
         let afk_route = match input["provider"].as_str() {
             // Native Gyo requires vh() for direct Anthropic, including its
             // experimental-beta gate.
@@ -3277,12 +3300,92 @@ async fn native_295_tty_main_request_projections_match_prepared_host_calls() {
         let expected_beta_line = case["observed"]["anthropic_beta_header_line"]
             .as_str()
             .expect("exact captured beta header line");
+        // The Foundry codec accepts only effort-only system rows. All other
+        // recorded beta tokens and their order still match the Native request.
+        let expected_beta_line = if first_party {
+            expected_beta_line.to_owned()
+        } else {
+            expected_beta_line.replace("mid-conversation-tool-changes-2026-07-01,", "")
+        };
         assert_eq!(
             actual_beta_line.as_deref(),
             Some(expected_beta_line.as_bytes()),
             "row {matrix_row}: exact Native beta header bytes"
         );
     }
+}
+
+#[tokio::test]
+async fn resumed_system_effort_preserves_text_and_options_on_success() {
+    use lingxi_llm_client::protocol::{ConversationMessage as WireMessage, MessageRole};
+    use lingxi_llm_client::providers::anthropic::types::{
+        AnthropicClearAt, AnthropicMessageEffort, AnthropicMessageOptions,
+    };
+
+    let _guard = CACHE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _env = CacheEnvRestore::clear(&[
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        branding::EFFORT_LEVEL_ENV,
+    ]);
+    let model = "claude-sonnet-5-5";
+    let url = "https://api.anthropic.com";
+    let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+    let service = make_adapter_for_protocol_with_transport(
+        ProtocolFamily::AnthropicMessages,
+        ProviderId::AnthropicFirstParty,
+        url,
+        "anthropic",
+        model,
+        transport.clone(),
+    );
+    let mut request = service
+        .build_request(
+            model,
+            Some("anthropic"),
+            None,
+            vec![text_user_msg("Continue")],
+            vec![],
+            false,
+            None,
+            false,
+            PromptCacheQuerySource::Unspecified,
+        )
+        .unwrap();
+    let text = request.input.messages[0].content.clone();
+    request.input.messages.truncate(1);
+    request.input.messages.push(
+        WireMessage {
+            role: MessageRole::System,
+            content: text,
+            native_options: Vec::new(),
+        }
+        .with_anthropic_options(AnthropicMessageOptions {
+            clear_at: Some(AnthropicClearAt::Never),
+            effort: Some(AnthropicMessageEffort::High),
+        }),
+    );
+    request.set_effort(Some(serde_json::json!("low"))).unwrap();
+    let response = service
+        .execute_non_stream_request(
+            request,
+            crate::NonStreamingRequestClass::Main,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.per_turn_effort().unwrap().string_at(""),
+        Some("low")
+    );
+    let body = request_body_value(&transport.seen_body(0));
+    let rows = body["messages"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1]["content"][0]["text"], "Continue");
+    assert_eq!(rows[1]["clear_at"], "never");
+    assert_eq!(rows[1]["output_config"]["effort"], "low");
+    assert_eq!(body["output_config"]["effort"], "low");
 }
 
 #[tokio::test]
@@ -3370,34 +3473,36 @@ async fn foundry_effort_from_successful_response_replays_as_history_marker() {
     service.set_session_effort(lingxi_core::host::effort_table::SessionEffort::Level(
         serde_json::json!("medium"),
     ));
+    let mut second = crate::MessagesCreateRequest::new(
+        "claude-sonnet-5-5",
+        Some("foundry-claude"),
+        None,
+        vec![
+            first_user,
+            prior_assistant,
+            lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "second turn".into(),
+            ),
+        ],
+        vec![],
+    );
+    second.opts.effort = Some(serde_json::json!("low"));
     let second_response = service
-        .messages_create(crate::MessagesCreateRequest::new(
-            "claude-sonnet-5-5",
-            Some("foundry-claude"),
-            None,
-            vec![
-                first_user,
-                prior_assistant,
-                lingxi_core::types::ConversationMessage::user(
-                    lingxi_core::types::MessageId::new(),
-                    "second turn".into(),
-                ),
-            ],
-            vec![],
-        ))
+        .messages_create(second)
         .await
         .expect("second Foundry main response");
     assert_eq!(
         second_response
             .per_turn_effort()
             .and_then(|effort| effort.string_at("").map(str::to_owned)),
-        Some("medium".into())
+        Some("low".into())
     );
 
     let seen = transport.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     let second_body = request_body_value(&seen[1].body_json);
-    assert_eq!(second_body["output_config"]["effort"], "medium");
+    assert_eq!(second_body["output_config"]["effort"], "low");
     let markers = second_body["messages"]
         .as_array()
         .expect("encoded Foundry message history")
@@ -3416,7 +3521,7 @@ async fn foundry_effort_from_successful_response_replays_as_history_marker() {
         markers,
         vec![
             (1, "system".to_owned(), "high".to_owned()),
-            (4, "system".to_owned(), "medium".to_owned()),
+            (4, "system".to_owned(), "low".to_owned()),
         ],
         "successful response effort stays attached to its historical turn"
     );

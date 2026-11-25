@@ -42,6 +42,7 @@ pub struct AppAgentSession {
 pub struct AppAgentChatResume {
     pub chat_id: String,
     pub session_id: SessionId,
+    pub(crate) web_search_budget: tool_web::WebSearchBudget,
     pub transcript_path: PathBuf,
     pub replayed: Option<orchestrator::resume::ReplayedSession>,
     pub writer: Arc<session::jsonl::JsonlWriter>,
@@ -493,7 +494,16 @@ impl AppAgentFactory {
         let mut tools = ToolRegistry::new();
         tool_file::register_all(&mut tools, context.clone());
         tool_shell_mobile::register_all(&mut tools, context.clone());
-        tool_web::register_all(&mut tools, context.clone(), None);
+        let web_search_budget = chat
+            .as_ref()
+            .map(|chat| chat.web_search_budget.clone())
+            .unwrap_or_default();
+        tool_web::register_all_with_search_budget(
+            &mut tools,
+            context.clone(),
+            None,
+            web_search_budget,
+        );
         // Persistent Chat requests declare their fixed authorized tools inline.
         // They must be self-contained after cold restore and cannot depend on
         // ordinary Chat's native tool-reference discovery state. Other App
@@ -1130,6 +1140,7 @@ mod history_model_capability_tests {
             AppAgentChatResume {
                 chat_id,
                 session_id,
+                web_search_budget: Default::default(),
                 transcript_path: path,
                 replayed: Some(replayed),
                 writer,
@@ -1236,9 +1247,11 @@ mod history_model_capability_tests {
             .unwrap();
         let (factory, transport) = ready_factory(root.path());
         let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
+        let web_search_budget = tool_web::WebSearchBudget::default();
         let fresh = AppAgentChatResume {
             chat_id: chat_id.clone(),
             session_id,
+            web_search_budget: web_search_budget.clone(),
             transcript_path: path.clone(),
             replayed: None,
             writer: writer.clone(),
@@ -1303,6 +1316,7 @@ mod history_model_capability_tests {
         let resumed = AppAgentChatResume {
             chat_id,
             session_id,
+            web_search_budget,
             transcript_path: path,
             replayed: Some(replayed),
             writer,

@@ -565,7 +565,7 @@ async fn scope_quota_validates_real_sdk_wire_limits_for_supported_protocols() {
         service.clamp_scope_output(&mut request, false).unwrap();
         let mut prepared = service
             .client
-            .prepare_on(&request, service.transport.clone())
+            .prepare_on(&request, service.transport.clone(), Default::default())
             .await
             .unwrap();
         service.client.seal_prepared(&mut prepared).await.unwrap();
@@ -591,7 +591,7 @@ async fn scope_quota_never_drops_the_limit_for_unsupported_subscription_routes()
         // Prove this is a valid subscription fixture before adding the cap.
         let mut uncapped = service
             .client
-            .prepare_on(&request, service.transport.clone())
+            .prepare_on(&request, service.transport.clone(), Default::default())
             .await
             .unwrap();
         service.client.seal_prepared(&mut uncapped).await.unwrap();
@@ -599,7 +599,7 @@ async fn scope_quota_never_drops_the_limit_for_unsupported_subscription_routes()
         let result = async {
             let mut prepared = service
                 .client
-                .prepare_on(&request, service.transport.clone())
+                .prepare_on(&request, service.transport.clone(), Default::default())
                 .await?;
             service.client.seal_prepared(&mut prepared).await?;
             service.validate_scope_output(&prepared)
@@ -714,7 +714,7 @@ async fn registered_gemini_partial_usage_is_owned_before_content_and_not_promote
             while let Some(event) = stream.next().await {
                 match event {
                     Ok(_) => {}
-                    Err(LlmError::StreamInterrupted { .. }) => interrupted = true,
+                    Err(error) if error.is_missing_stream_terminal() => interrupted = true,
                     Err(error) => panic!("unexpected stream error: {error:?}"),
                 }
             }

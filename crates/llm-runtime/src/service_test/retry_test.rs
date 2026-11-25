@@ -1,5 +1,34 @@
 use super::*;
 
+#[tokio::test]
+async fn successful_response_over_limit_is_terminal_with_retries_available() {
+    let limit_error = LlmError::ResponseBodyLimitExceeded {
+        status: 200,
+        request_id: Some("accepted-request".into()),
+        limit_bytes: 64 * 1024 * 1024,
+    };
+    let transport = FakeTransport::sequence(vec![
+        FakeResponse::Err(limit_error.clone()),
+        FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+    ]);
+    let mut service = make_request_adapter(transport.clone());
+    service.settings_max_retries = Some(2);
+    service.settings_backoff_ms = Some(1);
+    let error = service
+        .messages_create(MessagesCreateRequest::new(
+            "claude-opus-4-6",
+            Some("anthropic"),
+            None,
+            vec![text_user_msg("large output")],
+            Vec::new(),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error, limit_error);
+    assert_eq!(error.http_status(), Some(200));
+    assert_eq!(transport.seen_count(), 1);
+}
+
 /// Per-model fallback entry wins over global fallback_model.
 ///
 /// Uses `claude-opus-4-6` as primary (is_non_custom_opus = true → allow_fallback
@@ -126,7 +155,7 @@ async fn global_fallback_used_when_no_per_model_entry() {
 ///
 /// `fallback_overrides` keys are keyed by the display model; if the request
 /// arrives as an alias (e.g. `"claude"` instead of `"claude-sonnet-4-20250514"`)
-/// the lookup must normalize via `alias_to_display` before probing the map.
+/// the lookup uses the resolved route's display model.
 ///
 /// RED on the old code (raw model probe skips the per-model entry when an
 /// alias is used); GREEN after the alias normalization fix.
@@ -154,7 +183,7 @@ async fn per_model_fallback_fires_via_alias() {
 
     let adapter = make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
-    // Request via ALIAS — the alias_to_display map must normalize this to
+    // The selected route must normalize this alias to
     // "claude-sonnet-4-20250514" before the fallback_overrides lookup.
     let result = adapter
         .messages_create({
@@ -290,6 +319,115 @@ async fn two_entry_chain_walks_both_entries() {
         transport.seen_body_model(6).as_deref(),
         Some(c1),
         "request 6 must use chain[1]"
+    );
+}
+
+#[tokio::test]
+async fn configured_fallback_uses_selected_source_and_exact_destination_profile() {
+    let _dispatch_off = cedar_lattice_read();
+    let overloaded = serde_json::json!({
+        "type": "error",
+        "error": {"type": "overloaded_error", "message": "overloaded"}
+    });
+    let transport = FakeTransport::sequence(vec![
+        FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+        FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+        FakeResponse::Ok(ProviderResponse::json(529, overloaded)),
+        FakeResponse::Ok(ProviderResponse::json(200, routing_ok_response_json())),
+    ]);
+    let fixture = make_adapter_with_routing(transport.clone(), Default::default(), None, Some(0));
+    let mut primary = fixture.client().configuration().providers.remove(0);
+    primary.profile_name = "primary".into();
+    primary.base_url = "https://primary.invalid".into();
+    for model in &mut primary.models {
+        model.metadata.max_output_tokens = Some(4096);
+    }
+    let mut other_source = primary.clone();
+    other_source.profile_name = "other-source".into();
+    other_source.base_url = "https://other-source.invalid".into();
+    let shared_alias = other_source
+        .models
+        .iter_mut()
+        .find(|model| model.aliases.iter().any(|alias| alias == "claude"))
+        .unwrap();
+    shared_alias.display_model = "other-display".into();
+    let fallback_model = "claude-haiku-4-20250307";
+    let mut destination = primary.clone();
+    destination.profile_name = "destination".into();
+    destination.base_url = "https://destination.invalid".into();
+    destination
+        .models
+        .retain(|model| model.request_model == fallback_model);
+    let provider_id = destination.provider_id.clone();
+    let client = ModelRuntime::from_config(ClientConfig {
+        providers: vec![primary, other_source, destination],
+    })
+    .unwrap();
+    let service = ApiService::new_with_routing(
+        Arc::new(client),
+        transport.clone(),
+        SubscriberState::default(),
+        UserAgentEnv::default(),
+        "test",
+        None,
+        None,
+        None,
+        std::collections::BTreeMap::from([("other-display".into(), vec!["wrong-target".into()])]),
+        None,
+        Some(0),
+    )
+    .with_configured_fallbacks(std::collections::BTreeMap::from([(
+        "primary/claude-sonnet-4-20250514".into(),
+        vec![crate::ConfiguredFallbackTarget::Profile {
+            provider_id,
+            profile_name: "destination".into(),
+            model: fallback_model.into(),
+        }],
+    )]));
+
+    let mut request = LlmRequest::new("claude").with_user_text("prompt");
+    request.profile = Some("primary".into());
+    request.input.max_tokens = Some(512);
+    let response = service
+        .execute_non_stream_request(
+            request,
+            NonStreamingRequestClass::Main,
+            NonStreamingRetryOptions {
+                fallback: FallbackPolicy::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let budget = response
+        .usage
+        .provider_metadata
+        .payload_at("/llm_client/output_budget")
+        .expect("fallback execution records its budget");
+    assert_eq!(budget.string_at("/profile").as_deref(), Some("destination"));
+    assert_eq!(budget.string_at("/model").as_deref(), Some(fallback_model));
+    assert_eq!(
+        service
+            .next_output_budget(fallback_model, Some("destination"), &response.usage)
+            .unwrap(),
+        Some(1024)
+    );
+    assert_eq!(
+        service
+            .next_output_budget("claude", Some("primary"), &response.usage)
+            .unwrap(),
+        None
+    );
+    let requests = transport.seen.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[..3]
+        .iter()
+        .all(|request| request.url.starts_with("https://primary.invalid/")));
+    assert!(requests[3].url.starts_with("https://destination.invalid/"));
+    assert_eq!(
+        requests[3].body_json.string_at("/model").as_deref(),
+        Some(fallback_model)
     );
 }
 

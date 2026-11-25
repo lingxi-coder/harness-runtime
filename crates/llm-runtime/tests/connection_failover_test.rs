@@ -85,6 +85,11 @@ impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
     ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
         let status = self.next_status(&request.url);
         Box::pin(async move {
+            if status == 0 {
+                return Err(LlmError::Transport {
+                    message: "fixture response interrupted".into(),
+                });
+            }
             Ok(ProviderResponse {
                 status,
                 headers: BTreeMap::new(),
@@ -95,6 +100,7 @@ impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
                             .as_json_source()
                             .find("cache_control")
                             .is_none());
+                        assert_eq!(request.body_json.string_at("/model").as_deref(), Some("shared-model"));
                         serde_json::json!({"id":"chat_1","model":"shared-model","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}})
                     } else if status == 200 {
                         ok_body()
@@ -115,6 +121,11 @@ impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
         // Fail the CONNECT phase with a status, exactly like a real 429 on open.
         let status = self.next_status(&request.url);
         Box::pin(async move {
+            if status == 0 {
+                return Err(LlmError::Transport {
+                    message: "fixture stream interrupted".into(),
+                });
+            }
             if status == 200 {
                 // Terminal and NOT a failover trigger, so the drive stops the
                 // moment the good connection is reached: the recorded URL list
@@ -446,21 +457,78 @@ async fn cross_protocol_model_fallback_rebuilds_history_cache_policy() {
         None,
     );
     api.messages_create({
-        let mut request = messages_request("claude-opus-4-6", None);
+        let mut request = messages_request("claude-opus-4-6", Some("grouped:intl"));
+        request.opts.model_source = Some("legacy-model-on-primary".into());
         request.system = Some(llm_runtime::SystemPromptInput::source_vector(
             vec!["cached system".into()],
             None,
             None,
         ));
-        request.opts.fallback = match Some("shared-model") {
-            Some(models) => llm_runtime::FallbackPolicy::from_models_csv(models),
-            None => llm_runtime::FallbackPolicy::Configured,
-        };
+        request.opts.fallback =
+            llm_runtime::FallbackPolicy::from_models_csv("grouped:cn/shared-model");
         request
     })
     .await
     .expect("cross-protocol model fallback must succeed");
     assert_eq!(transport.connections(), vec!["intl", "intl", "intl", "cn"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stateful_connection_receives_only_one_attempt_after_failover() {
+    for stream in [false, true] {
+        let transport = ScriptedTransport::new(vec![429, 0, 0, 0]);
+        let mut primary = connection("intl", INTL, 0);
+        let mut sibling = connection("cn", CN, 1);
+        sibling.protocol = ProtocolFamily::GeminiInteractions;
+        for profile in [&mut primary, &mut sibling] {
+            profile.provider_id = ProviderId::Custom {
+                name: "fixture-provider".into(),
+            };
+            profile.auth = AuthStrategy::ApiKey;
+            profile.credential = CredentialConfig::Static {
+                id: "fixture".into(),
+            };
+        }
+        let client = ModelRuntime::from_config(ClientConfig {
+            providers: vec![primary, sibling],
+        })
+        .unwrap()
+        .with_credential_provider(Arc::new(llm_runtime::StaticCredentialProvider::new(
+            llm_runtime::Credential::ApiKey("fixture-only".into()),
+        )));
+        let api = ApiService::new(
+            Arc::new(client),
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        let mut request =
+            llm_runtime::LlmRequest::new("shared-model").with_user_text("fixture prompt");
+        request.input.max_tokens = Some(512);
+        let error = if stream {
+            api.stream_request(request)
+                .await
+                .err()
+                .expect("stream failed to open")
+        } else {
+            api.execute_non_stream_request(
+                request,
+                llm_runtime::NonStreamingRequestClass::Main,
+                Default::default(),
+            )
+            .await
+            .unwrap_err()
+        };
+        assert!(
+            matches!(error.classification_source(), LlmError::Transport { .. }),
+            "{error:?}"
+        );
+        assert_eq!(transport.connections(), vec!["intl", "cn"]);
+        assert!(transport.urls.lock().unwrap()[1].contains("/interactions"));
+    }
 }
 
 // These cases exercise the real ApiService preparation, single dispatch,
@@ -554,6 +622,163 @@ fn account_runtime(
     .unwrap()
     .with_account_pool(pool.clone());
     (runtime, pool)
+}
+
+#[tokio::test]
+async fn managed_account_alias_cannot_substitute_a_different_wire_model() {
+    for (allow_metered, wire_model) in [
+        (false, "shared-model"),
+        (true, "shared-model"),
+        (false, "other-wire"),
+        (true, "other-wire"),
+    ] {
+        let (runtime, pool) =
+            account_runtime(Arc::new(AccountTestClock::default()), Some(allow_metered));
+        let mut config = runtime.configuration();
+        let candidate = &mut config.providers[1];
+        candidate.pricing.billing_mode = Some(lingxi_core::host::ModelBillingMode::Subscription);
+        candidate.models[0].request_model = wire_model.into();
+        let mut wire = runtime
+            .provider_service_profiles()
+            .into_iter()
+            .find(|profile| profile.profile_name == candidate.profile_name)
+            .unwrap();
+        wire.models[0].request_model = wire_model.into();
+        wire.models[0].billing_mode = Some(lingxi_llm_client::protocol::BillingMode::PerToken);
+        candidate.wire_profile = Some(wire);
+        let runtime = ModelRuntime::from_config(config)
+            .unwrap()
+            .with_account_pool(pool);
+        let mut coordinator = runtime
+            .account_coordinator("shared-model", Some("account.a"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            coordinator.select().await.unwrap().profile_name,
+            "account.a"
+        );
+        assert!(coordinator.failed(&LlmError::ModelUnavailable).await);
+        if allow_metered && wire_model == "shared-model" {
+            assert_eq!(
+                coordinator.select().await.unwrap().profile_name,
+                "account.b"
+            );
+        } else {
+            assert!(matches!(
+                coordinator.select().await,
+                Err(LlmError::AllAccountsUnavailable { .. })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn typed_requests_build_and_dispatch_from_one_refreshed_account_snapshot() {
+    use lingxi_core::host::provider_accounts::AccountSnapshot;
+    use llm_runtime::accounts::{
+        AccountPool, AccountPoolStore, MemoryAccountPoolStore, PoolOperation, PoolResult,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct AccountStore {
+        snapshot: AccountSnapshot,
+        reads: AtomicUsize,
+        health: MemoryAccountPoolStore,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountPoolStore for AccountStore {
+        async fn transact(&self, operation: PoolOperation) -> Result<PoolResult, String> {
+            self.health.transact(operation).await
+        }
+
+        async fn latest_snapshot(&self) -> Result<Option<AccountSnapshot>, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(self.snapshot.clone()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct AccountCatalog {
+        pool: Arc<AccountPool>,
+        new_route: ProviderProfile,
+    }
+
+    impl llm_runtime::client::ModelRuntimeSource for AccountCatalog {
+        fn current(&self, template: &ModelRuntime) -> Arc<ModelRuntime> {
+            template.with_owner_state(template)
+        }
+
+        fn rebind_accounts(&self, captured: &ModelRuntime) -> Arc<ModelRuntime> {
+            let snapshot = self.pool.snapshot();
+            let mut config = captured.configuration();
+            if snapshot
+                .accounts
+                .iter()
+                .any(|account| account.account_id == "b")
+            {
+                config.providers.push(self.new_route.clone());
+            }
+            captured
+                .reconfigured_with_account_snapshot(config, &snapshot)
+                .unwrap()
+        }
+    }
+
+    for streaming in [false, true] {
+        let clock = Arc::new(AccountTestClock::default());
+        let (base, accounts) = account_runtime(clock, None);
+        let mut config = base.configuration();
+        let mut new_route = config.providers.pop().unwrap();
+        new_route.protocol = ProtocolFamily::OpenAiChat;
+        let mut snapshot = accounts.snapshot();
+        let initial_accounts = vec![snapshot.accounts[0].clone()];
+        snapshot.config_revision += 1;
+        snapshot.accounts[1].config_revision = snapshot.config_revision;
+        let store = Arc::new(AccountStore {
+            snapshot,
+            reads: AtomicUsize::new(0),
+            health: MemoryAccountPoolStore::default(),
+        });
+        let pool = Arc::new(AccountPool::new(initial_accounts, store.clone()));
+        let runtime = ModelRuntime::from_config(config)
+            .unwrap()
+            .with_account_pool(pool.clone())
+            .with_catalog_source(Arc::new(AccountCatalog { pool, new_route }));
+        let transport = ScriptedTransport::new(vec![200]);
+        let service = ApiService::new(
+            Arc::new(runtime),
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        assert!(service
+            .protocol_for_model("shared-model", Some("account.b"))
+            .is_err());
+
+        let request = messages_request("shared-model", Some("account.b"));
+        if streaming {
+            let error = service
+                .messages_create_buffered_stream(request)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                LlmError::InvalidRequest {
+                    message: "reached-the-good-connection".into(),
+                }
+            );
+        } else {
+            service.messages_create(request).await.unwrap();
+        }
+        assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.connections(), ["cn"]);
+        assert!(transport.urls.lock().unwrap()[0].ends_with("/chat/completions"));
+    }
 }
 
 #[test]

@@ -73,22 +73,14 @@ impl ApiService {
                 &model,
             )
             .unwrap_or(true);
-        let has_tool_search = prepared
-            .provider_request
-            .body_json
-            .array_len("/tools")
-            .is_some_and(|length| {
-                (0..length).any(|index| {
-                    prepared
-                        .provider_request
-                        .body_json
-                        .array_item_at("/tools", index)
-                        .is_some_and(|tool| {
-                            tool.string_at("/name").as_deref() == Some("ToolSearch")
-                                || tool.bool_at("/defer_loading") == Some(true)
-                        })
-                })
-            });
+        let has_tool_search =
+            crate::protocol::json_array_items(&prepared.provider_request.body_json, "/tools")
+                .is_some_and(|tools| {
+                    tools.iter().any(|tool| {
+                        tool.string_at("/name").as_deref() == Some("ToolSearch")
+                            || tool.bool_at("/defer_loading") == Some(true)
+                    })
+                });
         let first_party_anthropic_route = prepared.route.protocol
             == crate::ProtocolFamily::AnthropicMessages
             && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty;
@@ -119,7 +111,7 @@ impl ApiService {
             || prepared.route.protocol == crate::ProtocolFamily::FoundryClaude)
             && prepared.anthropic_request_kind
                 == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-            && Self::has_native_per_turn_effort_marker(&prepared.provider_request.body_json);
+            && Self::has_native_per_turn_effort_marker(prepared);
         let interactive = self.interactive_session.unwrap_or_else(|| {
             !lingxi_core::host::session_flags::effective_non_interactive_session()
         });
@@ -232,21 +224,19 @@ impl ApiService {
         crate::model::betas::append_afk_mode_after_thinking_display(headers, provider, admitted);
     }
 
-    fn has_native_per_turn_effort_marker(body: &lingxi_llm_client::protocol::JsonPayload) -> bool {
-        let Some(length) = body.array_len("/messages") else {
-            return false;
-        };
-        (0..length).any(|index| {
-            body.array_item_at("/messages", index)
-                .is_some_and(|message| {
+    fn has_native_per_turn_effort_marker(prepared: &crate::PreparedLlmCall) -> bool {
+        crate::protocol::json_array_items(&prepared.provider_request.body_json, "/messages")
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
                     message.string_at("/role").as_deref() == Some("system")
-                        && message.array_len("/content") == Some(0)
+                        && (prepared.route.protocol != crate::ProtocolFamily::FoundryClaude
+                            || message.array_len("/content") == Some(0))
                         && lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
-                            &message,
+                            message,
                             &["output_config", "effort"],
                         )
                 })
-        })
+            })
     }
 
     #[cfg(test)]
@@ -553,13 +543,18 @@ impl ApiService {
                 &prepared.route.resolved_route.request_model,
             ))
         .then(|| {
-            prepared
-                .effort_policy
-                .as_ref()
-                .and_then(|policy| policy.value.as_ref())
+            crate::protocol::json_array_items(&prepared.provider_request.body_json, "/messages")?
+                .into_iter()
+                .rev()
+                .take_while(|message| message.string_at("/role").as_deref() != Some("user"))
+                .filter(|message| {
+                    message.string_at("/role").as_deref() == Some("system")
+                        && (prepared.route.protocol != crate::ProtocolFamily::FoundryClaude
+                            || message.array_len("/content") == Some(0))
+                })
+                .find_map(|message| message.payload_at("/output_config/effort"))
         })
         .flatten()
-        .filter(|_| Self::has_native_per_turn_effort_marker(&prepared.provider_request.body_json))
         .and_then(|value| {
             lingxi_core::types::utf16_json::Utf16JsonProjection::parse(value.as_json_source()).ok()
         })

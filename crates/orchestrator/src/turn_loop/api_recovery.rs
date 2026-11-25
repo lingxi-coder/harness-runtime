@@ -369,6 +369,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 request_history,
             });
         }
+        Err(error) if !error.allows_automatic_replay() => return Err(error.into()),
         Err(error) if error.context_recovery_token_gap().is_some() => {
             let gap = error.context_recovery_token_gap().expect("context failure");
             if matches!(
@@ -617,7 +618,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             request_history,
                         });
                     }
-                    Err(error) if error.context_recovery_token_gap().is_some() => {
+                    Err(error)
+                        if error.allows_automatic_replay()
+                            && error.context_recovery_token_gap().is_some() =>
+                    {
                         if matches!(
                             error.classification_source(),
                             LlmError::InputBudgetExceeded { .. }
@@ -928,7 +932,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             request_history,
                         });
                     }
-                    Err(error) if error.context_recovery_token_gap().is_some() => {
+                    Err(error)
+                        if error.allows_automatic_replay()
+                            && error.context_recovery_token_gap().is_some() =>
+                    {
                         if matches!(
                             error.classification_source(),
                             LlmError::InputBudgetExceeded { .. }

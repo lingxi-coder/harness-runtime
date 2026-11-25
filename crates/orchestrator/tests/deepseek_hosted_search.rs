@@ -26,8 +26,8 @@ impl llm_runtime::Transport for SearchTransport {
             json!({"results":[]})
         } else {
             json!({"results":[
-                {"rerank_score":2.5,"title":"Weather","url":"https://example.com/weather","snippet":"Weather snippet","summary":"Weather summary", "content":"", "site_name":null,"site_icon":null,"date":null,"authority":3},
-                {"rerank_score":2.0,"title":"Other","url":"https://other.test/news","snippet":"Other snippet","summary":"Other summary", "content":"", "site_name":null,"site_icon":null,"date":null,"authority":1}
+                {"rerank_score":2.5,"title":"Weather","url":"https://News.Example.COM./weather","snippet":"Weather snippet","summary":"Weather summary", "content":"", "site_name":null,"site_icon":null,"date":null,"authority":3},
+                {"rerank_score":2.0,"title":"Other","url":"https://anotherexample.com/news","snippet":"Other snippet","summary":"Other summary", "content":"", "site_name":null,"site_icon":null,"date":null,"authority":1}
             ]})
         };
         self.requests.lock().unwrap().push(request);
@@ -170,7 +170,7 @@ async fn independent_search_domains_snippets_and_empty_billing() {
     let (adapter, transport, _) =
         adapter("https://api.deepseek.com", "DEEPSEEK_ROUTE_TEST_KEY", false);
     let mut input = request("deepseek-flash");
-    input.allowed_domains = vec!["example.com".into()];
+    input.allowed_domains = vec!["EXAMPLE.COM.".into()];
     assert!(adapter.supports_request(&input));
     let (progress, _) = tokio::sync::mpsc::unbounded_channel();
     let output = adapter.search(input, progress).await.unwrap();
@@ -188,6 +188,18 @@ async fn independent_search_domains_snippets_and_empty_billing() {
     let body: serde_json::Value =
         serde_json::from_slice(&transport.requests.lock().unwrap()[0].body).unwrap();
     assert_eq!(body["query"], "武汉 天气 site:example.com");
+    let mut blocked = request("deepseek-flash");
+    blocked.blocked_domains = vec!["Example.Com.".into()];
+    let (progress, _) = tokio::sync::mpsc::unbounded_channel();
+    let output = adapter.search(blocked, progress).await.unwrap();
+    let tool_api::hosted_search::SearchResultEntry::Hit(hit) = &output.results[0] else {
+        panic!("missing remaining hit")
+    };
+    assert_eq!(hit.array_len("/content"), Some(1));
+    assert_eq!(
+        hit.string_at("/content/0/url").as_deref(),
+        Some("https://anotherexample.com/news")
+    );
     let mut empty = request("deepseek-flash");
     empty.query = "empty search".into();
     let (progress, _) = tokio::sync::mpsc::unbounded_channel();
@@ -259,4 +271,29 @@ async fn provider_errors_retain_http_status_and_timeout_without_retry() {
         assert_eq!(error.timeout, timeout);
         assert_eq!(transport.requests.lock().unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn hosted_fetch_cache_only_reuses_eligible_pages_and_preserves_provenance() {
+    let (adapter, transport, _) = adapter("https://api.deepseek.com", "ANOTHER_ACCOUNT_KEY", false);
+    let request = tool_api::HostedFetchRequest {
+        model: "deepseek-flash".into(),
+        profile: Some("deepseek".into()),
+        url: "https://example.com/article".into(),
+    };
+    let (network, first_hit) = adapter
+        .fetch_with_cache(request.clone(), true)
+        .await
+        .unwrap();
+    let (cached, hit_at) = adapter
+        .fetch_with_cache(request.clone(), true)
+        .await
+        .unwrap();
+    let (uncached, bypass_hit) = adapter.fetch_with_cache(request, false).await.unwrap();
+    assert_eq!(network.billable_requests, 1);
+    assert_eq!(cached.billable_requests, 0);
+    assert_eq!(uncached.billable_requests, 1);
+    assert_eq!(cached.content, network.content);
+    assert!(first_hit.is_none() && hit_at.is_some() && bypass_hit.is_none());
+    assert_eq!(transport.requests.lock().unwrap().len(), 2);
 }

@@ -115,17 +115,18 @@ mod subscription_rate_limit_tests {
     #[test]
     fn a_subscription_profile_fails_fast_while_an_api_key_retries() {
         use crate::service::retry::rate_limit_cannot_clear as cannot_clear;
+        use crate::AuthStrategy;
         // The credential that motivated this: ChatGPT OAuth, a plan quota.
-        assert!(cannot_clear(Some("openai-chatgpt"), "gpt-6-astra"));
+        assert!(cannot_clear(AuthStrategy::ChatGptPlan, "gpt-6-astra"));
         // The same MODEL on an API key keeps the ladder — the model is not the
         // discriminator, the credential is.
-        assert!(!cannot_clear(Some("openai"), "gpt-6-astra"));
+        assert!(!cannot_clear(AuthStrategy::ApiKey, "gpt-6-astra"));
         // Unchanged: OpenRouter's free tier, matched on the model suffix.
-        assert!(cannot_clear(Some("openrouter"), "z-ai/glm-4.6:free"));
-        assert!(!cannot_clear(Some("openrouter"), "z-ai/glm-4.6"));
+        assert!(cannot_clear(AuthStrategy::ApiKey, "z-ai/glm-4.6:free"));
+        assert!(!cannot_clear(AuthStrategy::ApiKey, "z-ai/glm-4.6"));
         // Anthropic is untouched here on purpose: its subscription is already
         // handled by the parity subscriber gate.
-        assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
-        assert!(!cannot_clear(None, "claude-opus-5"));
+        assert!(!cannot_clear(AuthStrategy::OAuthBearer, "claude-opus-5"));
+        assert!(!cannot_clear(AuthStrategy::None, "claude-opus-5"));
     }
 }

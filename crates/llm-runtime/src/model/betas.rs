@@ -724,20 +724,15 @@ fn model_betas_in(
     if ctx.per_turn_control {
         betas.push(PER_TURN_CONTROL);
     }
-    if first_party
+    if provider == Provider::Anthropic
         && ctx.request_kind
             == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
         && ctx.mid_conversation_tool_changes
     {
         betas.push(MID_CONVERSATION_TOOL_CHANGES);
-    }
-    if first_party
-        && ctx.request_kind
-            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-        && ctx.mid_conversation_tool_changes
-        && ctx.inline_tools
-    {
-        betas.push(INLINE_TOOLS_BETA);
+        if ctx.inline_tools {
+            betas.push(INLINE_TOOLS_BETA);
+        }
     }
     if ctx.effort {
         betas.push(EFFORT);
@@ -1110,8 +1105,8 @@ mod tests {
 
         let foundry_header =
             assemble_beta_header(Provider::Foundry, Endpoint::MessagesCreate, &context);
-        assert!(foundry_header.contains(MID_CONVERSATION_TOOL_CHANGES));
-        assert!(foundry_header.contains(INLINE_TOOLS_BETA));
+        assert!(!foundry_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(!foundry_header.contains(INLINE_TOOLS_BETA));
         assert!(foundry_header.contains(DANGEROUS_TOOL_USE));
 
         let side_query = BetaContext::for_model("claude-sonnet-5-5")

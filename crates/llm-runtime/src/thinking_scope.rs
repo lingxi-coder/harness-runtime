@@ -24,7 +24,7 @@ struct State {
     pending_snapshot: bool,
     stripped: bool,
     native_tool_search: NativeToolSearchState,
-    native_thinking_binding_controls: NativeThinkingBindingControlsAttempt,
+    native_thinking_binding_controls: NativeThinkingBindingControlsRoutes,
     context_1m_refused_models: HashSet<Context1mRouteKey>,
     recorder: Option<Arc<RecoveryRecorder>>,
 }
@@ -50,10 +50,68 @@ pub struct NativeThinkingBindingControlsState {
     pub beta_rejected: bool,
 }
 
+/// One conversation generation. Each physical connection and account owns its
+/// sent and rejected bits; retries keep the generation captured at query start.
+#[derive(Clone, Default)]
+pub(crate) struct NativeThinkingBindingControlsRoutes(
+    Arc<Mutex<HashMap<ThinkingRoute, NativeThinkingBindingControlsAttempt>>>,
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ThinkingRoute {
+    credential: crate::CredentialScope,
+    account: Option<crate::accounts::AccountResourceScope>,
+    epoch: u64,
+}
+
+impl ThinkingRoute {
+    fn new(
+        credential: crate::CredentialScope,
+        account: Option<crate::accounts::AccountResourceScope>,
+        legacy_epoch: u64,
+    ) -> Self {
+        let epoch = if account.is_some() { 0 } else { legacy_epoch };
+        Self {
+            credential,
+            account,
+            epoch,
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeThinkingBindingControlsRoutes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeThinkingBindingControlsRoutes")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for NativeThinkingBindingControlsRoutes {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl NativeThinkingBindingControlsRoutes {
+    pub(crate) fn attempt(
+        &self,
+        credential: crate::CredentialScope,
+        account: Option<crate::accounts::AccountResourceScope>,
+        legacy_epoch: u64,
+    ) -> NativeThinkingBindingControlsAttempt {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(ThinkingRoute::new(credential, account, legacy_epoch))
+            .or_default()
+            .clone()
+    }
+}
+
 /// Captured Native `nt` identity for one logical query. Reset replaces the
 /// active handle, so a response from an older in-flight query can mutate only
 /// the state it captured before the reset.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct NativeThinkingBindingControlsAttempt(Arc<Mutex<NativeThinkingBindingControlsState>>);
 
 impl NativeThinkingBindingControlsAttempt {
@@ -67,10 +125,13 @@ impl NativeThinkingBindingControlsAttempt {
 
     /// Register Native `yD(nt, uB)` before dispatch on this captured query.
     pub fn mark_beta_sent(&self) {
-        self.0
+        let mut state = self
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .beta_sent = true;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.beta_rejected {
+            state.beta_sent = true;
+        }
     }
 
     /// Apply Native `Wm(nt, uB)` to this captured query, never to a newer
@@ -228,51 +289,43 @@ mod beta_tests {
     }
 
     #[test]
-    fn native_tbc_planned_membership_and_rejection_reset_with_the_conversation() {
+    fn native_tbc_membership_and_rejection_follow_the_physical_account_and_reset_generation() {
         let scope = ThinkingRecoveryScope::default();
-        let same = scope.clone();
-        let next_conversation = ThinkingRecoveryScope::default();
-        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
+        let captured = scope.native_thinking_binding_controls_routes();
+        let credential =
+            crate::CredentialScope::new(crate::ProviderId::AnthropicFirstParty, "direct")
+                .with_route(
+                    "https://api.anthropic.com",
+                    crate::ProtocolFamily::AnthropicMessages,
+                );
+        let account = crate::accounts::AccountResourceScope {
+            store_scope: "store".into(),
+            account_id: "a".into(),
+            identity_generation: 1,
+        };
+        let same_route = || captured.attempt(credential.clone(), Some(account.clone()), 0);
+        let in_flight = same_route();
+        in_flight.mark_beta_sent();
+        assert!(same_route().state().beta_sent);
+        let mut other_account = account.clone();
+        other_account.account_id = "b".into();
+        let other = captured.attempt(credential.clone(), Some(other_account), 0);
+        assert_eq!(other.state(), Default::default());
+        in_flight.refuse_beta();
+        assert!(same_route().state().beta_rejected);
+        assert_eq!(other.state(), Default::default());
 
-        same.mark_native_thinking_binding_controls_beta_sent();
-        assert!(scope.native_thinking_binding_controls_state().beta_sent);
-        scope.refuse_native_thinking_binding_controls_beta();
-        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
-        assert!(scope.beta_rejected(Beta::ThinkingBindingControls));
-        assert!(
-            !next_conversation
-                .native_thinking_binding_controls_state()
-                .beta_sent
+        scope.reset_beta_rejections();
+        other.mark_beta_sent();
+        in_flight.mark_beta_sent();
+        assert!(!in_flight.state().beta_sent);
+        assert_eq!(
+            scope
+                .native_thinking_binding_controls_routes()
+                .attempt(credential, Some(account), 0)
+                .state(),
+            Default::default()
         );
-
-        scope.reset_beta_rejections();
-        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
-        assert!(!scope.beta_rejected(Beta::ThinkingBindingControls));
-    }
-
-    #[test]
-    fn late_tbc_refusal_after_reset_only_mutates_the_captured_query() {
-        let scope = ThinkingRecoveryScope::default();
-        scope.mark_native_thinking_binding_controls_beta_sent();
-        let in_flight_nt = scope.native_thinking_binding_controls_attempt();
-
-        // Compaction/reset replaces Native's active sticky-beta object while
-        // the provider response is still pending.
-        scope.reset_beta_rejections();
-
-        // The old response then completes with a definite TBC refusal. Wm
-        // applies to its captured `nt`, not the newly active conversation.
-        scope.refuse_native_thinking_binding_controls_beta_for_attempt(&in_flight_nt);
-        assert!(!in_flight_nt.state().beta_sent);
-        assert!(in_flight_nt.state().beta_rejected);
-        assert!(!scope.native_thinking_binding_controls_state().beta_sent);
-        assert!(!scope.beta_rejected(Beta::ThinkingBindingControls));
-
-        // A fresh query captures the reset state and can register TBC again.
-        let fresh_nt = scope.native_thinking_binding_controls_attempt();
-        fresh_nt.mark_beta_sent();
-        assert!(scope.native_thinking_binding_controls_state().beta_sent);
-        assert!(!scope.beta_rejected(Beta::ThinkingBindingControls));
     }
 
     #[test]
@@ -364,63 +417,37 @@ impl ThinkingRecoveryScope {
             .tool_change_header_refused = true;
     }
 
-    /// Snapshot Native's conversation `nt` membership for the TBC beta.
+    /// TBC registration and refusal on a particular connection and account in
+    /// the active conversation generation. Pooled accounts use their own
+    /// identity generation; legacy credentials use the host account epoch.
     #[must_use]
-    pub fn native_thinking_binding_controls_state(&self) -> NativeThinkingBindingControlsState {
-        self.native_thinking_binding_controls_attempt().state()
+    pub fn native_thinking_binding_controls_state(
+        &self,
+        credential: &crate::CredentialScope,
+        account: Option<&crate::accounts::AccountResourceScope>,
+        legacy_epoch: u64,
+    ) -> NativeThinkingBindingControlsState {
+        self.native_thinking_binding_controls_routes()
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&ThinkingRoute::new(
+                credential.clone(),
+                account.cloned(),
+                legacy_epoch,
+            ))
+            .map(NativeThinkingBindingControlsAttempt::state)
+            .unwrap_or_default()
     }
 
-    /// Capture the active sticky-beta object when constructing a logical
-    /// request. Later resets detach this handle from newly started requests.
-    #[must_use]
-    pub fn native_thinking_binding_controls_attempt(&self) -> NativeThinkingBindingControlsAttempt {
+    pub(crate) fn native_thinking_binding_controls_routes(
+        &self,
+    ) -> NativeThinkingBindingControlsRoutes {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .native_thinking_binding_controls
             .clone()
-    }
-
-    /// Register planned Native TBC membership before the request draft is
-    /// sealed. This mirrors `yD(nt, uB)` and is not a dispatch-success marker.
-    pub fn mark_native_thinking_binding_controls_beta_sent(&self) {
-        let state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.native_thinking_binding_controls.mark_beta_sent();
-    }
-
-    /// Apply Native `Wm(nt, uB)`: a refused TBC is removed from the sent set
-    /// and retained in the conversation rejection set.
-    pub fn refuse_native_thinking_binding_controls_beta(&self) {
-        let state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.native_thinking_binding_controls.refuse_beta();
-        state.betas.reject(
-            lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls,
-        );
-    }
-
-    /// Apply a late query refusal to its captured Native `nt`. Mirror the
-    /// rejection into the currently active shared beta state only if reset
-    /// has not replaced that identity in the meantime.
-    pub(crate) fn refuse_native_thinking_binding_controls_beta_for_attempt(
-        &self,
-        attempt: &NativeThinkingBindingControlsAttempt,
-    ) {
-        attempt.refuse_beta();
-        let state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if Arc::ptr_eq(&state.native_thinking_binding_controls.0, &attempt.0) {
-            state.betas.reject(
-                lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls,
-            );
-        }
     }
 
     pub(crate) fn context_1m_refused_for(&self, key: &Context1mRouteKey) -> bool {
@@ -462,7 +489,8 @@ impl ThinkingRecoveryScope {
     }
 
     /// Whether this conversation has observed a rejection for one of its
-    /// computed Anthropic beta headers.
+    /// conversation-wide Anthropic beta headers. For Thinking Binding Controls,
+    /// inspect `native_thinking_binding_controls_state` on the selected route.
     #[must_use]
     pub fn beta_rejected(
         &self,

@@ -350,6 +350,46 @@ async fn midstream_non_overload_preserves_explicit_zero_seed_in_owned_request() 
     assert_eq!(api.captured_seeds().await, [0]);
 }
 
+#[tokio::test]
+async fn sealed_route_veto_prevents_stream_reopen_mode_and_model_fallback() {
+    for cause in [
+        LlmError::Transport {
+            message: "connection reset".into(),
+        },
+        LlmError::ProviderInternal,
+        LlmError::Overloaded { repeated: false },
+    ] {
+        let error = LlmError::ResponseDiagnostics {
+            source: Box::new(cause),
+            route_replay_forbidden: true,
+            request_id: Some("failed-generation".into()),
+            rate_limit_message: None,
+        };
+        let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![vec![
+            Err(error),
+        ]]));
+        let api = Arc::new(MockApiClient::new(vec![fallback_response()]));
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig {
+                    fallback_model: Some("fallback".into()),
+                    ..Default::default()
+                },
+                api.clone(),
+                streaming.clone(),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
+        let _outcome = orch.run_turn_streaming("hello").await;
+        assert_eq!(streaming.captured_calls().await.len(), 1);
+        assert!(api.captured_seeds().await.is_empty());
+    }
+}
+
 /// Task 7 Step 1 (twin with LINGXI_DISABLE_NONSTREAMING_FALLBACK=1):
 /// When the env gate is set, the streaming error propagates instead of
 /// triggering the non-streaming fallback.

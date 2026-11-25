@@ -4,6 +4,9 @@ use super::*;
 fn concurrent_attempts_keep_their_own_staged_429() {
     let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
     let adapter = make_adapter(transport);
+    let binding = adapter.bind_test_rate_limit_route("anthropic", None);
+    let older_headers = adapter.observe_rate_limit_headers(Some(binding), 429);
+    let latest_headers = adapter.observe_rate_limit_headers(Some(binding), 429);
 
     // Stage: a 429 carrying a representative-claim → pending = Some(info).
     let headers = {
@@ -19,26 +22,28 @@ fn concurrent_attempts_keep_their_own_staged_429() {
         h
     };
     let older = adapter
-        .record_rate_limit_from_429_at_for_route(
+        .record_rate_limit_from_429_for_route(
             &headers,
             None,
             "claude-sonnet-4-20250514",
             None,
             ProtocolFamily::AnthropicMessages,
             "anthropic",
-            10,
+            older_headers,
         )
+        .pending
         .expect("429 stages its own observation");
     let latest = adapter
-        .record_rate_limit_from_429_at_for_route(
+        .record_rate_limit_from_429_for_route(
             &BTreeMap::new(),
             None,
             "gpt-5",
             None,
             ProtocolFamily::OpenAiResponses,
             "openai",
-            20,
+            latest_headers,
         )
+        .pending
         .expect("the second route stages a separate observation");
     adapter.promote_pending_429(Some(older), None);
     assert!(adapter.last_rate_limit_info().is_none());
@@ -47,6 +52,280 @@ fn concurrent_attempts_keep_their_own_staged_429() {
         adapter.last_raw_utilization(),
         Some(RawUtilization::default())
     );
+}
+
+#[test]
+fn admitting_a_new_quota_owner_rejects_late_responses_and_keeps_window_dedupe() {
+    let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+        200,
+        ok_response_json(),
+    )));
+    let publish = |binding, headers: &BTreeMap<String, String>| {
+        adapter.record_rate_limit_from_headers_for_route(
+            headers,
+            None,
+            ProtocolFamily::AnthropicMessages,
+            "anthropic",
+            adapter.observe_rate_limit_headers(Some(binding), 200),
+        );
+    };
+    let reset = u64::try_from(ApiService::now_ms() / 1000).unwrap() + 3600;
+    let headers = near_limit_headers("0.96", reset, None);
+    let first_a = adapter.bind_test_rate_limit_route("account.a", Some(1));
+    publish(first_a, &headers);
+    assert!(adapter.consume_pending_near_limit_wrap_up_hint());
+    assert!(adapter.last_rate_limit_info().is_some());
+    assert!(adapter.last_raw_utilization().unwrap().five_hour.is_some());
+    let old_a_429 = adapter.observe_rate_limit_headers(Some(first_a), 429);
+
+    let b = adapter.bind_test_rate_limit_route("account.b", Some(1));
+    assert!(adapter.last_rate_limit_info().is_none());
+    assert!(adapter.last_raw_utilization().is_none());
+    publish(first_a, &headers);
+    assert!(adapter.last_raw_utilization().is_none());
+    publish(b, &headers);
+    assert!(adapter.consume_pending_near_limit_wrap_up_hint());
+    publish(b, &BTreeMap::new());
+    assert!(adapter.last_rate_limit_info().is_some());
+    assert_eq!(
+        adapter.last_raw_utilization(),
+        Some(RawUtilization::default())
+    );
+
+    let new_a = adapter.bind_test_rate_limit_route("account.a", Some(2));
+    let pending = adapter
+        .record_rate_limit_from_429_for_route(
+            &headers,
+            None,
+            "claude-sonnet-4-20250514",
+            None,
+            ProtocolFamily::AnthropicMessages,
+            "anthropic",
+            old_a_429,
+        )
+        .pending;
+    adapter.promote_pending_429(pending, None);
+    assert!(adapter.last_raw_utilization().is_none());
+    publish(new_a, &headers);
+    assert!(!adapter.consume_pending_near_limit_wrap_up_hint());
+
+    adapter.account_change_observer().account_changed();
+    assert!(adapter.last_rate_limit_info().is_none());
+    publish(new_a, &headers);
+    assert!(adapter.last_raw_utilization().is_none());
+}
+
+#[tokio::test]
+async fn pooled_near_limit_hint_only_reaches_the_signing_account_once() {
+    use futures::StreamExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Debug)]
+    struct Keys(AtomicU64);
+    impl CredentialProvider for Keys {
+        fn load<'a>(
+            &'a self,
+            scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            Box::pin(async move {
+                Ok(Credential::ApiKey(format!(
+                    "synthetic-{}-{}",
+                    scope.profile_name,
+                    self.0.load(Ordering::SeqCst)
+                )))
+            })
+        }
+
+        fn load_versioned<'a>(
+            &'a self,
+            scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<crate::VersionedCredential, crate::VersionedCredentialError>>
+        {
+            Box::pin(async move {
+                Ok(crate::VersionedCredential {
+                    credential: self.load(scope).await?,
+                    credential_revision: Some(self.0.load(Ordering::SeqCst)),
+                })
+            })
+        }
+    }
+
+    const NOTE: &str = "checkpoint fixture";
+    let reset = u64::try_from(ApiService::now_ms() / 1000).unwrap() + 3600;
+    let transport = FakeStreamTransport::sequence(
+        (0..6)
+            .map(|index| FakeStreamResp::Frames {
+                status: 200,
+                headers: match index {
+                    0 => near_limit_headers("0.96", reset, None),
+                    3 | 4 => near_limit_headers("0.96", reset + 3600, None),
+                    _ => Default::default(),
+                },
+                frames: ScriptedStreamTransport::anthropic_success().frames.clone(),
+            })
+            .collect(),
+    );
+    let mut service = make_adapter(transport.clone());
+    let template = crate::builtin_presets()
+        .providers
+        .into_iter()
+        .find(|profile| profile.profile_name == "anthropic")
+        .unwrap();
+    let model = template.models[0].request_model.clone();
+    let keys = Arc::new(Keys(AtomicU64::new(1)));
+    service.client = Arc::new(crate::service::live_web_tests::pooled_runtime(
+        template,
+        keys.clone(),
+    ));
+    let notices = Arc::new(AtomicUsize::new(0));
+    for (index, profile) in [
+        "account.a",
+        "account.b",
+        "anthropic",
+        "account.a",
+        "account.a",
+        "anthropic",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Request 3 arms a fresh window. A rotation before request 4 must
+        // require new headers even though the physical account is unchanged.
+        if index == 4 {
+            keys.0.store(2, Ordering::SeqCst);
+        }
+        let notices = notices.clone();
+        let hint = (index != 0).then(|| {
+            SubagentWrapUpHint::new(NOTE, lingxi_core::types::MessageId::new(), move || {
+                notices.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { true })
+            })
+        });
+        let mut stream = service
+            .with_subagent_wrap_up(
+                hint,
+                service.stream_with_attempt_opts(
+                    &model,
+                    Some(profile),
+                    None,
+                    vec![ConversationMessage::user(
+                        lingxi_core::types::MessageId::new(),
+                        "hello".into(),
+                    )],
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        assert_eq!(
+            transport.seen_body(index).as_json_source().contains(NOTE),
+            matches!(index, 2 | 5)
+        );
+        let headers = transport.seen_headers(index);
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("x-api-key"))
+                .map(|(_, v)| v.as_str()),
+            Some(match index {
+                1 => "synthetic-account.b-1",
+                4 | 5 => "synthetic-account.a-2",
+                _ => "synthetic-account.a-1",
+            })
+        );
+    }
+    assert_eq!(notices.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unmanaged_key_rotation_rebinds_the_same_quota_route() {
+    #[derive(Debug)]
+    struct RotatingKey(Mutex<crate::Credential>);
+
+    impl crate::CredentialProvider for RotatingKey {
+        fn load<'a>(
+            &'a self,
+            _: &'a crate::CredentialScope,
+        ) -> crate::BoxFuture<'a, Result<crate::Credential, LlmError>> {
+            Box::pin(async move { Ok(self.0.lock().unwrap().clone()) })
+        }
+    }
+
+    let reset = u64::try_from(ApiService::now_ms() / 1000).unwrap() + 3600;
+    let headerless = ProviderResponse::json(200, ok_response_json());
+    let mut near_limit = headerless.clone();
+    near_limit.headers = near_limit_headers("0.96", reset, None);
+    let mut adapter = make_adapter(FakeTransport::sequence(vec![
+        FakeResponse::Ok(near_limit.clone()),
+        FakeResponse::Ok(near_limit.clone()),
+        FakeResponse::Ok(headerless),
+        FakeResponse::Ok(near_limit),
+    ]));
+    let mut config = adapter.client.configuration();
+    config.providers[0].credential = crate::CredentialConfig::Static {
+        id: "rotating-test-key".into(),
+    };
+    let key = Arc::new(RotatingKey(Mutex::new(crate::Credential::ApiKey(
+        "test-account-a".into(),
+    ))));
+    adapter.client = Arc::new(
+        ModelRuntime::from_config(config)
+            .unwrap()
+            .with_credential_provider(key.clone()),
+    );
+    let request = || {
+        crate::MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+
+    adapter.messages_create(request()).await.unwrap();
+    assert!(adapter.last_rate_limit_info().is_some());
+    assert!(adapter.consume_pending_near_limit_wrap_up_hint());
+    adapter.messages_create(request()).await.unwrap();
+    assert!(!adapter.consume_pending_near_limit_wrap_up_hint());
+
+    *key.0.lock().unwrap() = crate::Credential::ApiKey("test-account-b".into());
+    adapter.messages_create(request()).await.unwrap();
+    assert!(adapter.last_rate_limit_info().is_none());
+    assert_eq!(
+        adapter.last_raw_utilization(),
+        Some(RawUtilization::default())
+    );
+    assert!(!adapter.consume_pending_near_limit_wrap_up_hint());
+
+    adapter.messages_create(request()).await.unwrap();
+    assert!(adapter.consume_pending_near_limit_wrap_up_hint());
+}
+
+#[test]
+fn pending_near_limit_hint_expires_before_the_next_response() {
+    let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+        200,
+        ok_response_json(),
+    )));
+    let reset = u64::try_from(ApiService::now_ms() / 1000).unwrap() + 3600;
+    let headers = near_limit_headers("0.96", reset, None);
+    adapter.record_rate_limit_from_headers_at(&headers, "", 1);
+    assert!(!adapter.consume_test_wrap_up_hint_at(reset));
+    assert!(!adapter.consume_pending_near_limit_wrap_up_hint());
+
+    adapter.record_rate_limit_from_headers_at(&headers, "", 2);
+    assert!(!adapter.consume_pending_near_limit_wrap_up_hint());
+    adapter.record_rate_limit_from_headers_at(&near_limit_headers("0.96", reset + 60, None), "", 3);
+    assert!(adapter.consume_pending_near_limit_wrap_up_hint());
 }
 
 #[test]
@@ -63,7 +342,6 @@ fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
         account_epoch: 0,
         account_epoch_stale: false,
         is_subscriber: true,
-        pending_overage: Arc::new(Mutex::new(None)),
     };
     let header_set = |status: &str, overage_status: &str| {
         BTreeMap::from([
@@ -78,8 +356,15 @@ fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
         ])
     };
 
+    let next_headers = || Some(adapter.anthropic.prompt_cache_overage.observe_headers());
+    let first_success = next_headers();
+    let old_429 = next_headers();
     let using_overage = header_set("rejected", "allowed");
-    adapter.record_prompt_cache_overage_from_headers(&using_overage, Some(&prepared));
+    adapter.record_prompt_cache_overage_from_headers(
+        &using_overage,
+        Some(&prepared),
+        next_headers(),
+    );
     assert!(adapter
         .anthropic
         .prompt_cache_overage
@@ -98,8 +383,19 @@ fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
         "older observations cannot clear the current overage state"
     );
 
-    adapter.stage_prompt_cache_overage_from_429(&stale_clear, Some(&prepared));
-    assert!(prepared.pending_overage.lock().unwrap().is_some());
+    // A slow successful body and a separately staged terminal rejection both
+    // complete after newer headers were published for this credential.
+    adapter.record_prompt_cache_overage_from_headers(&stale_clear, Some(&prepared), first_success);
+    let older = adapter.stage_prompt_cache_overage_from_429(&stale_clear, Some(&prepared), old_429);
+    adapter.promote_pending_429(None, older);
+    assert!(adapter
+        .anthropic
+        .prompt_cache_overage
+        .is_using_overage(&scope, 0));
+
+    let pending =
+        adapter.stage_prompt_cache_overage_from_429(&stale_clear, Some(&prepared), next_headers());
+    assert!(pending.is_some());
     assert!(
         adapter
             .anthropic
@@ -107,7 +403,7 @@ fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
             .is_using_overage(&scope, 0),
         "retryable 429 does not change the current state before terminal promotion"
     );
-    adapter.promote_pending_429(None, Some(&prepared));
+    adapter.promote_pending_429(None, pending);
     assert!(!adapter
         .anthropic
         .prompt_cache_overage
@@ -144,12 +440,30 @@ fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
         &retry_headers,
         false,
         Some(&prepared),
+        next_headers(),
     );
     assert!(!adapter
         .anthropic
         .prompt_cache_overage
         .is_using_overage(&scope, 0));
-    adapter.record_prompt_cache_overage_from_quota_wait(429, &retry_headers, true, Some(&prepared));
+    adapter.record_prompt_cache_overage_from_quota_wait(
+        429,
+        &retry_headers,
+        true,
+        Some(&prepared),
+        old_429,
+    );
+    assert!(!adapter
+        .anthropic
+        .prompt_cache_overage
+        .is_using_overage(&scope, 0));
+    adapter.record_prompt_cache_overage_from_quota_wait(
+        429,
+        &retry_headers,
+        true,
+        Some(&prepared),
+        next_headers(),
+    );
     assert!(adapter
         .anthropic
         .prompt_cache_overage
@@ -160,17 +474,156 @@ fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
     // A response that arrives after the credential owner advanced the
     // account epoch is a late observation for the old request. It must not
     // seed the new account's scope cache.
-    adapter.record_prompt_cache_overage_from_headers(&using_overage, Some(&prepared));
+    adapter.record_prompt_cache_overage_from_headers(
+        &using_overage,
+        Some(&prepared),
+        next_headers(),
+    );
     assert!(!adapter.anthropic.prompt_cache_overage.record(
         &scope,
         prepared.account_epoch,
         true,
-        u128::MAX
+        u64::MAX
     ));
     assert!(!adapter
         .anthropic
         .prompt_cache_overage
         .is_using_overage(&scope, 1));
+}
+
+#[tokio::test]
+async fn delayed_success_and_streaming_429_bodies_cannot_overwrite_newer_overage_headers() {
+    use futures::StreamExt;
+    use tokio::sync::oneshot;
+
+    struct DelayedFirstBody {
+        first_status: u16,
+        gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for DelayedFirstBody {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            let gate = self.gate.lock().unwrap().take();
+            let first = gate.is_some();
+            let status = if first { self.first_status } else { 200 };
+            let body = futures::stream::once(async move {
+                if let Some((started, release)) = gate {
+                    started.send(()).unwrap();
+                    release.await.unwrap();
+                }
+                let json = if status == 429 {
+                    serde_json::json!({"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}})
+                } else {
+                    ok_response_json()
+                };
+                Ok(bytes::Bytes::from(serde_json::to_vec(&json).unwrap()))
+            });
+            Ok(lingxi_llm_client::StreamResponse {
+                status,
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    (
+                        "anthropic-ratelimit-unified-status".into(),
+                        "rejected".into(),
+                    ),
+                    (
+                        "anthropic-ratelimit-unified-overage-status".into(),
+                        if first { "rejected" } else { "allowed" }.into(),
+                    ),
+                ],
+                body: body.boxed(),
+            })
+        }
+    }
+
+    for first_status in [200, 429] {
+        let (started, body_started) = oneshot::channel();
+        let (release, blocked) = oneshot::channel();
+        let adapter = make_adapter_with_subscriber(
+            Arc::new(DelayedFirstBody {
+                first_status,
+                gate: Mutex::new(Some((started, blocked))),
+            }),
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
+        );
+        let (mut request, _) = adapter
+            .build_main_message_request(
+                MessagesCreateRequest::new(
+                    "claude",
+                    None,
+                    None,
+                    vec![text_user_msg("hello")],
+                    Vec::new(),
+                ),
+                false,
+            )
+            .unwrap();
+        request.execution.side_query_max_retries = Some(0);
+        let cache = adapter
+            .client
+            .prepare(&request)
+            .await
+            .unwrap()
+            .prompt_cache
+            .unwrap();
+        assert!(cache.is_subscriber);
+        let slow = async {
+            if first_status == 429 {
+                let error = adapter
+                    .stream_request(request.clone())
+                    .await
+                    .err()
+                    .expect("terminal 429");
+                assert!(matches!(
+                    error.classification_source(),
+                    LlmError::RateLimited { .. }
+                ));
+            } else {
+                adapter
+                    .execute_non_stream_request(
+                        request.clone(),
+                        NonStreamingRequestClass::Main,
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        tokio::pin!(slow);
+        tokio::select! {
+            _ = &mut slow => panic!("first request finished before body was released"),
+            started = body_started => started.unwrap(),
+        }
+        adapter
+            .execute_non_stream_request(
+                request.clone(),
+                NonStreamingRequestClass::Main,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let overage = || {
+            adapter
+                .anthropic
+                .prompt_cache_overage
+                .is_using_overage(&cache.scope, cache.account_epoch)
+        };
+        assert!(overage());
+        release.send(()).unwrap();
+        slow.await;
+        assert!(
+            overage(),
+            "slow {first_status} overwrote a newer quota observation"
+        );
+    }
 }
 
 /// Task 6 (batch 5): a terminal 429 whose response carries the unified
@@ -179,26 +632,35 @@ fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
 /// `rateLimitMessages.ts:149` + `:333-344`).
 #[tokio::test]
 async fn terminal_429_with_unified_headers_records_limits_copy() {
-    let transport = FakeTransport::always(ProviderResponse {
-        status: 429,
-        headers: {
-            let mut h = BTreeMap::new();
-            h.insert(
-                "anthropic-ratelimit-unified-representative-claim".to_string(),
-                "seven_day".to_string(),
-            );
-            h.insert(
-                "anthropic-ratelimit-unified-status".to_string(),
-                "rejected".to_string(),
-            );
-            h
-        },
-        body_json: provider_payload(serde_json::json!({
-            "type": "error",
-            "error": {"type": "rate_limit_error", "message": "You have reached your usage limit"}
-        })),
-        request_id: None,
-    });
+    let transport = FakeTransport::sequence(vec![
+        FakeResponse::Ok(ProviderResponse {
+            status: 429,
+            headers: {
+                let mut h = BTreeMap::new();
+                h.insert(
+                    "anthropic-ratelimit-unified-representative-claim".to_string(),
+                    "seven_day".to_string(),
+                );
+                h.insert(
+                    "anthropic-ratelimit-unified-status".to_string(),
+                    "rejected".to_string(),
+                );
+                h.insert("request-id".into(), "req_limited".into());
+                h
+            },
+            body_json: provider_payload(serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "You have reached your usage limit"}
+            })),
+            request_id: None,
+        }),
+        FakeResponse::Ok(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::from([("request-id".into(), "req_success".into())]),
+            body_json: provider_payload(ok_response_json()),
+            request_id: None,
+        }),
+    ]);
     // Subscriber (non-enterprise) → the 429 is terminal on the first try.
     let adapter = make_adapter_with_subscriber(
         transport.clone(),
@@ -235,6 +697,31 @@ async fn terminal_429_with_unified_headers_records_limits_copy() {
     let info = adapter.last_rate_limit_info().expect("snapshot");
     assert_eq!(info.status.as_deref(), Some("rejected"));
     assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
+
+    let error = result.unwrap_err();
+    let response = adapter
+        .messages_create(crate::MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(adapter.last_rate_limit_error_message(), None);
+    assert_eq!(error.response_request_id(), Some("req_limited"));
+    assert_eq!(
+        error.rate_limit_message(),
+        Some("You've hit your weekly limit")
+    );
+    let diagnostics = response.diagnostics().unwrap();
+    assert_eq!(diagnostics.request_id.as_deref(), Some("req_success"));
+    assert_eq!(
+        diagnostics.request_id_origin,
+        Some(crate::service::RequestIdOrigin::Server)
+    );
+    assert_eq!(diagnostics.retries, 0);
 }
 
 /// The `Bha`/`Nha` monotonic guard: an out-of-order (older-timestamp)
@@ -998,7 +1485,7 @@ async fn last_retry_count_reflects_429_retry() {
             Vec::new(),
         ))
         .await;
-    assert!(result.is_ok(), "429→200 must succeed");
+    assert_eq!(result.unwrap().diagnostics().unwrap().retries, 1);
     // Exactly one budget-consuming retry was performed.
     assert_eq!(
         adapter.last_retry_count(),

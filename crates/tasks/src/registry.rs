@@ -872,6 +872,15 @@ impl TaskRegistry {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Atomically admit one search under the session cap.
+    pub fn try_reserve_web_search_call(&self, max: u32) -> Result<(), u32> {
+        self.web_search_calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used < max).then(|| used + 1)
+            })
+            .map(|_| ())
+    }
+
     /// Reset the session WebSearch counter — `resetWebSearchCalls(){n=0}`.
     pub fn reset_web_search_calls(&self) {
         self.web_search_calls

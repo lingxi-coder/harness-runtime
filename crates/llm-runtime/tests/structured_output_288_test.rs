@@ -7,6 +7,7 @@ use llm_runtime::{
     SubscriberState, Transport,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 static ENVIRONMENT: Mutex<()> = Mutex::new(());
@@ -195,6 +196,7 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
     let mut preparations = 0;
     let mut unrepresented_aws_rows = 0;
     let mut unrepresented_google_rows = 0;
+    let mut runtimes = HashMap::new();
     for row in fixture["cases"].as_array().unwrap() {
         let input = &row["input"];
         let Some((protocol, source_identity_is_equivalent)) =
@@ -214,14 +216,19 @@ async fn current_structured_output_gate_reaches_preparation_and_both_physical_dr
             }
         }
         let model = input["model"].as_str().unwrap();
-        let mut profile = profile(protocol, input["capability"].as_bool().unwrap());
-        profile.models[0].request_model = model.into();
-        profile.models[0].billing_model = model.into();
-        profile.models[0].display_model = model.into();
-        let client = ModelRuntime::from_config(ClientConfig {
-            providers: vec![profile],
-        })
-        .unwrap();
+        let capability = input["capability"].as_bool().unwrap();
+        let client = runtimes
+            .entry((protocol, capability, model))
+            .or_insert_with(|| {
+                let mut profile = profile(protocol, capability);
+                profile.models[0].request_model = model.into();
+                profile.models[0].billing_model = model.into();
+                profile.models[0].display_model = model.into();
+                ModelRuntime::from_config(ClientConfig {
+                    providers: vec![profile],
+                })
+                .unwrap()
+            });
         for side in [false, true] {
             if input["explicit"] == true {
                 std::env::set_var(

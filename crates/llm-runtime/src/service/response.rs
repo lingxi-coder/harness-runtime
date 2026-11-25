@@ -6,7 +6,8 @@ use crate::model::rate_limit::{
 };
 use crate::service::retry::{is_free_tier_model, openrouter_free_rate_limit_message};
 use crate::service::ApiService;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Subscription flags — gates the 429 retry policy.
 ///
@@ -21,7 +22,7 @@ pub struct SubscriberState {
 }
 
 /// Origin of the request id recorded by [`ApiService::last_request_id`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RequestIdOrigin {
     /// The provider returned its own id in a known response header
     /// (authoritative — valid for provider-side log/support lookups).
@@ -30,6 +31,22 @@ pub enum RequestIdOrigin {
     /// we sent is used as a fallback. Correlation-only: a provider will NOT find
     /// this id in its logs.
     Client,
+}
+
+pub(super) fn response_request_id(
+    server: Option<String>,
+    client: Option<&str>,
+) -> Option<(String, RequestIdOrigin)> {
+    server.map(|id| (id, RequestIdOrigin::Server)).or_else(|| {
+        client
+            .filter(|id| !id.is_empty())
+            .map(|id| (id.to_owned(), RequestIdOrigin::Client))
+    })
+}
+
+pub(super) struct Observed429 {
+    pub(super) pending: Option<Pending429>,
+    pub(super) message: Option<String>,
 }
 
 const NEAR_LIMIT_WRAP_UP_DEFAULT_THRESHOLD: f64 = 0.95;
@@ -48,11 +65,323 @@ pub(super) struct Pending429 {
     /// UNCONDITIONALLY (`extractRawUtilization`, ts:500 — independent of the
     /// limits gate).
     pub(super) raw: RawUtilization,
-    observed_at_ms: u128,
+    observation: RateLimitHeaderObservation,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RateLimitAccount {
+    scope: crate::CredentialScope,
+    request_auth: crate::AuthStrategy,
+    uses_session_subscription: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RateLimitOwner {
+    account: RateLimitAccount,
+    credential_revision: Option<u64>,
+    unversioned_credential_identity: Option<String>,
+}
+
+impl RateLimitOwner {
+    fn from_capture(
+        scope: &crate::CredentialScope,
+        request_auth: crate::AuthStrategy,
+        uses_session_subscription: bool,
+        authenticator: &crate::execution::HostAuthenticator,
+    ) -> Self {
+        let revision = authenticator.captured_credential_revision();
+        Self {
+            account: RateLimitAccount {
+                scope: scope.clone(),
+                request_auth,
+                uses_session_subscription,
+            },
+            credential_revision: revision,
+            unversioned_credential_identity: revision
+                .is_none()
+                .then(|| authenticator.captured_unversioned_credential_identity())
+                .flatten(),
+        }
+    }
+}
+
+/// A child runner's notice and checkpoint callback for a single logical request.
+#[derive(Clone)]
+pub struct SubagentWrapUpHint {
+    /// Exact model-visible checkpoint instruction.
+    pub text: &'static str,
+    /// Source identity shared by the wire projection and the child transcript.
+    pub message_id: lingxi_core::types::MessageId,
+    publish: Arc<dyn Fn() -> crate::BoxFuture<'static, bool> + Send + Sync>,
+    claimed: Arc<tokio::sync::Mutex<Option<(u64, RateLimitOwner)>>>,
+}
+
+impl std::fmt::Debug for SubagentWrapUpHint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubagentWrapUpHint")
+            .field("message_id", &self.message_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SubagentWrapUpHint {
+    /// Create a request-local callback. The signing account determines whether it runs.
+    pub fn new(
+        text: &'static str,
+        message_id: lingxi_core::types::MessageId,
+        publish: impl Fn() -> crate::BoxFuture<'static, bool> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            text,
+            message_id,
+            publish: Arc::new(publish),
+            claimed: Default::default(),
+        }
+    }
+
+    /// Check the live rollout flag and publish the host notice when enabled.
+    pub async fn publish(&self) -> bool {
+        (self.publish)().await
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct BoundWrapUpHint {
+    hint: SubagentWrapUpHint,
+    limits: Arc<RateLimitState>,
+    epoch: u64,
+}
+
+tokio::task_local! {
+    static SUBAGENT_WRAP_UP: Option<BoundWrapUpHint>;
+}
+
+impl BoundWrapUpHint {
+    pub(super) fn current(service: &ApiService) -> Option<Self> {
+        SUBAGENT_WRAP_UP
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()
+            .filter(|bound| Arc::ptr_eq(&bound.limits, &service.rate_limits))
+    }
+
+    pub(crate) fn may_match(&self, scope: &crate::CredentialScope) -> bool {
+        let Ok(claimed) = self.hint.claimed.try_lock() else {
+            // A concurrent Mod invocation is publishing. Wait for its exact
+            // owner below before deciding whether this attempt can reuse it.
+            return true;
+        };
+        let state = self.limits.lock();
+        state.account_epoch == self.epoch
+            && claimed.as_ref().map_or_else(
+                || {
+                    state.accounts.iter().any(|(account, history)| {
+                        &account.scope == scope && history.pending_wrap_up
+                    })
+                },
+                |(epoch, owner)| *epoch == self.epoch && &owner.account.scope == scope,
+            )
+    }
+
+    pub(crate) async fn note_for(
+        &self,
+        scope: &crate::CredentialScope,
+        request_auth: crate::AuthStrategy,
+        uses_session_subscription: bool,
+        authenticator: &crate::execution::HostAuthenticator,
+    ) -> Option<(&'static str, lingxi_core::types::MessageId)> {
+        let owner = RateLimitOwner::from_capture(
+            scope,
+            request_auth,
+            uses_session_subscription,
+            authenticator,
+        );
+        // Pooled backends which omit revisions must still identify their exact
+        // captured credential. A profile label alone cannot own a pending note.
+        if scope.expected_identity_generation.is_some()
+            && owner.credential_revision.is_none()
+            && owner.unversioned_credential_identity.is_none()
+        {
+            return None;
+        }
+        let note = Some((self.hint.text, self.hint.message_id));
+        let mut claimed = self.hint.claimed.lock().await;
+        {
+            let mut state = self.limits.lock();
+            if state.account_epoch != self.epoch {
+                return None;
+            }
+            if let Some((epoch, previous)) = claimed.as_ref() {
+                return if *epoch == self.epoch
+                    && previous == &owner
+                    && state
+                        .accounts
+                        .get(&owner.account)
+                        .is_some_and(|history| history.matches(&owner))
+                {
+                    note
+                } else {
+                    None
+                };
+            }
+            if !state.consume_for(&owner, ApiService::rate_limit_now_secs()) {
+                return None;
+            }
+        }
+        if !self.hint.publish().await {
+            return None;
+        }
+        let state = self.limits.lock();
+        if state.account_epoch != self.epoch
+            || !state
+                .accounts
+                .get(&owner.account)
+                .is_some_and(|history| history.matches(&owner))
+        {
+            return None;
+        }
+        *claimed = Some((self.epoch, owner));
+        note
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RateLimitHeaderObservation {
+    binding: u64,
+    order: u128,
+}
+
+#[derive(Default)]
+pub(super) struct RateLimitState {
+    snapshot: Mutex<RateLimitSnapshot>,
+}
+
+#[derive(Default)]
+struct RateLimitSnapshot {
+    account_epoch: u64,
+    binding: u64,
+    owner: Option<RateLimitOwner>,
+    latest_header_order: Option<u128>,
+    info: Option<RateLimitInfo>,
+    raw: Option<RawUtilization>,
+    accounts: HashMap<RateLimitAccount, RateLimitAccountHistory>,
+}
+
+#[derive(Default)]
+struct RateLimitAccountHistory {
+    credential_revision: Option<u64>,
+    unversioned_credential_identity: Option<String>,
+    wrap_up_window: Option<u64>,
+    pending_wrap_up: bool,
+}
+
+impl RateLimitAccountHistory {
+    fn matches(&self, owner: &RateLimitOwner) -> bool {
+        self.credential_revision == owner.credential_revision
+            && self.unversioned_credential_identity == owner.unversioned_credential_identity
+    }
+}
+
+impl RateLimitSnapshot {
+    fn rebind(&mut self, owner: Option<RateLimitOwner>) {
+        self.binding = self.binding.wrapping_add(1);
+        self.owner = owner;
+        self.latest_header_order = None;
+        self.info = None;
+        self.raw = None;
+    }
+
+    fn observe_headers(
+        &mut self,
+        binding: u64,
+        order: Option<u128>,
+    ) -> Option<RateLimitHeaderObservation> {
+        if self.binding != binding {
+            return None;
+        }
+        let order = order.unwrap_or_else(|| self.latest_header_order.map_or(0, |last| last + 1));
+        if self.latest_header_order.is_some_and(|last| order < last) {
+            return None;
+        }
+        self.latest_header_order = Some(order);
+        Some(RateLimitHeaderObservation { binding, order })
+    }
+
+    fn is_current(&self, observation: RateLimitHeaderObservation) -> bool {
+        self.binding == observation.binding && self.latest_header_order == Some(observation.order)
+    }
+
+    fn consume_for(&mut self, owner: &RateLimitOwner, now_secs: u64) -> bool {
+        let Some(history) = self.accounts.get_mut(&owner.account) else {
+            return false;
+        };
+        history.matches(owner)
+            && std::mem::take(&mut history.pending_wrap_up)
+            && history.wrap_up_window.is_some_and(|reset| reset > now_secs)
+    }
+
+    #[cfg(test)]
+    fn consume_wrap_up_hint(&mut self, now_secs: u64) -> bool {
+        self.owner
+            .clone()
+            .is_some_and(|owner| self.consume_for(&owner, now_secs))
+    }
+}
+
+impl RateLimitState {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RateLimitSnapshot> {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn reset_for_account_change(&self) {
+        let mut state = self.lock();
+        state.account_epoch = state.account_epoch.wrapping_add(1);
+        state.accounts.clear();
+        state.rebind(None);
+    }
+
+    fn admit(&self, account_epoch: u64, owner: RateLimitOwner) -> Option<u64> {
+        let mut state = self.lock();
+        if state.account_epoch != account_epoch {
+            return None;
+        }
+        let history = state.accounts.entry(owner.account.clone()).or_default();
+        if let Some(revision) = owner.credential_revision {
+            if history
+                .credential_revision
+                .is_some_and(|known| revision < known)
+            {
+                return None;
+            }
+            if history.credential_revision != Some(revision) && history.pending_wrap_up {
+                // A rotated credential must supply its own near-limit observation.
+                history.pending_wrap_up = false;
+                history.wrap_up_window = None;
+            }
+            history.credential_revision = Some(revision);
+        }
+        if history.unversioned_credential_identity != owner.unversioned_credential_identity {
+            history
+                .unversioned_credential_identity
+                .clone_from(&owner.unversioned_credential_identity);
+            if history.pending_wrap_up || owner.account.scope.expected_identity_generation.is_none()
+            {
+                history.wrap_up_window = None;
+            }
+            history.pending_wrap_up = false;
+        }
+        if state.owner.as_ref() != Some(&owner) {
+            state.rebind(Some(owner));
+        }
+        Some(state.binding)
+    }
 }
 
 #[derive(Default)]
 pub(super) struct PromptCacheOverageState {
+    next_header_order: std::sync::atomic::AtomicU64,
     state: Mutex<PromptCacheOverageSnapshot>,
 }
 
@@ -65,10 +394,16 @@ struct PromptCacheOverageSnapshot {
 #[derive(Clone, Copy)]
 struct PromptCacheOverageObservation {
     is_using_overage: bool,
-    observed_at_ms: u128,
+    header_order: u64,
 }
 
 impl PromptCacheOverageState {
+    /// Shared by streaming and non-streaming attempts, across route and account changes.
+    pub(super) fn observe_headers(&self) -> u64 {
+        self.next_header_order
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(super) fn account_epoch(&self) -> u64 {
         self.state
             .lock()
@@ -108,7 +443,7 @@ impl PromptCacheOverageState {
         scope: &crate::CredentialScope,
         account_epoch: u64,
         is_using_overage: bool,
-        observed_at_ms: u128,
+        header_order: u64,
     ) -> bool {
         let mut state = self
             .state
@@ -118,7 +453,7 @@ impl PromptCacheOverageState {
             || state
                 .by_scope
                 .get(scope)
-                .is_some_and(|previous| observed_at_ms < previous.observed_at_ms)
+                .is_some_and(|previous| header_order <= previous.header_order)
         {
             return false;
         }
@@ -126,7 +461,7 @@ impl PromptCacheOverageState {
             scope.clone(),
             PromptCacheOverageObservation {
                 is_using_overage,
-                observed_at_ms,
+                header_order,
             },
         );
         true
@@ -174,7 +509,7 @@ impl ApiService {
     /// `Arc<ApiService>` and call this method directly.  A future task can
     /// wire it through the handle if needed.
     pub fn last_rate_limit_info(&self) -> Option<RateLimitInfo> {
-        self.last_rate_limit.lock().unwrap().clone()
+        self.rate_limits.lock().info.clone()
     }
 
     /// The request id of the most recently recorded response. Backs the
@@ -219,7 +554,7 @@ impl ApiService {
     /// the first recorded response.
     #[must_use]
     pub fn last_raw_utilization(&self) -> Option<RawUtilization> {
-        *self.last_raw_utilization.lock().unwrap()
+        self.rate_limits.lock().raw
     }
 
     /// The user-facing copy composed from the most recent 429 **error**
@@ -233,27 +568,28 @@ impl ApiService {
         self.last_429_message.lock().unwrap().clone()
     }
 
-    /// Consume the pending near-limit wrap-up hint once.
-    ///
-    /// The dedupe window key intentionally survives the consume: once a
-    /// subagent has seen the hint for a five-hour window, later responses in
-    /// that same window must not re-arm it. A later reset starts a new window.
-    #[must_use]
-    pub fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
-        let mut pending = self.pending_near_limit_wrap_up_hint.lock().unwrap();
-        if !*pending {
-            return false;
-        }
-        *pending = false;
-        true
+    #[cfg(test)]
+    pub(super) fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
+        self.rate_limits
+            .lock()
+            .consume_wrap_up_hint(Self::rate_limit_now_secs())
     }
 
-    /// Parse rate-limit headers from a 2xx response and update the cached snapshot.
-    ///
-    /// Emits a `tracing::warn!` when the overage status indicates the account is
-    /// at or near exhaustion (`overage_status == "rejected"` or `"allowed_warning"`).
-    /// Wall-clock milliseconds since the Unix epoch — the record timestamp for
-    /// the rate-limit monotonic guard (binary `Date.now()`).
+    /// Attach a child runner's one-shot notice to its own stream opening.
+    pub async fn with_subagent_wrap_up<T>(
+        &self,
+        hint: Option<SubagentWrapUpHint>,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        let bound = hint.map(|hint| BoundWrapUpHint {
+            hint,
+            limits: self.rate_limits.clone(),
+            epoch: self.rate_limit_account_epoch(),
+        });
+        SUBAGENT_WRAP_UP.scope(bound, future).await
+    }
+
+    /// Wall-clock milliseconds used to interpret provider quota windows.
     pub(super) fn now_ms() -> u128 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -261,21 +597,44 @@ impl ApiService {
             .unwrap_or(0)
     }
 
-    /// Monotonic rate-limit record guard — ports the binary's `Bha`/`Nha`
-    /// (@210953352): returns `true` (STALE ⇒ caller skips the snapshot update)
-    /// when `ts_ms` is OLDER than the last recorded timestamp; otherwise
-    /// records `ts_ms` and returns `false`. Prevents an out-of-order (older)
-    /// parallel response from overwriting a newer rate-limit snapshot — the
-    /// 2.1.196 flicker fix. Under normal monotonic wall-clock operation this
-    /// never drops, so production behaviour is unchanged.
-    fn rate_limit_record_stale(&self, ts_ms: u128) -> bool {
-        let mut guard = self.last_rate_limit_record_ts_ms.lock().unwrap();
-        match *guard {
-            Some(prev) if ts_ms < prev => true,
-            _ => {
-                *guard = Some(ts_ms);
-                false
-            }
+    fn rate_limit_now_secs() -> u64 {
+        u64::try_from(Self::now_ms() / 1000).unwrap_or(u64::MAX)
+    }
+
+    #[cfg(test)]
+    pub(super) fn consume_test_wrap_up_hint_at(&self, now_secs: u64) -> bool {
+        self.rate_limits.lock().consume_wrap_up_hint(now_secs)
+    }
+
+    pub(super) fn rate_limit_account_epoch(&self) -> u64 {
+        self.rate_limits.lock().account_epoch
+    }
+
+    pub(super) fn admit_rate_limit_route(
+        &self,
+        account_epoch: u64,
+        prepared: &crate::PreparedLlmCall,
+    ) -> Option<u64> {
+        self.rate_limits.admit(
+            account_epoch,
+            RateLimitOwner::from_capture(
+                &prepared.credential_scope,
+                prepared.request_auth,
+                prepared.uses_session_subscription,
+                &prepared.authenticator,
+            ),
+        )
+    }
+
+    pub(super) fn observe_rate_limit_headers(
+        &self,
+        binding: Option<u64>,
+        status: u16,
+    ) -> Option<RateLimitHeaderObservation> {
+        if (200..300).contains(&status) || status == 429 {
+            self.rate_limits.lock().observe_headers(binding?, None)
+        } else {
+            None
         }
     }
 
@@ -285,102 +644,78 @@ impl ApiService {
         client_request_id: Option<&str>,
         protocol: lingxi_llm_client::protocol::ProtocolFamily,
         provider_id: &str,
-    ) {
-        self.record_rate_limit_from_headers_at_for_route(
-            headers,
-            client_request_id,
-            protocol,
-            provider_id,
-            Self::now_ms(),
-        );
-    }
-
-    fn record_rate_limit_from_headers_at_for_route(
-        &self,
-        headers: &std::collections::BTreeMap<String, String>,
-        client_request_id: Option<&str>,
-        protocol: lingxi_llm_client::protocol::ProtocolFamily,
-        provider_id: &str,
-        ts_ms: u128,
-    ) {
+        observation: Option<RateLimitHeaderObservation>,
+    ) -> Option<(String, RequestIdOrigin)> {
         let hvec: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        // Capture the request id on every recorded response — the SDK's
-        // `response._request_id`, which claude-code persists as the assistant
-        // line's top-level `requestId`. Provider-aware: tries each provider's
-        // canonical request-id header for the selected route. If absent, use
-        // the actual SDK/caller `x-client-request-id`; without one, keep the
-        // Host correlation field absent.
-        *self.last_request_id.lock().unwrap() =
-            match crate::execution::extract_response_request_id(protocol, provider_id, headers) {
-                Some(server_id) => Some((server_id, RequestIdOrigin::Server)),
-                None if client_request_id.is_some_and(|id| !id.is_empty()) => {
-                    let client_request_id = client_request_id.unwrap_or_default();
-                    tracing::debug!(
-                        client_request_id,
-                        "no provider request-id header on response; \
-                         falling back to outgoing client request-id for correlation only"
-                    );
-                    Some((client_request_id.to_string(), RequestIdOrigin::Client))
-                }
-                None => None,
-            };
-        // Monotonic guard (binary `Bha`/`Nha`): a response whose record
-        // timestamp is OLDER than the last recorded one is STALE — skip the
-        // rate-limit snapshot updates so an out-of-order parallel response can
-        // never flip the warning off (2.1.196 flicker fix). request-id capture
-        // above and the pending-429 bookkeeping below stay unconditional.
-        let stale = self.rate_limit_record_stale(ts_ms);
-        // Task 2 (llm-runtime future-work batch 5): track the raw per-window
-        // snapshot on EVERY recorded (non-stale) headers pass — `rawUtilization
-        // = extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
-        // gated on `has_unified_headers()` like the limits snapshot below.
         let decoded =
             lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
                 protocol,
                 provider_id,
                 &hvec,
                 std::time::SystemTime::now(),
-            )
-            .anthropic_rate_limits
-            .unwrap_or_default();
-        let raw = RawUtilization::from_decoded(&decoded);
-        if !stale {
-            *self.last_raw_utilization.lock().unwrap() = Some(raw);
-        }
-        let info = RateLimitInfo::from_decoded_at(&decoded, std::time::SystemTime::now());
-        if !stale {
-            self.update_near_limit_wrap_up_state(&info, raw, ts_ms);
-        }
-        if !stale && info.has_unified_headers() {
-            // Warn when the account is near or at exhaustion.
-            match info.overage_status.as_deref() {
-                Some("rejected") => {
-                    tracing::warn!(
-                        overage_status = "rejected",
-                        rate_limit_type = ?info.rate_limit_type,
-                        "Rate limit: overage rejected — usage limit exhausted"
-                    );
-                }
-                Some("allowed_warning") => {
-                    tracing::warn!(
-                        overage_status = "allowed_warning",
-                        rate_limit_type = ?info.rate_limit_type,
-                        "Rate limit: overage warning — nearing usage limit"
-                    );
-                }
-                _ => {}
-            }
-            *self.last_rate_limit.lock().unwrap() = Some(info);
-        }
-        // Task 6 (batch 5): a successful response supersedes any cached 429
-        // limits copy — the slot always reflects the most recent response.
+            );
+        let request_id = response_request_id(decoded.request_id, client_request_id);
+        *self.last_request_id.lock().unwrap() = request_id.clone();
         *self.last_429_message.lock().unwrap() = None;
-        // B6-T1: a success also discards any staged-but-unpromoted 429 from an
-        // earlier retried attempt (TS resets module state to the success's
-        // `status`, never leaving a stale `rejected` behind).
+        let decoded = decoded.anthropic_rate_limits.unwrap_or_default();
+        let raw = RawUtilization::from_decoded(&decoded);
+        let info = RateLimitInfo::from_decoded_at(&decoded, std::time::SystemTime::now());
+        if let Some(observation) = observation {
+            let subscription_threshold = self.near_limit_wrap_up_threshold();
+            let mut state = self.rate_limits.lock();
+            if state.is_current(observation) {
+                state.raw = Some(raw);
+                let threshold = state
+                    .owner
+                    .as_ref()
+                    .filter(|owner| owner.account.uses_session_subscription)
+                    .map_or(NEAR_LIMIT_WRAP_UP_DEFAULT_THRESHOLD, |_| {
+                        subscription_threshold
+                    });
+                state.update_near_limit_wrap_up_state(&info, raw, threshold);
+                if info.has_unified_headers() {
+                    match info.overage_status.as_deref() {
+                        Some("rejected") => tracing::warn!(
+                            overage_status = "rejected",
+                            rate_limit_type = ?info.rate_limit_type,
+                            "Rate limit: overage rejected — usage limit exhausted"
+                        ),
+                        Some("allowed_warning") => tracing::warn!(
+                            overage_status = "allowed_warning",
+                            rate_limit_type = ?info.rate_limit_type,
+                            "Rate limit: overage warning — nearing usage limit"
+                        ),
+                        _ => {}
+                    }
+                    state.info = Some(info);
+                }
+            }
+        }
+        request_id
+    }
+
+    #[cfg(test)]
+    pub(super) fn bind_test_rate_limit_route(&self, profile: &str, revision: Option<u64>) -> u64 {
+        self.rate_limits
+            .admit(
+                self.rate_limit_account_epoch(),
+                RateLimitOwner {
+                    account: RateLimitAccount {
+                        scope: crate::CredentialScope::new(
+                            crate::ProviderId::AnthropicFirstParty,
+                            profile,
+                        ),
+                        request_auth: crate::AuthStrategy::OAuthBearer,
+                        uses_session_subscription: true,
+                    },
+                    credential_revision: revision,
+                    unversioned_credential_identity: None,
+                },
+            )
+            .expect("current test credential")
     }
 
     #[cfg(test)]
@@ -389,11 +724,13 @@ impl ApiService {
         headers: &std::collections::BTreeMap<String, String>,
         client_request_id: &str,
     ) {
+        let binding = self.bind_test_rate_limit_route("anthropic", None);
         self.record_rate_limit_from_headers_for_route(
             headers,
             (!client_request_id.is_empty()).then_some(client_request_id),
             lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
             "anthropic",
+            self.observe_rate_limit_headers(Some(binding), 200),
         );
     }
 
@@ -404,12 +741,17 @@ impl ApiService {
         client_request_id: &str,
         ts_ms: u128,
     ) {
-        self.record_rate_limit_from_headers_at_for_route(
+        let binding = self.bind_test_rate_limit_route("anthropic", None);
+        let observation = self
+            .rate_limits
+            .lock()
+            .observe_headers(binding, Some(ts_ms));
+        self.record_rate_limit_from_headers_for_route(
             headers,
             (!client_request_id.is_empty()).then_some(client_request_id),
             lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
             "anthropic",
-            ts_ms,
+            observation,
         );
     }
 
@@ -417,8 +759,12 @@ impl ApiService {
         &self,
         headers: &std::collections::BTreeMap<String, String>,
         prepared: Option<&crate::client::PreparedPromptCacheContext>,
+        header_order: Option<u64>,
     ) {
-        let Some(prepared) = prepared.filter(|facts| facts.is_subscriber) else {
+        let Some((prepared, header_order)) = prepared
+            .filter(|facts| facts.is_subscriber)
+            .zip(header_order)
+        else {
             return;
         };
         let headers = headers
@@ -427,27 +773,22 @@ impl ApiService {
             .collect::<Vec<_>>();
         let decoded =
             lingxi_llm_client::providers::anthropic::limits::quota_status_from_headers(&headers);
-        if self.anthropic.prompt_cache_overage.record(
+        self.anthropic.prompt_cache_overage.record(
             &prepared.scope,
             prepared.account_epoch,
             decoded.is_using_overage,
-            Self::now_ms(),
-        ) {
-            *prepared
-                .pending_overage
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        }
+            header_order,
+        );
     }
 
     pub(super) fn stage_prompt_cache_overage_from_429(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
         prepared: Option<&crate::client::PreparedPromptCacheContext>,
-    ) {
-        let Some(prepared) = prepared.filter(|facts| facts.is_subscriber) else {
-            return;
-        };
+        header_order: Option<u64>,
+    ) -> Option<crate::PendingPromptCacheObservation> {
+        let prepared = prepared.filter(|facts| facts.is_subscriber)?;
+        let header_order = header_order?;
         let headers = headers
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
@@ -456,16 +797,12 @@ impl ApiService {
             lingxi_llm_client::providers::anthropic::limits::quota_status_from_429_headers(
                 &headers,
             );
-        *prepared
-            .pending_overage
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some(crate::PendingPromptCacheObservation {
-                scope: prepared.scope.clone(),
-                account_epoch: prepared.account_epoch,
-                is_using_overage: decoded.is_using_overage,
-                observed_at_ms: Self::now_ms(),
-            });
+        Some(crate::PendingPromptCacheObservation {
+            scope: prepared.scope.clone(),
+            account_epoch: prepared.account_epoch,
+            is_using_overage: decoded.is_using_overage,
+            header_order,
+        })
     }
 
     pub(super) fn record_prompt_cache_overage_from_quota_wait(
@@ -474,8 +811,12 @@ impl ApiService {
         headers: &std::collections::BTreeMap<String, String>,
         retry_watchdog_enabled: bool,
         prepared: Option<&crate::client::PreparedPromptCacheContext>,
+        header_order: Option<u64>,
     ) {
-        let Some(prepared) = prepared.filter(|facts| facts.is_subscriber) else {
+        let Some((prepared, header_order)) = prepared
+            .filter(|facts| facts.is_subscriber)
+            .zip(header_order)
+        else {
             return;
         };
         let headers = headers
@@ -492,17 +833,12 @@ impl ApiService {
         else {
             return;
         };
-        if self.anthropic.prompt_cache_overage.record(
+        self.anthropic.prompt_cache_overage.record(
             &prepared.scope,
             prepared.account_epoch,
             wait.status.is_using_overage,
-            Self::now_ms(),
-        ) {
-            *prepared
-                .pending_overage
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        }
+            header_order,
+        );
     }
 
     /// Whether the live subscription snapshot is a Pro or Enterprise plan —
@@ -544,52 +880,22 @@ impl ApiService {
         client_request_id: Option<&str>,
         protocol: lingxi_llm_client::protocol::ProtocolFamily,
         provider_id: &str,
-    ) -> Option<Pending429> {
-        self.record_rate_limit_from_429_at_for_route(
-            headers,
-            body,
-            model,
-            client_request_id,
-            protocol,
-            provider_id,
-            Self::now_ms(),
-        )
-    }
-
-    pub(super) fn record_rate_limit_from_429_at_for_route(
-        &self,
-        headers: &std::collections::BTreeMap<String, String>,
-        body: Option<&lingxi_llm_client::protocol::JsonPayload>,
-        model: &str,
-        client_request_id: Option<&str>,
-        protocol: lingxi_llm_client::protocol::ProtocolFamily,
-        provider_id: &str,
-        ts_ms: u128,
-    ) -> Option<Pending429> {
+        observation: Option<RateLimitHeaderObservation>,
+    ) -> Observed429 {
         let hvec: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        *self.last_request_id.lock().unwrap() =
-            match crate::execution::extract_response_request_id(protocol, provider_id, headers) {
-                Some(server_id) => Some((server_id, RequestIdOrigin::Server)),
-                None if client_request_id.is_some_and(|id| !id.is_empty()) => {
-                    let client_request_id = client_request_id.unwrap_or_default();
-                    Some((client_request_id.to_string(), RequestIdOrigin::Client))
-                }
-                None => None,
-            };
-        // `extractRawUtilization(headersToUse)` (claudeAiLimits.ts:500) runs
-        // for ANY error headers, independent of the limits gate below.
         let decoded =
             lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
                 protocol,
                 provider_id,
                 &hvec,
                 std::time::SystemTime::now(),
-            )
-            .anthropic_rate_limits
-            .unwrap_or_default();
+            );
+        *self.last_request_id.lock().unwrap() =
+            response_request_id(decoded.request_id, client_request_id);
+        let decoded = decoded.anthropic_rate_limits.unwrap_or_default();
         let raw = RawUtilization::from_decoded(&decoded);
         let info = (protocol == lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages)
             .then(|| {
@@ -602,10 +908,8 @@ impl ApiService {
             .as_ref()
             .map(RateLimitInfo::from_decoded_429_error);
 
-        // MESSAGE composition ports errors.ts:482-516 (a LOCAL limits object
-        // built from the error headers) — kept verbatim; it is NOT staged and
-        // is set per-attempt because the terminal error re-map reads it
-        // directly (the most-recent-429 slot, cleared on success).
+        // Keep the composed message on this attempt even if its global quota
+        // snapshot is stale. Another call can update the service snapshot.
         let composed = info.as_ref().map(|info| {
             // `formatResetTime(…, true)` analogue for both reset headers
             // (`rateLimitMessages.ts:144-148`), formatted at error time.
@@ -618,22 +922,17 @@ impl ApiService {
                 },
             )
         });
-        *self.last_429_message.lock().unwrap() = composed.flatten().or_else(|| {
+        let message = composed.flatten().or_else(|| {
             is_free_tier_model(model).then(|| openrouter_free_rate_limit_message(body))
         });
+        *self.last_429_message.lock().unwrap() = message.clone();
 
-        // Monotonic guard (binary `Bha`/`Nha`): a stale (out-of-order) 429 must
-        // not stage a snapshot that could later PROMOTE over a newer response's
-        // state. The composed message above is per-attempt (most-recent-429)
-        // and stays unconditional; only the promotable staged slot is gated.
-        if self.rate_limit_record_stale(ts_ms) {
-            return None;
-        }
-        Some(Pending429 {
+        let pending = observation.map(|observation| Pending429 {
             info,
             raw,
-            observed_at_ms: ts_ms,
-        })
+            observation,
+        });
+        Observed429 { pending, message }
     }
 
     #[cfg(test)]
@@ -643,6 +942,7 @@ impl ApiService {
         body: Option<&lingxi_llm_client::protocol::JsonPayload>,
         model: &str,
     ) -> Option<Pending429> {
+        let binding = self.bind_test_rate_limit_route("anthropic", None);
         self.record_rate_limit_from_429_for_route(
             headers,
             body,
@@ -650,40 +950,33 @@ impl ApiService {
             None,
             lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
             "anthropic",
+            self.observe_rate_limit_headers(Some(binding), 429),
         )
+        .pending
     }
 
     /// Publish this attempt's limits only if it is still the latest response.
     pub(super) fn promote_pending_429(
         &self,
         pending: Option<Pending429>,
-        prompt_cache: Option<&crate::client::PreparedPromptCacheContext>,
+        prompt_cache: Option<crate::PendingPromptCacheObservation>,
     ) {
-        if let Some(pending) =
-            pending.filter(|pending| !self.rate_limit_record_stale(pending.observed_at_ms))
-        {
-            if let Some(info) = pending.info {
-                *self.last_rate_limit.lock().unwrap() = Some(info);
-            }
-            *self.last_raw_utilization.lock().unwrap() = Some(pending.raw);
-        }
-        let Some(prepared) = prompt_cache.filter(|facts| facts.is_subscriber) else {
-            return;
-        };
-        let pending = prepared
-            .pending_overage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
         if let Some(pending) = pending {
-            if pending.scope == prepared.scope && pending.account_epoch == prepared.account_epoch {
-                self.anthropic.prompt_cache_overage.record(
-                    &pending.scope,
-                    pending.account_epoch,
-                    pending.is_using_overage,
-                    pending.observed_at_ms,
-                );
+            let mut state = self.rate_limits.lock();
+            if state.is_current(pending.observation) {
+                if let Some(info) = pending.info {
+                    state.info = Some(info);
+                }
+                state.raw = Some(pending.raw);
             }
+        }
+        if let Some(pending) = prompt_cache {
+            self.anthropic.prompt_cache_overage.record(
+                &pending.scope,
+                pending.account_epoch,
+                pending.is_using_overage,
+                pending.header_order,
+            );
         }
     }
 
@@ -704,23 +997,26 @@ impl ApiService {
         // through to the default threshold until the live tier snapshot lands.
         NEAR_LIMIT_WRAP_UP_DEFAULT_THRESHOLD
     }
+}
 
+impl RateLimitSnapshot {
     fn update_near_limit_wrap_up_state(
-        &self,
+        &mut self,
         info: &RateLimitInfo,
         raw: RawUtilization,
-        _observation_ts_ms: u128,
+        threshold: f64,
     ) {
-        // Oracle 2.1.252 `extractQuotaStatusFromHeaders` uses `Date.now()` for
-        // expiry/future checks, independently of the observation timestamp
-        // used by the stale-response guard. `five_hour` names the quota bucket;
-        // it is not a "reset within five hours" duration predicate.
-        let now_secs = u64::try_from(Self::now_ms() / 1000).unwrap_or(u64::MAX);
-        let mut pending = self.pending_near_limit_wrap_up_hint.lock().unwrap();
-        let mut window_key = self.near_limit_wrap_up_window_key.lock().unwrap();
-        if window_key.is_some_and(|reset| reset < now_secs) {
-            *pending = false;
-            *window_key = None;
+        let now_secs = ApiService::rate_limit_now_secs();
+        let Some(owner) = self.owner.as_ref() else {
+            return;
+        };
+        let history = self
+            .accounts
+            .get_mut(&owner.account)
+            .expect("admitted quota owner");
+        if history.wrap_up_window.is_some_and(|reset| reset < now_secs) {
+            history.pending_wrap_up = false;
+            history.wrap_up_window = None;
         }
 
         let Some(window) = raw.five_hour else {
@@ -728,31 +1024,24 @@ impl ApiService {
         };
         if !window.utilization.is_finite()
             || window.resets_at <= now_secs
-            || window.utilization < self.near_limit_wrap_up_threshold()
+            || window.utilization < threshold
         {
             return;
         }
 
-        // Oracle also requires `!aM()` here, where `aM()` is its separate
-        // low-priority/slow-mode controller. LingXi does not implement that
-        // subsystem, so every representable runtime state is the inactive
-        // branch. If slow mode is added, it must suppress arming here and make
-        // `consume_pending_near_limit_wrap_up_hint` clear-then-return-false.
-
-        // Extra usage suppresses an armed hint but deliberately preserves the
-        // reset key. If overage later turns off in the same window, the hint
-        // must not re-arm (`nearLimitWrapUpWindowKey !== resets_at`).
+        // Extra usage suppresses a pending hint while retaining the reset
+        // key, so disabling overage in the same window cannot re-arm it.
         if matches!(
             info.overage_status.as_deref(),
             Some("allowed" | "allowed_warning")
         ) {
-            *pending = false;
+            history.pending_wrap_up = false;
             return;
         }
 
-        if *window_key != Some(window.resets_at) {
-            *window_key = Some(window.resets_at);
-            *pending = true;
+        if history.wrap_up_window != Some(window.resets_at) {
+            history.wrap_up_window = Some(window.resets_at);
+            history.pending_wrap_up = true;
         }
     }
 }

@@ -181,6 +181,7 @@ pub(super) fn json_payload_u64_at(
 pub(super) fn prepared_output_budget_observation(
     prepared: &crate::PreparedLlmCall,
     request: &lingxi_llm_client::protocol::ChatRequest,
+    allow_replay: bool,
 ) -> serde_json::Value {
     let body = &prepared.provider_request.body_json;
     let mut field = None;
@@ -223,23 +224,8 @@ pub(super) fn prepared_output_budget_observation(
     } else {
         None
     };
-    let hosted_wire_tools = body.array_len("/tools").is_some_and(|length| {
-        (0..length).any(|index| {
-            let Some(tool) = body.array_item_at("/tools", index) else {
-                return false;
-            };
-            tool.string_at("/type")
-                .is_some_and(|kind| !matches!(kind.as_str(), "function" | "custom"))
-                || tool
-                    .string_at("/function/name")
-                    .is_some_and(|name| name.starts_with('$'))
-        })
-    });
-    let native_search = ["enable_search", "web_search"]
-        .iter()
-        .any(|key| body.bool_at(&format!("/{key}")) == Some(true));
     serde_json::json!({"field":field,"value":value,"provider_default":default,
-        "can_repeat_original":request.hosted_tools.is_empty() && request.native_options.is_empty() && !hosted_wire_tools && !native_search,
+        "can_repeat_original":allow_replay && request.native_options.is_empty(),
         "source":if request.max_tokens.is_some() {"explicit"} else if value.is_some() {"application_default"} else {"provider_default"},
         "profile":prepared.route.resolved_route.profile_name,"model":model})
 }

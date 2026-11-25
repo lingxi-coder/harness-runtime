@@ -79,10 +79,10 @@ fn native_mid_conversation_system_memoizes_per_service_and_raw_model() {
     ]);
     let model = "claude-sonnet-4-6";
     let profile = native_capability_profile(
-        ProviderId::FoundryClaude,
-        "foundry",
-        ProtocolFamily::FoundryClaude,
-        "https://resource.services.ai.azure.com/anthropic",
+        ProviderId::VertexClaude,
+        "vertex",
+        ProtocolFamily::VertexClaude,
+        "https://us-central1-aiplatform.googleapis.com",
         model,
         vec!["sonnet-route-alias".to_owned()],
     );
@@ -92,7 +92,7 @@ fn native_mid_conversation_system_memoizes_per_service_and_raw_model() {
     // by the raw requested model string in this host/profile.
     std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", model);
     std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES", "");
-    assert!(!first_host.supports_native_mid_conversation_system(model, Some("foundry")));
+    assert!(!first_host.supports_native_mid_conversation_system(model, Some("vertex")));
 
     // The Native hQ/ Ta result stays stable for the same host and raw key
     // after process configuration changes.
@@ -100,17 +100,17 @@ fn native_mid_conversation_system_memoizes_per_service_and_raw_model() {
         "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
         "mid_conversation_system",
     );
-    assert!(!first_host.supports_native_mid_conversation_system(model, Some("foundry")));
+    assert!(!first_host.supports_native_mid_conversation_system(model, Some("vertex")));
 
     // A new raw key that resolves to the same route gets its own QTe
     // lookup, and a new ApiService gets an independent host cache.
     std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet-route-alias");
     assert!(
-        first_host.supports_native_mid_conversation_system("sonnet-route-alias", Some("foundry"))
+        first_host.supports_native_mid_conversation_system("sonnet-route-alias", Some("vertex"))
     );
     std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", model);
     let second_host = native_capability_adapter(vec![profile]);
-    assert!(second_host.supports_native_mid_conversation_system(model, Some("foundry")));
+    assert!(second_host.supports_native_mid_conversation_system(model, Some("vertex")));
 }
 
 #[test]
@@ -156,21 +156,21 @@ fn native_mid_conversation_system_cache_keeps_provider_profiles_separate() {
             Vec::new(),
         ),
         native_capability_profile(
-            ProviderId::FoundryClaude,
-            "foundry",
-            ProtocolFamily::FoundryClaude,
-            "https://resource.services.ai.azure.com/anthropic",
+            ProviderId::VertexClaude,
+            "vertex",
+            ProtocolFamily::VertexClaude,
+            "https://us-central1-aiplatform.googleapis.com",
             model,
             Vec::new(),
         ),
     ]);
 
     // A non-Anthropic route returns before entering the cache. First-party
-    // routes disallow QTe model-option overrides; Foundry allows them. The
+    // routes disallow QTe model-option overrides; Vertex allows them. The
     // shared raw model string must retain each route's actual result.
     assert!(!adapter.supports_native_mid_conversation_system(model, Some("openai")));
     assert!(!adapter.supports_native_mid_conversation_system(model, Some("anthropic")));
-    assert!(adapter.supports_native_mid_conversation_system(model, Some("foundry")));
+    assert!(adapter.supports_native_mid_conversation_system(model, Some("vertex")));
 
     let reverse_order = native_capability_adapter(vec![
         native_capability_profile(
@@ -182,15 +182,15 @@ fn native_mid_conversation_system_cache_keeps_provider_profiles_separate() {
             Vec::new(),
         ),
         native_capability_profile(
-            ProviderId::FoundryClaude,
-            "foundry",
-            ProtocolFamily::FoundryClaude,
-            "https://resource.services.ai.azure.com/anthropic",
+            ProviderId::VertexClaude,
+            "vertex",
+            ProtocolFamily::VertexClaude,
+            "https://us-central1-aiplatform.googleapis.com",
             model,
             Vec::new(),
         ),
     ]);
-    assert!(reverse_order.supports_native_mid_conversation_system(model, Some("foundry")));
+    assert!(reverse_order.supports_native_mid_conversation_system(model, Some("vertex")));
     assert!(!reverse_order.supports_native_mid_conversation_system(model, Some("anthropic")));
 }
 
@@ -212,6 +212,7 @@ fn last_request_id_captures_request_id_header() {
         Some("client_uuid"),
         lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
         "anthropic",
+        None,
     );
     assert_eq!(adapter.last_request_id(), Some("req_011abc".to_string()));
     // Server header present → server origin (client id ignored).
@@ -228,6 +229,7 @@ fn last_request_id_captures_request_id_header() {
         Some("client_uuid"),
         lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
         "anthropic",
+        None,
     );
     assert_eq!(adapter.last_request_id(), Some("req_xfallback".to_string()));
     assert_eq!(
@@ -241,6 +243,7 @@ fn last_request_id_captures_request_id_header() {
         Some("client_uuid"),
         lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
         "anthropic",
+        None,
     );
     assert_eq!(adapter.last_request_id(), Some("client_uuid".to_string()));
     assert_eq!(
@@ -254,6 +257,7 @@ fn last_request_id_captures_request_id_header() {
         None,
         lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
         "anthropic",
+        None,
     );
     assert_eq!(adapter.last_request_id(), None);
     assert_eq!(adapter.last_request_id_origin(), None);
@@ -302,92 +306,60 @@ fn build_request_keeps_system_source_for_sdk_projection() {
     assert!(req.input.prompt_cache.breakpoints.is_empty());
 }
 
-#[test]
-fn build_request_samples_cache_ttl_settings_into_execution_policy() {
-    use lingxi_core::settings::schema::{
-        PromptCacheTtl as HostTtl, PromptCacheTtlSettings as HostSettings,
-    };
-    use lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheTtl;
+#[tokio::test]
+async fn cache_ttl_source_is_deferred_until_an_anthropic_attempt_even_after_rerouting() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let _guard = CACHE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _env = CacheEnvRestore::clear(&[
-        "DISABLE_PROMPT_CACHING",
-        "FORCE_PROMPT_CACHING_5M",
-        "CLAUDE_CODE_PROMPT_CACHE_TTL",
-        "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
-        "ENABLE_PROMPT_CACHING_1H",
-        "ENABLE_PROMPT_CACHING_1H_BEDROCK",
-        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
-        "LINGXI_GLOBAL_CACHE_SCOPE",
-    ]);
-    let settings = Arc::new(std::sync::Mutex::new(HostSettings {
-        main: Some(HostTtl::OneHour),
-        subagent: Some(HostTtl::FiveMinutes),
-    }));
-    let source_settings = settings.clone();
-    let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+    let reads = Arc::new(AtomicUsize::new(0));
+    let calls = reads.clone();
+    let adapter = make_request_adapter(FakeTransport::always(ProviderResponse::json(
         200,
         ok_response_json(),
     )))
-    .with_prompt_cache_ttl_settings_source(Arc::new(move || Ok(*source_settings.lock().unwrap())));
-    let system_text = format!("{HEADER}{SECTION_SEP}retained settings prompt");
-    let system = custom_system_prompt(Some(&system_text));
-
-    let main = adapter
-        .build_request(
-            "claude-sonnet-4-20250514",
-            None,
-            system.as_ref(),
-            vec![text_user_msg("main")],
-            vec![],
+    .with_prompt_cache_ttl_settings_source(Arc::new(move || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Err(lingxi_core::settings::SettingsError::SourceUnavailable(
+            "cache TTL",
+        ))
+    }));
+    let system = "portable system instructions";
+    let (mut request, _) = adapter
+        .build_main_message_request(
+            MessagesCreateRequest::new(
+                "gpt-5",
+                Some("openai"),
+                custom_system_prompt(Some(system)),
+                vec![text_user_msg("hello")],
+                Vec::new(),
+            ),
             false,
-            None,
-            false,
-            PromptCacheQuerySource::Named("sdk"),
         )
-        .expect("main request");
-    let main_policy = &main
-        .execution
-        .prompt_cache
-        .as_ref()
-        .expect("request retains the SDK prompt context")
-        .policy;
+        .unwrap();
+    let openai = adapter.client.prepare(&request).await.unwrap();
     assert_eq!(
-        main_policy.prompt_cache_ttl_settings.prompt_cache_ttl,
-        Some(PromptCacheTtl::OneHour)
+        openai
+            .provider_request
+            .body_json
+            .string_at("/instructions")
+            .as_deref(),
+        Some(system)
     );
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
 
-    *settings.lock().unwrap() = HostSettings {
-        main: Some(HostTtl::FiveMinutes),
-        subagent: Some(HostTtl::OneHour),
-    };
-    let subagent = adapter
-        .build_request(
-            "claude-sonnet-4-20250514",
-            None,
-            system.as_ref(),
-            vec![text_user_msg("subagent")],
-            vec![],
-            false,
-            None,
-            false,
-            PromptCacheQuerySource::Subagent,
-        )
-        .expect("subagent request");
-    let subagent_policy = &subagent
-        .execution
-        .prompt_cache
-        .as_ref()
-        .expect("request retains the SDK prompt context")
-        .policy;
-    assert_eq!(
-        subagent_policy
-            .prompt_cache_ttl_settings
-            .subagent_prompt_cache_ttl,
-        Some(PromptCacheTtl::OneHour)
-    );
+    request.profile = Some("anthropic".into());
+    request.input.model = "claude-sonnet-4-20250514".into();
+    for _ in 0..2 {
+        assert!(matches!(
+            adapter.client.prepare(&request).await,
+            Err(LlmError::SettingsSource { .. })
+        ));
+    }
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+    request.profile = Some("openai".into());
+    request.input.model = "gpt-5".into();
+    adapter.client.prepare(&request).await.unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -451,6 +423,11 @@ async fn build_request_projects_sampled_cache_ttl_settings_to_wire() {
         main: Some(HostTtl::FiveMinutes),
         subagent: Some(HostTtl::OneHour),
     };
+    let main_retry = adapter.client.prepare(&main).await.expect("prepare retry");
+    assert_eq!(
+        system_cache_ttl(&request_body_value(&main_retry.provider_request.body_json)),
+        "1h"
+    );
     let subagent = adapter
         .build_request(
             "claude-sonnet-4-20250514",
@@ -2534,6 +2511,38 @@ async fn subscriber_429_is_terminal_in_adapter() {
         1,
         "subscriber 429 must not retry (seen_count should be 1)"
     );
+}
+
+#[tokio::test]
+async fn claude_subscription_does_not_stop_api_key_rate_limit_retry() {
+    let transport = FakeTransport::sequence(vec![
+        FakeResponse::Ok(ProviderResponse {
+            status: 429,
+            headers: BTreeMap::from([("retry-after".into(), "0".into())]),
+            body_json: provider_payload(serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            })),
+            request_id: None,
+        }),
+        FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+    ]);
+    let mut service = make_adapter_with_retries(transport.clone(), Some(1));
+    service.subscriber = SubscriberState {
+        is_subscriber: true,
+        is_enterprise: false,
+    };
+    service
+        .messages_create(MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(transport.seen_count(), 2);
 }
 
 #[tokio::test]

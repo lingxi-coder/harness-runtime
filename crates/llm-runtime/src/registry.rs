@@ -83,6 +83,42 @@ pub struct ConnectionHop {
     pub profile_name: String,
     /// Provider-local model value to send on that connection.
     pub request_model: String,
+    /// Exact row selector for a managed account, including rows sharing a wire ID.
+    pub display_model: Option<String>,
+    /// Unambiguous lookup key on that profile when the display label is shared.
+    pub selected_key: Option<String>,
+}
+
+impl ConnectionHop {
+    pub(crate) fn selector(&self) -> &str {
+        self.selected_key
+            .as_deref()
+            .or(self.display_model.as_deref())
+            .unwrap_or(&self.request_model)
+    }
+}
+
+/// Pick a key that names only this row in the SDK profile's resolver index.
+pub(crate) fn row_selector<'a>(
+    profile: &'a lingxi_llm_client::protocol::ProviderProfile,
+    display: &str,
+    wire: &str,
+) -> Option<&'a str> {
+    let row = profile
+        .models
+        .iter()
+        .find(|row| row.display_model == display && row.request_model == wire)?;
+    std::iter::once(row.display_model.as_str())
+        .chain(std::iter::once(row.request_model.as_str()))
+        .chain(row.aliases.iter().map(String::as_str))
+        .find(|key| {
+            !profile.models.iter().any(|other| {
+                !std::ptr::eq(row, other)
+                    && (other.display_model == *key
+                        || other.request_model == *key
+                        || other.aliases.iter().any(|alias| alias.as_str() == *key))
+            })
+        })
 }
 
 /// Resolved main route plus an optional vision delegate route.
@@ -98,6 +134,8 @@ pub struct MediaRoute {
 #[derive(Clone)]
 pub struct ModelRegistry {
     resolver: std::sync::Arc<lingxi_llm_client::client::RoutingCatalog>,
+    binding_resolver:
+        std::sync::Arc<std::sync::OnceLock<lingxi_llm_client::client::RoutingCatalog>>,
     config: ClientConfig,
 }
 
@@ -107,11 +145,22 @@ impl ModelRegistry {
         model: &str,
         profile: Option<&str>,
     ) -> Result<lingxi_llm_client::client::OutputTokenLimits, LlmError> {
-        self.resolver
-            .output_token_limits_in(model, profile)
-            .map_err(|error| LlmError::InvalidRequest {
-                message: error.to_string(),
+        let route = self.resolve_in(model, profile)?;
+        let row = self
+            .resolver
+            .profiles()
+            .iter()
+            .find(|profile| profile.profile_name == route.profile_name)
+            .and_then(|profile| {
+                profile.models.iter().find(|row| {
+                    row.display_model == route.display_model
+                        && row.request_model == route.request_model
+                })
             })
+            .ok_or(LlmError::ModelUnavailable)?;
+        Ok(lingxi_llm_client::client::OutputTokenLimits::from_metadata(
+            &row.metadata,
+        ))
     }
     pub(crate) fn profile_pricing_config(&self, profile: &str) -> Option<crate::PricingConfig> {
         self.config
@@ -184,11 +233,32 @@ impl ModelRegistry {
             .iter()
             .find(|p| p.profile_name == route.profile_name)
             .and_then(|p| {
-                p.models
-                    .iter()
-                    .find(|m| m.request_model == route.request_model)
+                p.models.iter().find(|m| {
+                    m.request_model == route.request_model && m.display_model == route.display_model
+                })
             })
             .is_some_and(|m| m.metadata.status.as_deref() == Some("disabled"))
+    }
+
+    /// Resolve both ends of a protocol redirect and enforce the status of each
+    /// exact configured row before account selection or request preparation.
+    pub(crate) fn available_route_and_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<(ResolvedRoute, Option<ResolvedRoute>), LlmError> {
+        let route = self.resolve_in(model, profile)?;
+        if self.model_disabled(&route) {
+            return Err(LlmError::ModelUnavailable);
+        }
+        let source = self.redirected_source(model, profile, &route)?;
+        if source
+            .as_ref()
+            .is_some_and(|source| self.model_disabled(source))
+        {
+            return Err(LlmError::ModelUnavailable);
+        }
+        Ok((route, source))
     }
 
     /// Build a registry from validated client config.
@@ -252,7 +322,62 @@ impl ModelRegistry {
             profiles,
             lingxi_llm_client::protocol::Region::International,
         ));
-        Ok(Self { resolver, config })
+        Ok(Self {
+            resolver,
+            config,
+            binding_resolver: Default::default(),
+        })
+    }
+
+    /// The SDK catalog for routes already admitted by the host's region selection.
+    pub(crate) fn routing_catalog(&self) -> &lingxi_llm_client::client::RoutingCatalog {
+        &self.resolver
+    }
+
+    /// Resolve the logical binding before its default format redirects to an
+    /// authorized sibling. The ordinary route must already have validated that
+    /// redirect. Reuse the SDK's exact native/qualified/group precedence.
+    pub(crate) fn source_binding(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        route: &ResolvedRoute,
+    ) -> Result<String, LlmError> {
+        Ok(self
+            .redirected_source(model, profile, route)?
+            .map_or_else(|| route.profile_name.clone(), |source| source.profile_name))
+    }
+    pub(crate) fn redirected_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        route: &ResolvedRoute,
+    ) -> Result<Option<ResolvedRoute>, LlmError> {
+        if !self.resolver.profiles().iter().any(|source| {
+            source
+                .connection
+                .default_protocol
+                .filter(|format| *format != source.protocol)
+                .and_then(|format| source.connection.protocol_profiles.get(&format))
+                == Some(&route.profile_name)
+        }) {
+            return Ok(None);
+        }
+        let bindings = self.binding_resolver.get_or_init(|| {
+            let mut profiles = self.resolver.profiles().to_vec();
+            for source in &mut profiles {
+                source.connection.default_protocol = None;
+            }
+            lingxi_llm_client::client::RoutingCatalog::new(
+                profiles,
+                lingxi_llm_client::protocol::Region::International,
+            )
+        });
+        let source = self.resolve_with(bindings, model, profile)?;
+        if source.request_model != route.request_model {
+            return Err(LlmError::ModelUnavailable);
+        }
+        Ok(Some(source))
     }
 
     /// Return configured profile/model pairs.
@@ -365,7 +490,15 @@ impl ModelRegistry {
         requested: &str,
         profile: Option<&str>,
     ) -> Result<ResolvedRoute, LlmError> {
-        let resolved=self.resolver.resolve_in_for_connection_failover(requested,profile).map_err(|error|match error {
+        self.resolve_with(&self.resolver, requested, profile)
+    }
+    fn resolve_with(
+        &self,
+        resolver: &lingxi_llm_client::client::RoutingCatalog,
+        requested: &str,
+        profile: Option<&str>,
+    ) -> Result<ResolvedRoute, LlmError> {
+        let resolved=resolver.resolve_in_for_connection_failover(requested,profile).map_err(|error|match error {
             lingxi_llm_client::ResolveError::UnknownModel {..}=>LlmError::ModelUnavailable,
             lingxi_llm_client::ResolveError::AmbiguousAcrossGroups {model,groups}=>LlmError::InvalidRequest {message:format!("model reference '{model}' is ambiguous across profiles: {} — qualify it, e.g. {}",groups.join(", "),groups.iter().map(|g|format!("{g}/{model}")).collect::<Vec<_>>().join(", "))},
             other=>LlmError::InvalidRequest {message:other.to_string()},
@@ -405,6 +538,8 @@ impl ModelRegistry {
                 .map(|hop| ConnectionHop {
                     profile_name: hop.profile_name,
                     request_model: hop.request_model,
+                    display_model: None,
+                    selected_key: None,
                 })
                 .collect(),
             failover: provider.connection.failover,

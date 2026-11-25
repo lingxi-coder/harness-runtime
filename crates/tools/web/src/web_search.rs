@@ -15,6 +15,10 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -241,16 +245,37 @@ fn budget_capped_result(query: &Source, used: u32, max: u32) -> ToolCallResult {
     }
 }
 
+/// Shared WebSearch call count for a session without a task registry.
+#[derive(Clone, Default)]
+pub struct WebSearchBudget(Arc<AtomicU32>);
+
+impl WebSearchBudget {
+    fn try_reserve(&self, max: u32) -> Result<(), u32> {
+        self.0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used < max).then(|| used + 1)
+            })
+            .map(|_| ())
+    }
+}
+
 /// Search through the selected provider's hosted-search service. Never self-retries.
 pub struct WebSearchTool {
     ctx: BuiltinToolContext,
+    budget: WebSearchBudget,
 }
 
 impl WebSearchTool {
     /// Construct a new tool.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self::with_search_budget(ctx, WebSearchBudget::default())
+    }
+
+    /// Reuse the session's budget when rebuilding a tool registry for a turn.
+    #[must_use]
+    pub fn with_search_budget(ctx: BuiltinToolContext, budget: WebSearchBudget) -> Self {
+        Self { ctx, budget }
     }
 
     async fn emit_started(
@@ -711,17 +736,15 @@ impl Tool for WebSearchTool {
             ).into()));
         }
 
-        // Reject unsupported requests before charging the session budget.
-        // Supported requests retain the session cap and increment once before
-        // execution. Library callers without a registry have no session cap.
-        if let Some(registry) = &self.ctx.task_registry {
-            let max = resolve_max_web_searches_per_session();
-            let used = registry.web_search_calls();
-            if used >= max {
-                self.emit_web_search_session_cap(max).await;
-                return Ok(budget_capped_result(&parsed_input.query, used, max));
-            }
-            registry.increment_web_search_calls();
+        // Charge supported requests once, immediately before execution.
+        let max = resolve_max_web_searches_per_session();
+        let reservation = match &self.ctx.task_registry {
+            Some(registry) => registry.try_reserve_web_search_call(max),
+            None => self.budget.try_reserve(max),
+        };
+        if let Err(used) = reservation {
+            self.emit_web_search_session_cap(max).await;
+            return Ok(budget_capped_result(&parsed_input.query, used, max));
         }
 
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
@@ -983,10 +1006,15 @@ mod tests {
         fn web_search_calls(&self) -> u32 {
             self.count.load(std::sync::atomic::Ordering::SeqCst)
         }
-        fn increment_web_search_calls(&self) {
-            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.increments
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        fn try_reserve_web_search_call(&self, max: u32) -> Result<(), u32> {
+            use std::sync::atomic::Ordering;
+
+            self.count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    (used < max).then(|| used + 1)
+                })?;
+            self.increments.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
     }
 
@@ -1573,6 +1601,39 @@ mod tests {
         assert_eq!(registry.increments(), 1);
         assert_eq!(hosted.calls.load(Ordering::SeqCst), 1);
     }
+
+    #[tokio::test]
+    async fn session_budget_is_shared_by_tools_without_task_registry() {
+        let hosted = Arc::new(Hosted::default());
+        let ctx = hosted_context(hosted.clone());
+        assert!(ctx.task_registry.is_none());
+        let max = resolve_max_web_searches_per_session();
+        let budget = WebSearchBudget(Arc::new(AtomicU32::new(max - 1)));
+        let first = WebSearchTool::with_search_budget(ctx.clone(), budget.clone());
+        let rebuilt = WebSearchTool::with_search_budget(ctx.clone(), budget.clone());
+        let input = generated(json!({"query":"rust language"}));
+        let (first_result, rebuilt_result) = tokio::join!(
+            first.call(input.clone(), fresh_ctx(), progress_channel().0),
+            rebuilt.call(input.clone(), fresh_ctx(), progress_channel().0),
+        );
+        let count = |result: Result<ToolCallResult, ToolError>| {
+            result.unwrap().data.number_at("/searchCount").unwrap()
+        };
+        assert_eq!(count(first_result) + count(rebuilt_result), 1.0);
+        assert_eq!(hosted.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.try_reserve(max), Err(max));
+
+        let other_session = WebSearchTool::new(ctx);
+        assert_eq!(
+            count(
+                other_session
+                    .call(input, fresh_ctx(), progress_channel().0)
+                    .await
+            ),
+            1.0
+        );
+    }
+
     #[tokio::test]
     async fn hosted_error_telemetry_preserves_status_and_timeout() {
         #[derive(Default)]

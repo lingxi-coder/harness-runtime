@@ -10,9 +10,9 @@ use crate::service::complete::NonStreamDrivePolicy;
 use crate::service::request::{
     custom_system_prompt, prompt_cache_query_source, side_query_system_prompt,
 };
-use crate::service::retry::{rate_limit_cannot_clear, reasoning_budget};
+use crate::service::retry::reasoning_budget;
 use crate::service::{ApiService, MOD_REQUEST_EFFORT};
-use crate::{HistoryEvent, HistoryResponse, LlmError, LlmRequest, PromptCacheQuerySource};
+use crate::{HistoryEvent, HistoryResponse, LlmError, LlmRequest};
 use futures::stream::BoxStream;
 use lingxi_core::types::ConversationMessage;
 
@@ -26,13 +26,16 @@ impl ApiService {
         request.stream = false;
         request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
-        let control = resolve_retry_control_with_settings(
+        let mut control = resolve_retry_control_with_settings(
             &request.input.model,
             None,
             self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
+        if let Some(max) = request.execution.side_query_max_retries {
+            control.max_retries = control.max_retries.min(max);
+        }
         self.drive_non_stream(request, control, DispatchHeaderState::AUXILIARY)
             .await
     }
@@ -69,25 +72,16 @@ impl ApiService {
         request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         crate::anthropic_extra_body::capture(&mut request)?;
-        let sub = self.effective_subscriber();
         let mut control = resolve_retry_control_with_settings(
             &request.input.model,
             None,
-            sub.is_subscriber,
+            false,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
         control.max_retries = max_retries;
         let scope = ModelCallRetryScope::default().with_private_output();
-        let mut state = RetryState {
-            is_subscriber: sub.is_subscriber,
-            is_enterprise: sub.is_enterprise,
-            rate_limit_terminal: rate_limit_cannot_clear(
-                request.profile.as_deref(),
-                &request.input.model,
-            ),
-            ..RetryState::default()
-        };
+        let mut state = RetryState::default();
         let control = scope.configure(&control, &mut state);
         let thinking_budget = reasoning_budget(request.input.thinking.as_ref());
         scope
@@ -103,6 +97,9 @@ impl ApiService {
                         Ok(response) => return Ok(response),
                         Err((_, error)) => error,
                     };
+                    if !error.allows_automatic_replay() {
+                        return Err(error);
+                    }
                     match scope.next_step(&mut state, &control, &error, thinking_budget, None) {
                         DriveStep::RetryAfter(delay) => {
                             self.report_and_sleep_retry(&error, delay, &state, &control)
@@ -348,13 +345,47 @@ impl ApiService {
         query_source: Option<&str>,
     ) -> Result<LlmRequest, LlmError> {
         let system = side_query_system_prompt(system, system_input)?;
-        let mut req = self.build_request(
+        let mut req = self.build_json_schema_request(
             model,
             profile,
             system.as_ref(),
             messages,
+            schema,
+            max_tokens,
+            query_source,
+        )?;
+        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        req.set_effort(effort)?;
+        if query_source.is_some() {
+            req.execution.query_source = query_source.map(str::to_string);
+        }
+        crate::anthropic_extra_body::capture(&mut req)?;
+        Ok(req)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_json_schema_request(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&crate::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        schema: serde_json::Value,
+        max_tokens: Option<u32>,
+        query_source: Option<&str>,
+    ) -> Result<LlmRequest, LlmError> {
+        let streaming = self
+            .resolve_media_route(model, profile)?
+            .main
+            .capabilities
+            .streaming;
+        let mut req = self.build_request(
+            model,
+            profile,
+            system,
+            messages,
             Vec::new(),
-            true,
+            streaming,
             max_tokens,
             false,
             prompt_cache_query_source(query_source),
@@ -369,13 +400,51 @@ impl ApiService {
                 })?,
             strict: true,
         };
-        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
-        req.set_effort(effort)?;
-        if query_source.is_some() {
-            req.execution.query_source = query_source.map(str::to_string);
-        }
-        crate::anthropic_extra_body::capture(&mut req)?;
         Ok(req)
+    }
+
+    /// Return one completed auxiliary response using the transport selected by
+    /// the canonical request builder. Partial structured output is unusable.
+    pub async fn complete_side_query_request(
+        &self,
+        request: LlmRequest,
+    ) -> Result<HistoryResponse, LlmError> {
+        if request.stream {
+            let stream = self.stream_request(request).await?;
+            crate::stream_accumulator::accumulate_stream_salvaging(stream)
+                .await
+                .map_err(|(_, error)| error)
+        } else {
+            self.execute_side_query_request(request).await
+        }
+    }
+
+    /// Complete a structured-output query with the session's inherited thinking policy.
+    pub async fn complete_json_schema(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        schema: serde_json::Value,
+        max_tokens: Option<u32>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<HistoryResponse, LlmError> {
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = self.build_json_schema_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                schema,
+                max_tokens,
+                None,
+            )?;
+            req.set_effort(effort)?;
+            self.complete_side_query_request(req).await
+        })
+        .await
     }
 
     /// Run a session-bound side query through the same request builder,
@@ -410,38 +479,41 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<HistoryResponse, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = crate::thinking_scope::isolated(|| {
+                self.build_request(
+                    model,
+                    profile,
+                    system.as_ref(),
+                    messages,
+                    tools,
+                    false,
+                    max_tokens,
+                    false,
+                    prompt_cache_query_source(query_source),
+                )
+            })?;
+
+            // `build_request` applies main-turn-only overrides. A forked summary
+            // owns these fields independently, so restore its explicit values.
+            req.set_tool_choice(tool_choice);
+            req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+            req.input.stop_sequences = stop_sequences;
+            req.input.temperature = temperature;
+            req.execution.query_source = query_source.map(str::to_string);
+
+            let ctl = resolve_retry_control_with_settings(
                 model,
-                profile,
-                system.as_ref(),
-                messages,
-                tools,
-                false,
-                max_tokens,
-                false,
-                prompt_cache_query_source(query_source),
-            )
-        })?;
-
-        // `build_request` applies main-turn-only overrides. A forked summary
-        // owns these fields independently, so restore its explicit values.
-        req.set_tool_choice(tool_choice);
-        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
-        req.input.stop_sequences = stop_sequences;
-        req.input.temperature = temperature;
-        req.execution.query_source = query_source.map(str::to_string);
-
-        let ctl = resolve_retry_control_with_settings(
-            model,
-            None,
-            self.effective_subscriber().is_subscriber,
-            &ResolveRetryEnv::from_process_env(),
-            self.settings_max_retries,
-        );
-        self.drive_non_stream(req, ctl, DispatchHeaderState::AUXILIARY)
-            .await
+                None,
+                self.effective_subscriber().is_subscriber,
+                &ResolveRetryEnv::from_process_env(),
+                self.settings_max_retries,
+            );
+            self.drive_non_stream(req, ctl, DispatchHeaderState::AUXILIARY)
+                .await
+        })
+        .await
     }
 
     /// Non-streaming side query with explicit thinking semantics.
@@ -467,34 +539,37 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<HistoryResponse, LlmError> {
-        let req = self.build_side_query_request_with_thinking(
-            model,
-            profile,
-            system,
-            system_input,
-            skip_global_cache_for_system_prompt,
-            messages,
-            tools,
-            max_tokens,
-            tool_choice,
-            stop_sequences,
-            thinking,
-            effort,
-            temperature,
-            query_source,
-            std::collections::HashSet::new(),
-            std::collections::HashMap::new(),
-        )?;
+        self.with_account_call_snapshot(async {
+            let req = self.build_side_query_request_with_thinking(
+                model,
+                profile,
+                system,
+                system_input,
+                skip_global_cache_for_system_prompt,
+                messages,
+                tools,
+                max_tokens,
+                tool_choice,
+                stop_sequences,
+                thinking,
+                effort,
+                temperature,
+                query_source,
+                std::collections::HashSet::new(),
+                std::collections::HashMap::new(),
+            )?;
 
-        let ctl = resolve_retry_control_with_settings(
-            model,
-            None,
-            self.effective_subscriber().is_subscriber,
-            &ResolveRetryEnv::from_process_env(),
-            self.settings_max_retries,
-        );
-        self.drive_non_stream(req, ctl, DispatchHeaderState::AUXILIARY)
-            .await
+            let ctl = resolve_retry_control_with_settings(
+                model,
+                None,
+                self.effective_subscriber().is_subscriber,
+                &ResolveRetryEnv::from_process_env(),
+                self.settings_max_retries,
+            );
+            self.drive_non_stream(req, ctl, DispatchHeaderState::AUXILIARY)
+                .await
+        })
+        .await
     }
 
     /// Open a session-bound streaming side query for bounded embedded clients.
@@ -514,26 +589,29 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(
-                model,
-                profile,
-                system.as_ref(),
-                messages,
-                tools,
-                true,
-                max_tokens,
-                false,
-                prompt_cache_query_source(query_source),
-            )
-        })?;
-        req.set_tool_choice(tool_choice);
-        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
-        req.input.stop_sequences = stop_sequences;
-        req.input.temperature = temperature;
-        req.execution.query_source = query_source.map(str::to_string);
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = crate::thinking_scope::isolated(|| {
+                self.build_request(
+                    model,
+                    profile,
+                    system.as_ref(),
+                    messages,
+                    tools,
+                    true,
+                    max_tokens,
+                    false,
+                    prompt_cache_query_source(query_source),
+                )
+            })?;
+            req.set_tool_choice(tool_choice);
+            req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+            req.input.stop_sequences = stop_sequences;
+            req.input.temperature = temperature;
+            req.execution.query_source = query_source.map(str::to_string);
+            self.drive_stream(req).await
+        })
+        .await
     }
 
     /// Streaming side query with explicit thinking semantics.
@@ -552,26 +630,29 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(
-                model,
-                profile,
-                system.as_ref(),
-                messages,
-                tools,
-                true,
-                max_tokens,
-                false,
-                prompt_cache_query_source(query_source),
-            )
-        })?;
-        req.set_tool_choice(tool_choice);
-        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
-        req.input.stop_sequences = stop_sequences;
-        req.execution.query_source = query_source.map(str::to_string);
-        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = crate::thinking_scope::isolated(|| {
+                self.build_request(
+                    model,
+                    profile,
+                    system.as_ref(),
+                    messages,
+                    tools,
+                    true,
+                    max_tokens,
+                    false,
+                    prompt_cache_query_source(query_source),
+                )
+            })?;
+            req.set_tool_choice(tool_choice);
+            req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+            req.input.stop_sequences = stop_sequences;
+            req.execution.query_source = query_source.map(str::to_string);
+            self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+            self.drive_stream(req).await
+        })
+        .await
     }
 
     /// Structured-output streaming call constrained by a JSON SCHEMA rather
@@ -595,34 +676,21 @@ impl ApiService {
         max_tokens: Option<u32>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let system = custom_system_prompt(system);
-        let mut req = self.build_request(
-            model,
-            profile,
-            system.as_ref(),
-            messages,
-            Vec::new(),
-            true,
-            max_tokens,
-            false,
-            PromptCacheQuerySource::Unspecified,
-        )?;
-        // JSON-schema side queries are independent structured-output requests,
-        // not forced-tool calls. A parent `--json-schema` turn may have set a
-        // session-level `forced_tool_choice`; do not send that choice with the
-        // empty tool list used by this request.
-        req.input.tool_choice = lingxi_llm_client::protocol::ToolChoice::Auto;
-        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
-        req.set_effort(effort)?;
-        req.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
-            name: "response".into(),
-            schema: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&schema)
-                .map_err(|error| LlmError::InvalidRequest {
-                    message: format!("JSON schema could not be encoded as source: {error}"),
-                })?,
-            strict: true,
-        };
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let system = custom_system_prompt(system);
+            let mut req = self.build_json_schema_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                schema,
+                max_tokens,
+                None,
+            )?;
+            req.set_effort(effort)?;
+            self.stream_request(req).await
+        })
+        .await
     }
 
     /// [`Self::stream_json_schema`] with explicit thinking and temperature
@@ -661,19 +729,22 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let req = self.build_json_schema_request_with_thinking(
-            model,
-            profile,
-            system,
-            system_input,
-            messages,
-            schema,
-            max_tokens,
-            effort,
-            thinking,
-            temperature,
-            query_source,
-        )?;
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let req = self.build_json_schema_request_with_thinking(
+                model,
+                profile,
+                system,
+                system_input,
+                messages,
+                schema,
+                max_tokens,
+                effort,
+                thinking,
+                temperature,
+                query_source,
+            )?;
+            self.stream_request(req).await
+        })
+        .await
     }
 }

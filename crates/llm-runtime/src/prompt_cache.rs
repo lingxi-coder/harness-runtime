@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use lingxi_llm_client::protocol::JsonPayload;
 use sha2::{Digest, Sha256};
 
+use crate::protocol::json_array_items;
+
 pub type Fingerprint = [u8; 32];
 
 /// Evidence for the main request that actually reached provider dispatch.
@@ -107,13 +109,14 @@ impl RequestCapture {
 }
 
 pub(crate) fn snapshot_prepared(prepared: &crate::PreparedLlmCall) -> Option<RequestSnapshot> {
-    matches!(
-        prepared.route.protocol,
-        crate::ProtocolFamily::AnthropicMessages
-            | crate::ProtocolFamily::BedrockClaude
-            | crate::ProtocolFamily::VertexClaude
-            | crate::ProtocolFamily::FoundryClaude
-    )
+    (CAPTURE.try_with(|_| ()).is_ok()
+        && matches!(
+            prepared.route.protocol,
+            crate::ProtocolFamily::AnthropicMessages
+                | crate::ProtocolFamily::BedrockClaude
+                | crate::ProtocolFamily::VertexClaude
+                | crate::ProtocolFamily::FoundryClaude
+        ))
     .then(|| {
         inherit_request_anchor(RequestSnapshot::from_request(
             &prepared.provider_request,
@@ -227,11 +230,11 @@ pub(crate) fn block_array_without_cache_controls(
     value: &JsonPayload,
     encoding: lingxi_llm_client::exact_json::JsonEncoding,
 ) -> Result<JsonPayload, lingxi_llm_client::protocol::LlmError> {
-    let Some(length) = value.array_len("") else {
+    let Some(items) = json_array_items(value, "") else {
         return Ok(value.clone());
     };
-    let blocks = (0..length)
-        .filter_map(|index| value.array_item(index))
+    let blocks = items
+        .into_iter()
         .map(|block| without_cache_control(&block))
         .collect::<Result<Vec<_>, _>>()?;
     JsonPayload::array_from_items(&blocks, encoding)
@@ -242,17 +245,11 @@ pub(crate) fn message_without_cache_controls(
     encoding: lingxi_llm_client::exact_json::JsonEncoding,
 ) -> Result<JsonPayload, lingxi_llm_client::protocol::LlmError> {
     let mut message = without_cache_control(value)?;
-    let Some(content) = value.payload_at("/content") else {
+    let Some(content) = json_array_items(value, "/content") else {
         return Ok(message);
     };
-    let Some(length) = content.array_len("") else {
-        return Ok(message);
-    };
-    let mut blocks = Vec::with_capacity(length);
-    for index in 0..length {
-        let Some(block) = content.array_item(index) else {
-            continue;
-        };
+    let mut blocks = Vec::with_capacity(content.len());
+    for block in content {
         let mut clean = without_cache_control(&block)?;
         if block.string_at("/type").as_deref() == Some("tool_result") {
             if let Some(nested) = block.payload_at("/content") {
@@ -276,11 +273,8 @@ fn cache_controls(value: &JsonPayload, controls: &mut BTreeSet<String>) {
     }
     // Traverse protocol content blocks only. A tool schema/input may itself
     // contain a property named cache_control; that is prompt data, not policy.
-    if let Some(length) = value.array_len("/content") {
-        for index in 0..length {
-            let Some(block) = value.array_item_at("/content", index) else {
-                continue;
-            };
+    if let Some(content) = json_array_items(value, "/content") {
+        for block in content {
             if let Some(control) = block.raw_source_at("/cache_control") {
                 controls.insert(control);
             }
@@ -358,9 +352,10 @@ impl RequestSnapshot {
         let input = body
             .payload_at("/input")
             .unwrap_or_else(|| empty_json("[]"));
-        let messages = if let Some(length) = input.array_len("") {
-            (0..length)
-                .filter_map(|index| input.array_item(index).map(|item| (index, item)))
+        let messages = if let Some(items) = json_array_items(&input, "") {
+            items
+                .into_iter()
+                .enumerate()
                 .map(|(index, item)| {
                     part_hash(
                         &openai_without_breakpoints(&item, request.json_encoding),
@@ -405,9 +400,9 @@ impl RequestSnapshot {
         let system = body
             .payload_at("/system")
             .unwrap_or_else(|| empty_json("null"));
-        let system = if let Some(length) = system.array_len("") {
-            let blocks = (0..length)
-                .filter_map(|index| system.array_item(index))
+        let system = if let Some(items) = json_array_items(&system, "") {
+            let blocks = items
+                .into_iter()
                 .filter(|block| {
                     !block
                         .string_at("/text")
@@ -421,9 +416,9 @@ impl RequestSnapshot {
         };
         let system_chars = system.root_string_code_units().map_or_else(
             || {
-                system.array_len("").map_or(0, |length| {
-                    (0..length)
-                        .filter_map(|index| system.array_item(index))
+                json_array_items(&system, "").map_or(0, |items| {
+                    items
+                        .into_iter()
                         .filter_map(|block| block.string_at("/text"))
                         .map(|text| text.encode_utf16().count())
                         .sum()
@@ -435,17 +430,13 @@ impl RequestSnapshot {
             .payload_at("/tools")
             .filter(|tools| tools.array_len("").is_some())
             .unwrap_or_else(|| empty_json("[]"));
+        let tool_items = json_array_items(&tools, "").unwrap_or_default();
+        let messages = json_array_items(body, "/messages").unwrap_or_default();
         let mut controls = BTreeSet::new();
         cache_controls(body, &mut controls);
-        for field in ["system", "tools", "messages"] {
-            let pointer = format!("/{field}");
-            if let Some(length) = body.array_len(&pointer) {
-                for index in 0..length {
-                    if let Some(value) = body.array_item_at(&pointer, index) {
-                        cache_controls(&value, &mut controls);
-                    }
-                }
-            }
+        let system_items = json_array_items(body, "/system").unwrap_or_default();
+        for value in system_items.iter().chain(&tool_items).chain(&messages) {
+            cache_controls(value, &mut controls);
         }
         let ttl_1h = controls.iter().any(|control| {
             JsonPayload::parse(control)
@@ -460,12 +451,8 @@ impl RequestSnapshot {
             .filter(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
             .flat_map(|(_, value)| value.split(',').map(str::trim).map(str::to_owned))
             .collect();
-        if let Some(values) = body.payload_at("/anthropic_beta") {
-            if let Some(length) = values.array_len("") {
-                betas.extend(
-                    (0..length).filter_map(|index| values.array_item(index)?.string_at("")),
-                );
-            }
+        if let Some(values) = json_array_items(body, "/anthropic_beta") {
+            betas.extend(values.into_iter().filter_map(|value| value.string_at("")));
         }
         let extra = clean_extra_body(body).expect("prepared request object is valid JSON");
         let thinking_mode = match body.string_at("/thinking/type").as_deref() {
@@ -489,10 +476,8 @@ impl RequestSnapshot {
                 request,
                 "/tools",
             ),
-            tool_names: tools
-                .array_len("")
-                .into_iter()
-                .flat_map(|length| (0..length).filter_map(|index| tools.array_item(index)))
+            tool_names: tool_items
+                .iter()
                 .filter_map(|tool| tool.string_at("/name"))
                 .collect(),
             model: fingerprint(
@@ -516,17 +501,11 @@ impl RequestSnapshot {
                     .unwrap_or_else(|| empty_json("null")),
             ),
             extra_body: fingerprint(&extra),
-            defer_loading: tools
-                .array_len("")
-                .into_iter()
-                .flat_map(|length| (0..length).filter_map(|index| tools.array_item(index)))
+            defer_loading: tool_items
+                .iter()
                 .any(|tool| tool.bool_at("/defer_loading") == Some(true)),
-            messages: body
-                .array_len("/messages")
+            messages: messages
                 .into_iter()
-                .flat_map(|length| {
-                    (0..length).filter_map(|index| body.array_item_at("/messages", index))
-                })
                 .enumerate()
                 .map(|(index, message)| {
                     part_hash(

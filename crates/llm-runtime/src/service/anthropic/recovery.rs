@@ -2,9 +2,7 @@
 
 use crate::model::retry_scope::ModelCallRetryScope;
 use crate::model::telemetry;
-use crate::service::anthropic::endpoint::{
-    native_context_1m_model_key, native_request_model_identity,
-};
+use crate::service::anthropic::endpoint::native_context_1m_model_key;
 use crate::service::ApiService;
 use crate::{LlmError, LlmRequest};
 
@@ -46,26 +44,14 @@ impl ApiService {
         scope: &ModelCallRetryScope,
         recover_thinking: bool,
     ) -> Option<bool> {
-        let model_source = native_request_model_identity(request);
-        let route = &prepared.route;
-        let foundry = self.record_foundry_capability_observation(
-            &request.input.model,
-            &model_source,
-            &route.resolved_route.profile_name,
-            route.protocol,
-            &route.resolved_route.provider_id,
-            status,
-            body,
-            error.provider_message(),
-        );
-        if foundry.is_some() && self.strip_cached_foundry_tool_features(request, &model_source) {
+        if self.recover_foundry_tools(request, prepared, error, status, body, scope) {
             return Some(true);
         }
         if !recover_thinking {
             return None;
         }
         if self.native_thinking_binding_controls_hq_unknown_refusal(prepared, error, status, body) {
-            Self::refuse_native_thinking_binding_controls(request, prepared);
+            Self::refuse_native_thinking_binding_controls(prepared);
             return Some(true);
         }
         self.repair_native_prefix_lock(request, prepared, error, status, scope)
@@ -226,6 +212,17 @@ impl ApiService {
             }
             None => !Self::dispatch_first_party(prepared),
         }
+    }
+
+    pub(in crate::service) fn capture_thinking_recovery(&self, request: &mut LlmRequest) {
+        let scope = request
+            .execution
+            .thinking_recovery_scope
+            .get_or_insert_with(|| self.thinking_recovery_scope());
+        request
+            .execution
+            .native_tbc_routes
+            .get_or_insert_with(|| scope.native_thinking_binding_controls_routes());
     }
 
     pub(in crate::service) fn thinking_recovery_scope(

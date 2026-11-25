@@ -1,7 +1,7 @@
 //! Account routing and credential revisions for model calls.
 
 use crate::model::retry_scope::ModelCallRetryScope;
-use crate::service::response::PromptCacheOverageState;
+use crate::service::response::{PromptCacheOverageState, RateLimitState};
 use crate::service::retry::allows_account_switch;
 use crate::service::ApiService;
 use crate::{LlmError, LlmRequest};
@@ -11,10 +11,12 @@ use std::time::Duration;
 pub(super) struct ApiServiceAccountObserver {
     pub(super) fast_availability: Arc<crate::model::fast_admission::Availability>,
     pub(super) prompt_cache_overage: Arc<PromptCacheOverageState>,
+    pub(super) rate_limits: Arc<RateLimitState>,
 }
 
 impl lingxi_core::host::auth::AccountChangeObserver for ApiServiceAccountObserver {
     fn account_changed(&self) {
+        self.rate_limits.reset_for_account_change();
         self.fast_availability.account_changed();
         self.prompt_cache_overage.reset_for_account_change();
     }
@@ -40,8 +42,8 @@ impl ApiService {
         ))
         .await;
         let hop = selected?;
+        request.input.model = hop.selector().to_owned();
         request.profile = Some(hop.profile_name);
-        request.input.model = hop.request_model;
         request.execution.selected_account = coordinator.active_scope();
         request
             .execution
@@ -67,11 +69,15 @@ impl ApiService {
         let Some(coordinator) = coordinator else {
             return Ok(false);
         };
-        if !self
+        match self
             .record_pool_failure(request, coordinator, error, None)
-            .await?
+            .await
         {
-            return Ok(false);
+            Ok(true) => {}
+            result => {
+                coordinator.release().await;
+                return result;
+            }
         }
         scope.mark_account_failed(coordinator.last_failed_account_key());
         Ok(allows_account_switch(request))
@@ -440,6 +446,25 @@ impl ApiService {
         }
     }
 
+    /// Resolve the corresponding priced model row on an account's binding.
+    pub fn resolve_account_model_row(
+        &self,
+        profile: &str,
+        row: &crate::ResolvedRoute,
+    ) -> Result<crate::ResolvedRoute, LlmError> {
+        let runtime = self.client();
+        let key = runtime
+            .row_selector(profile, &row.display_model, &row.request_model)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let resolved = runtime.resolve_media_route(key, Some(profile))?.main;
+        if resolved.display_model != row.display_model
+            || resolved.request_model != row.request_model
+        {
+            return Err(LlmError::ModelUnavailable);
+        }
+        Ok(resolved)
+    }
+
     /// Validate an accounting route against this call's authoritative account
     /// candidates. A request payload cannot manufacture another provider route.
     pub fn authorized_account_route(
@@ -449,12 +474,25 @@ impl ApiService {
         actual: &crate::ResolvedRoute,
     ) -> Option<lingxi_core::host::provider_accounts::AccountMetadata> {
         let runtime = self.client();
-        let coordinator = runtime
-            .account_coordinator(&original.request_model, Some(&original.profile_name))
+        let original_key = runtime.row_selector(
+            &original.profile_name,
+            &original.display_model,
+            &original.request_model,
+        )?;
+        let mut coordinator = runtime
+            .account_coordinator(original_key, Some(&original.profile_name))
             .ok()??;
+        coordinator.retain_supported(|hop| {
+            hop.display_model.as_deref() == Some(actual.display_model.as_str())
+        });
         let account = coordinator.permits(selected, &actual.profile_name, &actual.request_model)?;
+        let key = runtime.row_selector(
+            &actual.profile_name,
+            &actual.display_model,
+            &actual.request_model,
+        )?;
         let mut resolved = runtime
-            .resolve_media_route(&actual.request_model, Some(&actual.profile_name))
+            .resolve_media_route(key, Some(&actual.profile_name))
             .ok()?
             .main;
         let mut actual = actual.clone();
@@ -464,7 +502,8 @@ impl ApiService {
     }
 
     /// Validate an audio session's owner independently of chat-model routing.
-    /// The refresh happens before the check; no base credential is loaded.
+    /// Explicit profiles bind to their current credential. Managed profiles bind
+    /// to the selected account generation and store scope.
     pub async fn audio_account_binding_is_current(
         &self,
         original_profile: &str,
@@ -486,7 +525,13 @@ impl ApiService {
                     .is_some()
             }
             Ok(None) => {
-                actual_profile == original_profile && scope.starts_with("explicit-service.")
+                actual_profile == original_profile
+                    && runtime
+                        .service_credential(actual_profile)
+                        .await
+                        .is_ok_and(|credential| {
+                            crate::services::explicit_service_scope(&credential) == scope
+                        })
             }
             Err(_) => false,
         }

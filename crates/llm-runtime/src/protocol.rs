@@ -9,6 +9,17 @@ use serde_json::Value;
 
 use crate::{Capabilities, LlmError, ToolChoice};
 
+/// Deserialize an array in one pass. Each item retains its exact JSON source
+/// through the SDK's raw-value deserializer.
+pub(crate) fn json_array_items(value: &JsonPayload, pointer: &str) -> Option<Vec<JsonPayload>> {
+    if pointer.is_empty() {
+        serde_json::from_str(value.as_json_source()).ok()
+    } else {
+        let array = value.payload_at(pointer)?;
+        serde_json::from_str(array.as_json_source()).ok()
+    }
+}
+
 /// Which transport should be used when opening a streaming provider request.
 /// The SDK owns HTTP event framing and WebSocket frame handling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

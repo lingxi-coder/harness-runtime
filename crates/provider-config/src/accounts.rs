@@ -40,6 +40,10 @@ impl AccountRegistry {
     pub fn snapshot(&self) -> AccountSnapshot {
         self.snapshot.clone()
     }
+    /// Consume the registry, retaining the validated directory without cloning its rows.
+    pub fn into_snapshot(self) -> AccountSnapshot {
+        self.snapshot
+    }
     /// Reject a mutation when its expected configuration revision is stale.
     pub fn check_revision(&self, expected: u64) -> Result<(), String> {
         if self.snapshot.config_revision != expected {
@@ -243,14 +247,36 @@ pub fn assemble_account_client_config(
         .providers
         .retain(|p| !p.profile_name.starts_with("account."));
     for account in accounts.iter().filter(|a| a.enabled) {
-        let Some(mut profile) = config
+        let Some(binding) = config
             .providers
             .iter()
             .find(|p| p.profile_name == account.execution_binding_id)
-            .cloned()
         else {
             continue;
         };
+        // Materialize the configured default on the account itself. A link
+        // back to a catalog profile would carry its catalog credential.
+        let alternate = binding.wire_profile.as_ref().and_then(|wire| {
+            let protocol = wire
+                .connection
+                .default_protocol
+                .filter(|p| *p != binding.protocol)?;
+            let name = wire.connection.protocol_profiles.get(&protocol)?;
+            config.providers.iter().find(|target| {
+                &target.profile_name == name
+                    && target.protocol == protocol
+                    && target.provider_id == binding.provider_id
+                    && target.credential == binding.credential
+                    && target.pricing.billing_mode == binding.pricing.billing_mode
+            })
+        });
+        let mut profile = alternate.unwrap_or(binding).clone();
+        if alternate.is_some() {
+            if let Some(wire) = &mut profile.wire_profile {
+                wire.connection.default_protocol = None;
+                wire.connection.protocol_profiles.clear();
+            }
+        }
         profile.profile_name = format!("account.{}", account.account_id);
         profile.credential = llm_runtime::CredentialConfig::Static {
             id: account.credential_ref.secret_ref.clone(),

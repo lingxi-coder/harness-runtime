@@ -141,19 +141,64 @@ fn validate_scope(scope: &str) -> Result<(), String> {
     }
     Ok(())
 }
+const ACCOUNT_DIRECTORY_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// Account configuration is authoritative. Health and picker observations are rebuilt on read.
+pub(crate) fn account_directory_metadata(snapshot: &AccountSnapshot) -> AccountSnapshot {
+    AccountSnapshot {
+        provider_policies: snapshot.provider_policies.clone(),
+        store_scope: snapshot.store_scope.clone(),
+        config_revision: snapshot.config_revision,
+        accounts: snapshot.accounts.clone(),
+        health: Vec::new(),
+        model_entitlements: Vec::new(),
+        model_availability: Vec::new(),
+        scoped_health: Vec::new(),
+    }
+}
+
+pub(crate) fn encode_account_directory(
+    metadata: &AccountSnapshot,
+) -> Result<Vec<u8>, &'static str> {
+    let bytes = serde_json::to_vec(metadata).map_err(|_| "account directory encoding failed")?;
+    if bytes.len() > ACCOUNT_DIRECTORY_LIMIT as usize {
+        return Err("account directory exceeds storage limit");
+    }
+    Ok(bytes)
+}
+
 /// Read-only bootstrap loader. Never creates directories, registers or repairs credentials.
 pub fn load_account_snapshot(
     data_dir: &Path,
     store_scope: &str,
 ) -> Result<AccountSnapshot, String> {
+    load_account_snapshot_inner(data_dir, store_scope, true)
+}
+
+/// Directory and pending-credential fence for pool transactions, without UI health projection.
+pub(crate) fn load_account_directory(
+    data_dir: &Path,
+    store_scope: &str,
+) -> Result<AccountSnapshot, String> {
+    load_account_snapshot_inner(data_dir, store_scope, false)
+}
+
+fn load_account_snapshot_inner(
+    data_dir: &Path,
+    store_scope: &str,
+    project_health: bool,
+) -> Result<AccountSnapshot, String> {
     validate_scope(store_scope)?;
     let pending = PathBuf::from("provider-accounts").join(format!("{store_scope}.pending"));
-    match lingxi_core::host::rooted_fs::read_to_string_limited(data_dir, &pending, 4 * 1024 * 1024)
-    {
+    match lingxi_core::host::rooted_fs::read_to_string_limited(
+        data_dir,
+        &pending,
+        ACCOUNT_DIRECTORY_LIMIT,
+    ) {
         Ok(text) => {
             let intent: AccountCommitIntent =
                 serde_json::from_str(&text).map_err(|_| "account transaction invalid")?;
-            let mut snapshot = load_account_snapshot_raw(data_dir, store_scope)?;
+            let mut snapshot = load_account_snapshot_raw(data_dir, store_scope, project_health)?;
             snapshot
                 .provider_policies
                 .extend(intent.snapshot.provider_policies);
@@ -187,29 +232,34 @@ pub fn load_account_snapshot(
         Err(lingxi_core::host::rooted_fs::FsError::NotFound(_)) => {}
         Err(_) => return Err("account transaction state unavailable".into()),
     }
-    load_account_snapshot_raw(data_dir, store_scope)
+    load_account_snapshot_raw(data_dir, store_scope, project_health)
 }
 fn load_account_snapshot_raw(
     data_dir: &Path,
     store_scope: &str,
+    project_health: bool,
 ) -> Result<AccountSnapshot, String> {
     let path = PathBuf::from("provider-accounts").join(format!("{store_scope}.json"));
-    match lingxi_core::host::rooted_fs::read_to_string_limited(data_dir, &path, 4 * 1024 * 1024) {
+    match lingxi_core::host::rooted_fs::read_to_string_limited(
+        data_dir,
+        &path,
+        ACCOUNT_DIRECTORY_LIMIT,
+    ) {
         Ok(bytes) => {
             let snapshot: AccountSnapshot =
                 serde_json::from_str(&bytes).map_err(|_| "account directory is invalid")?;
             if snapshot.store_scope != store_scope {
                 return Err("account directory scope mismatch".into());
             }
-            {
-                let mut snapshot = AccountRegistry::from_snapshot(snapshot)?.snapshot();
-                snapshot.health.clear();
-                snapshot.model_entitlements.clear();
-                snapshot.model_availability.clear();
-                snapshot.scoped_health.clear();
+            let mut snapshot = AccountRegistry::from_snapshot(snapshot)?.into_snapshot();
+            snapshot.health.clear();
+            snapshot.model_entitlements.clear();
+            snapshot.model_availability.clear();
+            snapshot.scoped_health.clear();
+            if project_health {
                 read_account_health(data_dir, &mut snapshot)?;
-                Ok(snapshot)
             }
+            Ok(snapshot)
         }
         Err(lingxi_core::host::rooted_fs::FsError::NotFound(_)) => {
             Ok(AccountRegistry::new(store_scope.into()).snapshot())
@@ -593,7 +643,7 @@ impl ProviderAccountStore {
             .map_err(|_| "account directory lock unavailable")?;
             Ok::<_, String>((
                 lock,
-                AccountRegistry::from_snapshot(load_account_snapshot_raw(&root, &scope)?)?,
+                AccountRegistry::from_snapshot(load_account_snapshot_raw(&root, &scope, true)?)?,
             ))
         })
         .await
@@ -602,7 +652,9 @@ impl ProviderAccountStore {
             .recover_pending(lock, &command, credential.as_deref(), &registry)
             .await?;
         if let Some((recovered, same_operation)) = recovered {
-            let result = self.commit_transaction(lock, recovered, None, None).await?;
+            let result = self
+                .commit_transaction(lock, recovered, None, None, None)
+                .await?;
             return if same_operation {
                 Ok(result)
             } else {
@@ -615,6 +667,7 @@ impl ProviderAccountStore {
         let fingerprint = account_command_fingerprint(&command, credential.as_deref())?;
         registry.check_revision(command.expected_revision)?;
         let mut mutation: Option<CredentialMutation> = None;
+        let mut retire_account = None;
         let find = |id: &str| {
             registry
                 .snapshot()
@@ -705,22 +758,7 @@ impl ProviderAccountStore {
                 if registry.snapshot().config_revision != command.expected_revision {
                     return Err("account configuration conflict".into());
                 }
-                let root = self.data_dir.clone();
-                let scope = self.store_scope.clone();
-                let retired = account_id.clone();
-                tokio::task::spawn_blocking(move || {
-                    lingxi_core::host::rooted_fs::atomic_write(
-                        &root,
-                        &PathBuf::from("provider-accounts/retired")
-                            .join(scope)
-                            .join(format!("{retired}.json")),
-                        b"{}",
-                        Default::default(),
-                    )
-                    .map_err(|_| "account identifier retirement failed")
-                })
-                .await
-                .map_err(|_| "account history worker failed")??;
+                retire_account = Some(account_id.clone());
                 if !external {
                     mutation = Some(CredentialMutation::Delete(account.credential_ref.clone()));
                 }
@@ -754,7 +792,7 @@ impl ProviderAccountStore {
                 if !external {
                     let revision = self
                         .credentials
-                        .get_account_credential(&account.credential_ref)
+                        .get_account_credential_uncached(&account.credential_ref)
                         .await
                         .map_err(|_| "credential storage unavailable")?
                         .map_or(0, |c| c.credential_revision);
@@ -791,8 +829,14 @@ impl ProviderAccountStore {
                 return Err("OAuth requires the host authorization coordinator".into())
             }
         }
-        self.commit_transaction(lock, registry.snapshot(), mutation, Some(fingerprint))
-            .await
+        self.commit_transaction(
+            lock,
+            registry.into_snapshot(),
+            mutation,
+            Some(fingerprint),
+            retire_account,
+        )
+        .await
     }
     pub async fn verify_account(
         &self,
@@ -907,7 +951,7 @@ impl ProviderAccountStore {
                     ..
                 }) = self
                     .credentials
-                    .get_account_credential(&other.credential_ref)
+                    .get_account_credential_uncached(&other.credential_ref)
                     .await
                     .map_err(|_| "credential storage unavailable")?
                 {
@@ -927,7 +971,7 @@ impl ProviderAccountStore {
         }
         let old = self
             .credentials
-            .get_account_credential(&account.credential_ref)
+            .get_account_credential_uncached(&account.credential_ref)
             .await
             .map_err(|_| "credential storage unavailable")?;
         if let Some(AccountCredential {
@@ -991,11 +1035,12 @@ impl ProviderAccountStore {
         registry.update(account.clone(), revision)?;
         self.commit_transaction(
             lock,
-            registry.snapshot(),
+            registry.into_snapshot(),
             Some(CredentialMutation::Store(
                 account.credential_ref.clone(),
                 credential,
             )),
+            None,
             None,
         )
         .await
@@ -1150,7 +1195,8 @@ impl ProviderAccountStore {
         use llm_runtime::accounts::{FailureScope, HealthDocument, HealthStatus};
         let (directory_lock, registry) =
             self.locked_registry_for(Some(&account.account_id)).await?;
-        if !registry.snapshot().accounts.iter().any(|a| {
+        let snapshot = registry.snapshot();
+        if !snapshot.accounts.iter().any(|a| {
             a.account_id == account.account_id
                 && a.identity_generation == account.identity_generation
                 && a.config_revision == account.config_revision
@@ -1183,7 +1229,7 @@ impl ProviderAccountStore {
             let mut document = match lingxi_core::host::rooted_fs::read_to_string_limited(
                 &root,
                 &path,
-                4 * 1024 * 1024,
+                crate::account_pool_store::HEALTH_DOCUMENT_LIMIT,
             ) {
                 Ok(text) => serde_json::from_str::<HealthDocument>(&text)
                     .map_err(|_| "account health state invalid")?,
@@ -1194,6 +1240,7 @@ impl ProviderAccountStore {
             // started, including one on the same credential revision. Compare
             // the exact account slot so unrelated account/model activity does
             // not invalidate a successful connection test.
+            let compacted = document.reconcile_directory(&snapshot)?;
             if document.records.get(&tested.health_key).map(|row| row.revision)
                 != tested.record_revision
                 || document.fences.get(&tested.health_key).copied()
@@ -1234,7 +1281,7 @@ impl ProviderAccountStore {
                     discovered_changed = true;
                 }
             }
-            if document.records.len() != before || discovered_changed {
+            if compacted || document.records.len() != before || discovered_changed {
                 document.revision = document
                     .revision
                     .checked_add(1)
@@ -1244,15 +1291,7 @@ impl ProviderAccountStore {
                         .fences
                         .insert(tested.health_key, document.revision);
                 }
-                let bytes =
-                    serde_json::to_vec(&document).map_err(|_| "account health encoding failed")?;
-                lingxi_core::host::rooted_fs::atomic_write(
-                    &root,
-                    &path,
-                    &bytes,
-                    Default::default(),
-                )
-                .map_err(|_| "account health persistence failed")?;
+                crate::account_pool_store::write_health(&root, &path, &mut document)?;
             }
             Ok(())
         })
@@ -1801,7 +1840,7 @@ fn read_account_health(root: &Path, snapshot: &mut AccountSnapshot) -> Result<()
     let document = match lingxi_core::host::rooted_fs::read_to_string_limited(
         root,
         &relative,
-        4 * 1024 * 1024,
+        crate::account_pool_store::HEALTH_DOCUMENT_LIMIT,
     ) {
         Ok(text) => serde_json::from_str::<HealthDocument>(&text)
             .map_err(|_| "account health state invalid")?,
@@ -2231,7 +2270,7 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         let backend = crate::account_pool_store::FileAccountPoolStore::new(dir.path().to_owned());
-        let PoolResult::Claimed { revision } = backend
+        let PoolResult::Claimed { revision, probing } = backend
             .transact(PoolOperation::Claim {
                 account: account.clone(),
                 model: model.clone(),
@@ -2246,6 +2285,7 @@ mod tests {
         };
         backend
             .transact(PoolOperation::Finish {
+                was_probe: probing,
                 credential_revision: None,
                 account: account.clone(),
                 model: model.clone(),
@@ -2328,7 +2368,7 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         let owner = "permission-projection".to_string();
-        let PoolResult::Claimed { revision } = backend
+        let PoolResult::Claimed { revision, probing } = backend
             .transact(PoolOperation::Claim {
                 account: account.clone(),
                 model: model.clone(),
@@ -2343,6 +2383,7 @@ mod tests {
         };
         backend
             .transact(PoolOperation::Finish {
+                was_probe: probing,
                 credential_revision: None,
                 account: account.clone(),
                 model: model.clone(),
@@ -2378,7 +2419,7 @@ mod tests {
             .any(|row| row.account_id == account.account_id
                 && row.model_id == model
                 && row.status == AccountModelEntitlementStatus::Forbidden));
-        let PoolResult::Claimed { revision } = backend
+        let PoolResult::Claimed { revision, probing } = backend
             .transact(PoolOperation::Claim {
                 account: account.clone(),
                 model: model.clone(),
@@ -2393,6 +2434,7 @@ mod tests {
         };
         backend
             .transact(PoolOperation::Finish {
+                was_probe: probing,
                 credential_revision: None,
                 account: account.clone(),
                 model: model.clone(),
@@ -3500,6 +3542,7 @@ json.dump(reply, sys.stdout)
         model: String,
         owner: String,
         claimed_revision: u64,
+        was_probe: bool,
     }
 
     #[cfg(unix)]
@@ -3507,7 +3550,7 @@ json.dump(reply, sys.stdout)
         async fn claim(root: &Path, account: &AccountMetadata, model: &str, owner: &str) -> Self {
             use llm_runtime::accounts::{AccountPoolStore, PoolOperation, PoolResult};
             let store = crate::account_pool_store::FileAccountPoolStore::new(root.to_owned());
-            let PoolResult::Claimed { revision } = store
+            let PoolResult::Claimed { revision, probing } = store
                 .transact(PoolOperation::Claim {
                     account: account.clone(),
                     model: model.into(),
@@ -3526,6 +3569,7 @@ json.dump(reply, sys.stdout)
                 model: model.into(),
                 owner: owner.into(),
                 claimed_revision: revision,
+                was_probe: probing,
             }
         }
 
@@ -3544,6 +3588,7 @@ json.dump(reply, sys.stdout)
                     endpoint: "synthetic-account-test".into(),
                     owner: self.owner,
                     claimed_revision: self.claimed_revision,
+                    was_probe: self.was_probe,
                     credential_revision,
                     outcome: Some(AccountFailure {
                         status,
@@ -5092,6 +5137,114 @@ json.dump(reply, sys.stdout)
     }
 
     #[tokio::test]
+    async fn directory_and_intent_size_limits_preserve_the_prior_commit() {
+        let (dir, credentials, store) = fixture();
+        let saved = store
+            .execute(add(AccountAuthKind::ApiKey, 0), Some("prior".into()))
+            .await
+            .unwrap();
+        let account = &saved.accounts[0];
+        let update = |expected_revision, name| ProviderAccountCommand {
+            expected_revision,
+            operation_id: None,
+            action: ProviderAccountAction::Update {
+                account_id: account.account_id.clone(),
+                display_name: name,
+            },
+        };
+        let name_bytes = ACCOUNT_DIRECTORY_LIMIT as usize
+            - encode_account_directory(&saved).unwrap().len()
+            + account.display_name.len();
+        store
+            .execute_metadata(update(1, "x".repeat(name_bytes)))
+            .await
+            .unwrap();
+        let directory = directory_path(dir.path(), store.store_scope());
+        let prior = std::fs::read(&directory).unwrap();
+        assert_eq!(prior.len(), ACCOUNT_DIRECTORY_LIMIT as usize);
+        assert_eq!(
+            store
+                .execute_metadata(update(2, "x".repeat(name_bytes + 1)))
+                .await
+                .unwrap_err(),
+            "account directory exceeds storage limit"
+        );
+        let replacement = ProviderAccountCommand {
+            expected_revision: 2,
+            operation_id: None,
+            action: ProviderAccountAction::SetCredential {
+                account_id: account.account_id.clone(),
+            },
+        };
+        assert_eq!(
+            store
+                .execute(replacement, Some("new".into()))
+                .await
+                .unwrap_err(),
+            "account transaction exceeds storage limit"
+        );
+        assert!(std::fs::read(&directory).unwrap() == prior);
+        assert!(!dir.path().join(store.pending_path()).exists());
+        let old = credentials
+            .get_account_credential_uncached(&account.credential_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((old.identity_generation, old.credential_revision), (1, 1));
+        let AccountCredentialKind::ApiKey { key } = old.kind else {
+            panic!("wrong kind")
+        };
+        assert_eq!(key.expose_secret(), "prior");
+        assert_eq!(
+            provider_config::read_account_credential_version(dir.path(), account).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .execute_metadata(update(2, "smaller".into()))
+                .await
+                .unwrap()
+                .config_revision,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_intent_excludes_projected_health() {
+        let (dir, _, store) = fixture();
+        let mut snapshot = store
+            .execute_metadata(add(AccountAuthKind::ApiKey, 0))
+            .await
+            .unwrap();
+        let account = snapshot.accounts[0].clone();
+        snapshot.health.push(AccountHealth {
+            account_id: account.account_id.clone(),
+            identity_generation: account.identity_generation,
+            status: AccountHealthStatus::StorageUnavailable,
+            reason: Some("x".repeat(ACCOUNT_DIRECTORY_LIMIT as usize)),
+            cooldown_until_ms: None,
+            health_revision: 1,
+        });
+        let (lock, _) = store.locked_registry().await.unwrap();
+        let record = store
+            .key_record("key".into(), account.identity_generation, 0)
+            .unwrap();
+        let committed = store
+            .commit_transaction(
+                lock,
+                snapshot,
+                Some(CredentialMutation::Store(account.credential_ref, record)),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.health.len(), 1);
+        assert!(store.snapshot_metadata().await.unwrap().health.is_empty());
+        assert!(!dir.path().join(store.pending_path()).exists());
+    }
+
+    #[tokio::test]
     async fn changed_secret_retry_never_acknowledges_the_previously_committed_secret() {
         let (dir, credentials, store) = fixture();
         let original = store
@@ -5208,6 +5361,23 @@ json.dump(reply, sys.stdout)
                 .status,
             AccountHealthStatus::Ready
         );
+        use llm_runtime::accounts::{AccountPoolStore, PoolOperation, PoolResult};
+        let pool = crate::account_pool_store::FileAccountPoolStore::new(dir.path().to_owned());
+        let claim = |account| PoolOperation::Claim {
+            account,
+            model: "m".into(),
+            endpoint: "endpoint".into(),
+            owner: "owner".into(),
+            now_ms: 1,
+        };
+        assert!(
+            matches!(pool.transact(claim(affected.clone())).await.unwrap(),
+            PoolResult::Unavailable(row) if row.reason == "credential_commit_pending")
+        );
+        assert!(matches!(
+            pool.transact(claim(healthy.clone())).await.unwrap(),
+            PoolResult::Claimed { .. }
+        ));
         assert!(store.verify_account(&healthy).await.is_ok());
         assert!(store.verify_account(&affected).await.is_err());
         assert!(dir.path().join(store.pending_path()).exists());
@@ -5273,6 +5443,79 @@ json.dump(reply, sys.stdout)
             a.identity_generation + 1
         );
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oauth_commits_check_the_current_broker_principal_and_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let [(_, writer), (cached, reader)] = independent_broker_stores(root.path());
+        let added = writer
+            .execute_metadata(add(AccountAuthKind::OAuth, 0))
+            .await
+            .unwrap();
+        let connected = writer
+            .commit_oauth(&added.accounts[0], grant("initial", "org"))
+            .await
+            .unwrap();
+        let original = &connected.accounts[0];
+        cached
+            .get_account_credential(&original.credential_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut directory = writer
+            .execute_metadata(add(AccountAuthKind::OAuth, 2))
+            .await
+            .unwrap();
+
+        // The reader keeps the prior positive cache entry across each change of principal.
+        for subject in ["replacement", "latest"] {
+            directory = writer
+                .execute(
+                    ProviderAccountCommand {
+                        expected_revision: directory.config_revision,
+                        operation_id: None,
+                        action: ProviderAccountAction::Logout {
+                            account_id: original.account_id.clone(),
+                        },
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            directory = writer
+                .commit_oauth(&directory.accounts[0], grant(subject, "org"))
+                .await
+                .unwrap();
+            if subject == "replacement" {
+                assert!(reader
+                    .commit_oauth(&directory.accounts[0], grant("initial", "org"))
+                    .await
+                    .unwrap_err()
+                    .contains("different upstream account"));
+            } else {
+                assert!(reader
+                    .commit_oauth(&directory.accounts[1], grant(subject, "org"))
+                    .await
+                    .unwrap_err()
+                    .contains("already registered"));
+            }
+        }
+        // A later same-principal reconnect advances the revision under the other store's lock.
+        directory = writer
+            .commit_oauth(&directory.accounts[0], grant("latest", "org"))
+            .await
+            .unwrap();
+        let committed = reader
+            .commit_oauth(&directory.accounts[0], grant("latest", "org"))
+            .await
+            .unwrap();
+        let account = &committed.accounts[0];
+        assert_eq!(
+            provider_config::read_account_credential_version(root.path(), account).unwrap(),
+            Some(3)
+        );
+    }
+
     #[tokio::test]
     async fn unknown_and_cross_provider_bindings_cannot_be_registered() {
         let (_dir, _credentials, store) = fixture();
@@ -5333,11 +5576,12 @@ impl ProviderAccountStore {
         snapshot: AccountSnapshot,
         mutation: Option<CredentialMutation>,
         fingerprint: Option<AccountCommandFingerprint>,
+        retire_account: Option<String>,
     ) -> Result<AccountSnapshot, String> {
         let store = self.clone();
         tokio::spawn(async move {
             store
-                .commit_transaction_owned(lock, snapshot, mutation, fingerprint)
+                .commit_transaction_owned(lock, snapshot, mutation, fingerprint, retire_account)
                 .await
         })
         .await
@@ -5350,7 +5594,10 @@ impl ProviderAccountStore {
         snapshot: AccountSnapshot,
         mutation: Option<CredentialMutation>,
         fingerprint: Option<AccountCommandFingerprint>,
+        retire_account: Option<String>,
     ) -> Result<AccountSnapshot, String> {
+        let metadata = account_directory_metadata(&snapshot);
+        let directory_bytes = encode_account_directory(&metadata)?;
         let mut lock = lock;
         let credential_version = match &mutation {
             Some(CredentialMutation::Store(reference, credential)) => Some((
@@ -5367,8 +5614,8 @@ impl ProviderAccountStore {
             )),
             _ => None,
         };
-        if let Some(mutation) = mutation {
-            let (reference, generation, revision) = match &mutation {
+        let intent = if let Some(mutation) = &mutation {
+            let (reference, generation, revision) = match mutation {
                 CredentialMutation::Store(r, c) => (
                     r.clone(),
                     Some(c.identity_generation),
@@ -5378,28 +5625,52 @@ impl ProviderAccountStore {
             };
             let intent = AccountCommitIntent {
                 fingerprint,
-                snapshot: snapshot.clone(),
+                snapshot: metadata,
                 credential_ref: reference,
                 identity_generation: generation,
                 credential_revision: revision,
             };
             let bytes =
                 serde_json::to_vec(&intent).map_err(|_| "account transaction encoding failed")?;
+            if bytes.len() > ACCOUNT_DIRECTORY_LIMIT as usize {
+                return Err("account transaction exceeds storage limit".into());
+            }
+            Some(bytes)
+        } else {
+            None
+        };
+        if retire_account.is_some() || intent.is_some() {
             let root = self.data_dir.clone();
+            let scope = self.store_scope.clone();
             let path = self.pending_path();
             lock = tokio::task::spawn_blocking(move || {
                 let lock = lock;
-                lingxi_core::host::rooted_fs::atomic_write(
-                    &root,
-                    &path,
-                    &bytes,
-                    lingxi_core::host::AtomicWriteOptions::default(),
-                )
-                .map_err(|_| "account transaction intent failed")?;
+                if let Some(retired) = retire_account {
+                    lingxi_core::host::rooted_fs::atomic_write(
+                        &root,
+                        &PathBuf::from("provider-accounts/retired")
+                            .join(scope)
+                            .join(format!("{retired}.json")),
+                        b"{}",
+                        Default::default(),
+                    )
+                    .map_err(|_| "account identifier retirement failed")?;
+                }
+                if let Some(bytes) = intent {
+                    lingxi_core::host::rooted_fs::atomic_write(
+                        &root,
+                        &path,
+                        &bytes,
+                        Default::default(),
+                    )
+                    .map_err(|_| "account transaction intent failed")?;
+                }
                 Ok::<_, &str>(lock)
             })
             .await
             .map_err(|_| "account transaction worker failed")??;
+        }
+        if let Some(mutation) = mutation {
             match mutation {
                 CredentialMutation::Store(reference, record) => self
                     .credentials
@@ -5413,12 +5684,6 @@ impl ProviderAccountStore {
                     .map_err(|_| "account credential removal pending")?,
             }
         }
-        let output = snapshot.clone();
-        let mut snapshot = snapshot;
-        snapshot.health.clear();
-        snapshot.model_entitlements.clear();
-        snapshot.model_availability.clear();
-        snapshot.scoped_health.clear();
         let root = self.data_dir.clone();
         let scope = self.store_scope.clone();
         let pending = self.pending_path();
@@ -5428,12 +5693,10 @@ impl ProviderAccountStore {
                 provider_config::write_account_credential_version_locked(&root, &account, revision)
                     .map_err(|_| "account credential version commit pending")?;
             }
-            let bytes =
-                serde_json::to_vec(&snapshot).map_err(|_| "account directory encoding failed")?;
             lingxi_core::host::rooted_fs::atomic_write(
                 &root,
                 &PathBuf::from("provider-accounts").join(format!("{scope}.json")),
-                &bytes,
+                &directory_bytes,
                 lingxi_core::host::AtomicWriteOptions::default(),
             )
             .map_err(|_| "account directory commit pending")?;
@@ -5444,7 +5707,7 @@ impl ProviderAccountStore {
         })
         .await
         .map_err(|_| "account directory worker failed")??;
-        Ok(output)
+        Ok(snapshot)
     }
     /// A mutating operation may finish an acknowledged secret commit. Reads never repair.
     async fn recover_pending(
@@ -5466,7 +5729,7 @@ impl ProviderAccountStore {
             match lingxi_core::host::rooted_fs::read_to_string_limited(
                 &root,
                 &path,
-                4 * 1024 * 1024,
+                ACCOUNT_DIRECTORY_LIMIT,
             ) {
                 Ok(text) => serde_json::from_str::<AccountCommitIntent>(&text)
                     .map(Some)
@@ -5500,6 +5763,7 @@ impl ProviderAccountStore {
             if let (Some(generation), Some(revision)) =
                 (pending.identity_generation, pending.credential_revision)
             {
+                encode_account_directory(&account_directory_metadata(&pending.snapshot))?;
                 let target = pending
                     .snapshot
                     .accounts

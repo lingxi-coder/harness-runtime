@@ -10,7 +10,6 @@ use crate::service::anthropic::endpoint::{
 };
 use crate::service::anthropic::prompt::{
     apply_anthropic_tool_result_reminder_suffixes, apply_cache_editing, native_prompt_attribution,
-    sdk_prompt_cache_ttl_settings,
 };
 use crate::service::native_media::strip_native_media_with_sources;
 use crate::service::{ApiService, MOD_REQUEST_EFFORT};
@@ -19,7 +18,7 @@ use crate::{
 };
 use futures::stream::BoxStream;
 use lingxi_core::types::{is_nested_media_value, ContentBlock, ConversationMessage};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub(super) fn custom_system_prompt(text: Option<&str>) -> Option<crate::SystemPromptInput> {
@@ -149,6 +148,30 @@ impl FallbackPolicy {
     #[must_use]
     pub fn from_models_csv(models: &str) -> Self {
         Self::Models(parse_fallback_chain(models))
+    }
+}
+
+/// Destination stored in a model fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfiguredFallbackTarget {
+    /// An unqualified model name from a legacy fallback chain.
+    Model(String),
+    /// An exact provider profile selected when routing settings were assembled.
+    Profile {
+        /// Provider identity of the selected profile.
+        provider_id: crate::ProviderId,
+        /// Profile name that owns the configured route.
+        profile_name: String,
+        /// Provider-local model id.
+        model: String,
+    },
+}
+
+impl ConfiguredFallbackTarget {
+    pub(super) fn model(&self) -> &str {
+        match self {
+            Self::Model(model) | Self::Profile { model, .. } => model,
+        }
     }
 }
 
@@ -731,19 +754,12 @@ impl ApiService {
         }
 
         use lingxi_llm_client::providers::anthropic::system_prompt as prompt_cache;
-        let host_cache_ttl_settings = self
-            .anthropic
-            .prompt_cache_ttl_settings_source
-            .as_ref()
-            .map(|source| source())
-            .transpose()?
-            .unwrap_or_default();
         let cache_policy = prompt_cache::CachePolicy::from_process(
             lingxi_core::host::compliance_taints::is_tainted("hipaa"),
             agent_prompt_cache_ttl_override(),
             skip_global_cache_for_system_prompt,
             query_source,
-            sdk_prompt_cache_ttl_settings(host_cache_ttl_settings),
+            Default::default(),
             self.prompt_cache_ttl_inputs(),
         );
         let enable_caching = prompt_cache::prompt_caching_enabled(model, family);
@@ -759,7 +775,7 @@ impl ApiService {
             overage_for_scope: Arc::new(move |scope, account_epoch| {
                 prompt_cache_overage.is_using_overage(scope, account_epoch)
             }),
-            pending_overage: Arc::new(Mutex::new(None)),
+            ttl_settings: self.request_prompt_cache_ttl_settings(),
         });
         req.execution.thinking_source_message_ids = thinking_source_message_ids;
         req.execution.source_thinking_messages = source_thinking_messages;
@@ -1069,42 +1085,48 @@ impl ApiService {
         model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let mut req = self.build_main_request(
-            model,
-            profile,
-            system,
-            messages,
-            tools,
-            true,
-            max_tokens,
-            skip_global_cache_for_system_prompt,
-            prompt_cache_query_source(query_source),
-            None,
-            &tool_result_reminder_suffixes,
-            &typed_attachment_ids,
-            &task_deliveries,
-        )?;
-        req.execution.scalar_user_content_ids = scalar_user_content_ids;
-        req.input.model_source = model_source
-            .as_ref()
-            .map(|source| {
-                let units = source
-                    .string_units("")
-                    .ok_or_else(|| LlmError::InvalidRequest {
-                        message: "model source must be a JSON string projection".into(),
-                    })?;
-                Ok::<_, LlmError>(
-                    lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&units),
-                )
-            })
-            .transpose()?;
-        req.set_effort(effort)?;
-        req.set_speed(speed)?;
-        req.execution.query_source = query_source.map(str::to_owned);
-        req.execution
-            .set_request_dispatch_admission(request_dispatch_admission);
-        req.execution.request_dispatch_observer = request_dispatch_observer;
-        req.execution.native_anthropic_request_context = native_anthropic_request_context;
-        self.drive_stream(req).await
+        self.with_account_call_snapshot(async {
+            let mut req = self.build_main_request(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                true,
+                max_tokens,
+                skip_global_cache_for_system_prompt,
+                prompt_cache_query_source(query_source),
+                None,
+                &tool_result_reminder_suffixes,
+                &typed_attachment_ids,
+                &task_deliveries,
+            )?;
+            req.execution.scalar_user_content_ids = scalar_user_content_ids;
+            req.input.model_source = model_source
+                .as_ref()
+                .map(|source| {
+                    let units =
+                        source
+                            .string_units("")
+                            .ok_or_else(|| LlmError::InvalidRequest {
+                                message: "model source must be a JSON string projection".into(),
+                            })?;
+                    Ok::<_, LlmError>(
+                        lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(
+                            &units,
+                        ),
+                    )
+                })
+                .transpose()?;
+            req.set_effort(effort)?;
+            req.set_speed(speed)?;
+            req.execution.query_source = query_source.map(str::to_owned);
+            req.execution
+                .set_request_dispatch_admission(request_dispatch_admission);
+            req.execution.request_dispatch_observer = request_dispatch_observer;
+            req.execution.native_anthropic_request_context = native_anthropic_request_context;
+            self.drive_stream(req).await
+        })
+        .await
     }
 }

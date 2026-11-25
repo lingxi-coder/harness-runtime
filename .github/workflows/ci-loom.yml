@@ -14,11 +14,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: cargo test --cfg loom (OAuth single-flight refresh)
-        env:
-          RUSTFLAGS: '--cfg loom'
+      - name: OAuth single-flight refresh model
         run: |
-          cargo test --locked -p lingxi-anthropic-oauth \
+          cargo test --locked -p llm-runtime --features loom-tests \
                      --test refresh_single_flight_test \
                      --release
       - name: cargo test --cfg loom (Memory loader hierarchy walk)

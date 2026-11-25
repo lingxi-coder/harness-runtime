@@ -195,7 +195,10 @@ pub(super) fn process_visible_response<'a>(
         // (the `--print` / `--bg` mislabel + lost-cost bug). `claude.ts:2571` builds
         // the merged non-streaming AssistantMessage with `result.model`/`usage`.
         let request_id = requested_model
-            .then(|| orch.api.last_request_id())
+            .then(|| {
+                orch.api
+                    .response_request_id(response.diagnostics().as_ref())
+            })
             .flatten();
         assistant_msg = if crate::native_computer::has_native_binding(&assistant_msg)
             || crate::native_computer::has_pending_receipts(orch).await
@@ -279,7 +282,7 @@ pub(super) fn process_visible_response<'a>(
         if !orch.side_chat && telemetry::otel::logs::assistant_responses_enabled() {
             tracing::info!(
                 event = "assistant_response",
-                request_id = orch.api.last_request_id().unwrap_or_default(),
+                request_id = request_id.as_deref().unwrap_or_default(),
                 model = %model,
                 stop_reason = response.stop_reason.as_deref().unwrap_or(""),
                 input_tokens = response.usage.counts().input_tokens,
@@ -287,7 +290,7 @@ pub(super) fn process_visible_response<'a>(
                 body_len = assistant_blocks.iter().filter_map(ContentBlock::visible_text).map(str::len).sum::<usize>(),
             );
             telemetry::otel::emit_assistant_response_log_chunks(
-                orch.api.last_request_id().as_deref().unwrap_or_default(),
+                request_id.as_deref().unwrap_or_default(),
                 &model,
                 response.stop_reason.as_deref().unwrap_or(""),
                 response.usage.counts().input_tokens,
@@ -332,6 +335,7 @@ pub(super) fn process_visible_response<'a>(
                     model,
                     response.stop_details.as_ref(),
                     Some(&response.id),
+                    request_id.clone(),
                 )
                 .await?
             {
@@ -981,6 +985,7 @@ pub(super) fn process_visible_response<'a>(
                             .provider_metadata
                             .array_len("/tool_input_issues")
                             .is_some_and(|len| len > 0),
+                        request_id.clone(),
                     )
                     .await?
                 }
@@ -1026,6 +1031,7 @@ pub(super) fn process_visible_response<'a>(
                         other,
                         response.stop_details.as_ref(),
                         Some(&response.id),
+                        request_id.clone(),
                     )
                     .await;
                     TurnStepOutcome::Ended {

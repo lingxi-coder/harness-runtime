@@ -218,7 +218,7 @@ async fn model_validation_strips_deferred_foundry_features_and_keeps_local_searc
         })
         .expect("Foundry test client"),
     );
-    let service = ApiService::new(
+    let mut service = ApiService::new(
         client,
         transport.clone(),
         SubscriberState::default(),
@@ -298,7 +298,7 @@ async fn model_validation_strips_deferred_foundry_features_and_keeps_local_searc
         },
     ];
     service
-        .execute_model_validation_request(request)
+        .execute_model_validation_request(request.clone())
         .await
         .expect("retry without the Native-rejected deferred tool");
     assert_eq!(transport.seen_count(), 2);
@@ -339,6 +339,23 @@ async fn model_validation_strips_deferred_foundry_features_and_keeps_local_searc
         .find(|tool| tool["name"] == "StrictOutput")
         .expect("strict tool remains after unsupported strict mode is removed");
     assert!(strict_output.get("strict").is_none());
+
+    drop(seen);
+    let frames = ScriptedStreamTransport::anthropic_success().frames.clone();
+    let streamed = Arc::new(NativeAfkStreamRetryTransport {
+        responses: Mutex::new([(200, Default::default(), frames)].into()),
+        seen: Mutex::default(),
+    });
+    service.transport = streamed.clone();
+    let response_stream = service
+        .stream_request(request)
+        .await
+        .expect("Foundry stream");
+    drop(response_stream);
+    let seen = streamed.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let body = request_body_value(&seen[0].body_json);
+    assert_eq!(body["tools"], second["tools"]);
 }
 
 #[test]
@@ -510,10 +527,18 @@ async fn classifier_attempt_deadline_uses_trusted_override_and_preserves_default
                 service.execute_classifier_request(request, 0),
             )
             .await;
-            assert!(
-                matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))),
-                "{result:?}"
-            );
+            let error = result.expect("deadline returns an error").unwrap_err();
+            if body {
+                assert!(
+                    matches!(error, LlmError::ResponseBodyInterrupted { status: 200, .. }),
+                    "{error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(error, LlmError::TransportTimeout { .. }),
+                    "{error:?}"
+                );
+            }
             assert_eq!(started.elapsed(), expected);
             assert_eq!(
                 *probe.events.lock().unwrap(),
@@ -521,6 +546,107 @@ async fn classifier_attempt_deadline_uses_trusted_override_and_preserves_default
             );
         }
     }
+}
+
+#[derive(Debug)]
+struct DelayedPreparationKey(Duration);
+
+impl CredentialProvider for DelayedPreparationKey {
+    fn load<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+        Box::pin(async move {
+            tokio::time::sleep(self.0).await;
+            Ok(Credential::ApiKey(format!(
+                "fixture-{}",
+                scope.credential_id.as_deref().unwrap()
+            )))
+        })
+    }
+}
+
+fn delayed_preparation_service(
+    delay: Duration,
+    pooled: bool,
+    transport: Arc<dyn Transport>,
+) -> ApiService {
+    let mut profile = native_capability_profile(
+        ProviderId::AnthropicFirstParty,
+        "physical-test",
+        ProtocolFamily::AnthropicMessages,
+        "https://api.anthropic.com",
+        "claude-sonnet-4-6",
+        vec![],
+    );
+    profile.credential = CredentialConfig::Static { id: "test".into() };
+    let credentials = Arc::new(DelayedPreparationKey(delay));
+    let client = if pooled {
+        crate::service::live_web_tests::pooled_runtime(profile, credentials)
+    } else {
+        ModelRuntime::from_config(ClientConfig {
+            providers: vec![profile],
+        })
+        .unwrap()
+        .with_credential_provider(credentials)
+    };
+    ApiService::new(
+        Arc::new(client),
+        transport,
+        SubscriberState::default(),
+        UserAgentEnv::default(),
+        "test",
+        None,
+        None,
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn classifier_stream_deadline_includes_route_credential_preparation() {
+    let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+    let service = delayed_preparation_service(Duration::from_secs(1), false, transport.clone());
+    let probe = Arc::new(AttemptProbe::default());
+    service.set_model_attempt_hooks(Arc::new(probe.clone()));
+    let mut request = registered_request();
+    request.input.model = "claude-sonnet-4-6".into();
+    request.profile = Some("physical-test".into());
+    request.execution.classifier_attempt_timeout_ms = Some(17);
+    let started = tokio::time::Instant::now();
+    let error = service
+        .execute_classifier_stream_request(request, 0)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.classification_source(),
+            LlmError::TransportTimeout { .. }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(started.elapsed(), Duration::from_millis(17));
+    assert_eq!(transport.seen_count(), 0);
+    assert!(probe.events.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pooled_model_validation_finishes_after_the_callers_wait() {
+    let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+    let service = delayed_preparation_service(Duration::from_secs(20), true, transport.clone());
+    let mut request = LlmRequest::new("claude-sonnet-4-6").with_user_text("Hi");
+    request.profile = Some("physical-test".into());
+    request.input.max_tokens = Some(1);
+    let scope = crate::model::retry_scope::ModelCallRetryScope::default();
+    scope.account_deadline(Duration::from_millis(5));
+    let mut probe = Box::pin(scope.run(service.execute_model_validation_request(request)));
+    assert!(tokio::time::timeout(Duration::from_secs(15), &mut probe)
+        .await
+        .is_err());
+    probe.await.expect("late validation succeeds");
+    assert_eq!(transport.seen_count(), 1);
+    assert!(transport
+        .seen_headers(0)
+        .values()
+        .any(|v| v == "fixture-acct.a"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -653,6 +779,74 @@ async fn classifier_stream_retries_bodies_and_headers_with_one_shared_budget() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn classifier_does_not_reopen_an_admitted_interactions_request() {
+    use std::sync::atomic::Ordering;
+    let transport = Arc::new(ClassifierRetryTransport {
+        failures: vec![1],
+        sent: Default::default(),
+    });
+    let service = scope_wire_service(
+        ProtocolFamily::GeminiInteractions,
+        serde_json::json!({}),
+        AuthStrategy::ApiKey,
+        transport.clone(),
+    );
+    let mut request = LlmRequest::new("model").with_user_text("classify");
+    request.input.max_tokens = Some(100);
+    request.execution.classifier_attempt_timeout_ms = Some(17);
+    let error = service
+        .execute_classifier_stream_request(request, 3)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.classification_source(),
+            LlmError::TransportTimeout { .. }
+        ),
+        "{error:?}"
+    );
+    assert!(!error.allows_automatic_replay());
+    assert_eq!(
+        crate::RetryPolicy.classify_error(&error),
+        crate::RetryDecision::DoNotRetry
+    );
+    assert_eq!(transport.sent.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn stateful_stream_eof_returns_the_admitted_routes_replay_veto() {
+    use futures::StreamExt;
+    let transport = FakeStreamTransport::sequence(vec![FakeStreamResp::Frames {
+        status: 200,
+        headers: BTreeMap::new(),
+        frames: vec![],
+    }]);
+    let service = scope_wire_service(
+        ProtocolFamily::GeminiInteractions,
+        serde_json::json!({}),
+        AuthStrategy::ApiKey,
+        transport.clone(),
+    );
+    let mut request = LlmRequest::new("model").with_user_text("classify");
+    request.input.max_tokens = Some(100);
+    let scope = crate::model::retry_scope::ModelCallRetryScope::default();
+    let mut stream = scope.run(service.stream_request(request)).await.unwrap();
+    assert!(
+        !scope.allows_automatic_replay(),
+        "host watchdog must know the veto before reading"
+    );
+    let error = loop {
+        match stream.next().await {
+            Some(Err(error)) => break error,
+            Some(Ok(_)) => continue,
+            None => panic!("missing terminal must carry the physical replay policy"),
+        }
+    };
+    assert!(!error.allows_automatic_replay());
+    assert_eq!(transport.stream_call_count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn classifier_stream_preserves_terminal_header_retry_decisions() {
     use std::sync::atomic::Ordering;
     for phase in [5, 6] {
@@ -697,8 +891,10 @@ async fn classifier_stream_preserves_terminal_header_retry_decisions() {
 #[tokio::test(start_paused = true)]
 async fn nonstream_deadline_bounds_headers_and_body_and_settles_once() {
     for body in [false, true] {
-        let service =
-            make_adapter_with_retries(Arc::new(StalledNonStreamTransport { body }), Some(0));
+        let service = make_adapter_with_retries(
+            Arc::new(StalledNonStreamTransport { body }),
+            Some(if body { 2 } else { 0 }),
+        );
         let probe = Arc::new(AttemptProbe::default());
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
         let result = tokio::time::timeout(
@@ -706,10 +902,20 @@ async fn nonstream_deadline_bounds_headers_and_body_and_settles_once() {
             service.execute_side_query_request(registered_request()),
         )
         .await;
-        assert!(
-            matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))),
-            "{result:?}"
-        );
+        let error = result
+            .expect("deadline should return a provider error")
+            .unwrap_err();
+        if body {
+            assert!(
+                matches!(error, LlmError::ResponseBodyInterrupted { status: 200, .. }),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, LlmError::TransportTimeout { .. }),
+                "{error:?}"
+            );
+        }
         assert_eq!(
             *probe.events.lock().unwrap(),
             vec!["begin", "dispatch", "finish-owned", "settled"]

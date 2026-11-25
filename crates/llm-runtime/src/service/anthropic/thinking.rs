@@ -308,7 +308,10 @@ impl ApiService {
         let Ok(protocol) = self.protocol_for_model(model, profile) else {
             return false;
         };
-        if !Self::is_anthropic_family_protocol(&protocol) {
+        // Foundry accepts only empty effort markers, never system attachments.
+        if protocol == crate::ProtocolFamily::FoundryClaude
+            || !Self::is_anthropic_family_protocol(&protocol)
+        {
             return false;
         }
         let Ok(route) = self.client().resolve_media_route(model, profile) else {
@@ -346,13 +349,8 @@ impl ApiService {
     ) -> Option<bool> {
         let protocol = self.protocol_for_model(model, profile).ok()?;
         let route = self.client().resolve_media_route(model, profile).ok()?.main;
-        let route_admitted = match protocol {
-            crate::ProtocolFamily::AnthropicMessages => {
-                route.provider_id == crate::ProviderId::AnthropicFirstParty
-            }
-            crate::ProtocolFamily::FoundryClaude => true,
-            _ => false,
-        };
+        let route_admitted = protocol == crate::ProtocolFamily::AnthropicMessages
+            && route.provider_id == crate::ProviderId::AnthropicFirstParty;
         if !route_admitted || !self.supports_native_mid_conversation_system(model, profile) {
             return Some(false);
         }
@@ -586,7 +584,8 @@ impl ApiService {
             // Native excludes only disabled thinking with mechanical=true.
             // Enabled/adaptive proves this conjunction false even when the
             // independent mechanical source is unavailable to utility callers.
-            mechanically_disabled: if prepared.native_thinking_request_type_disabled == Some(false) {
+            mechanically_disabled: if prepared.native_thinking_request_type_disabled == Some(false)
+            {
                 Some(false)
             } else {
                 prepared.native_thinking_mechanically_disabled
@@ -600,12 +599,7 @@ impl ApiService {
             ),
             hipaa_tainted: Some(lingxi_core::host::compliance_taints::is_tainted("hipaa")),
             sent_before: tbc_state.as_ref().map(|state| state.beta_sent),
-            rejected_before: Some(
-                tbc_state.as_ref().is_some_and(|state| state.beta_rejected)
-                    || prepared.beta_rejection_state.rejected(
-                        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls,
-                    ),
-            ),
+            rejected_before: Some(tbc_state.as_ref().is_some_and(|state| state.beta_rejected)),
             // Without an explicit parsed ANTHROPIC_BASE_URL, Native KXt may
             // depend on bd()/h3() and selected-profile state. Only the
             // request's captured non-empty API key proves h3() false; other
@@ -1030,22 +1024,11 @@ impl ApiService {
     /// exact header token, and explicitly clears the SDK's late producer fact
     /// so request sealing cannot restore it on the retry.
     pub(in crate::service) fn refuse_native_thinking_binding_controls(
-        request: &mut LlmRequest,
         prepared: &mut crate::PreparedLlmCall,
     ) {
-        match (
-            prepared.thinking_recovery_scope.as_ref(),
-            prepared.native_thinking_binding_controls_attempt.as_ref(),
-        ) {
-            (Some(scope), Some(attempt)) => {
-                scope.refuse_native_thinking_binding_controls_beta_for_attempt(attempt);
-            }
-            (_, Some(attempt)) => attempt.refuse_beta(),
-            _ => {}
+        if let Some(attempt) = prepared.native_thinking_binding_controls_attempt.as_ref() {
+            attempt.refuse_beta();
         }
-        request
-            .execution
-            .native_thinking_binding_controls_beta_requested = Some(false);
         prepared.native_thinking_binding_controls_beta_requested = Some(false);
 
         Self::remove_beta_header_token(

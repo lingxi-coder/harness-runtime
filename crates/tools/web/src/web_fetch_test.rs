@@ -502,8 +502,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         }
     }
     #[tokio::test]
-    async fn provider_fetch_uses_live_route_and_skips_http_preflight() {
+    async fn provider_fetch_uses_live_route_after_domain_preflight() {
+        let _globals = crate::testsupport::web_globals_lock().await;
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
         let (mut builtin, http, _) = make_web_ctx();
+        builtin.skip_web_fetch_preflight = false;
+        http.enqueue(preflight_allow());
         let provider = Arc::new(ProviderFetch {
             seen: std::sync::Mutex::new(vec![]),
             fail: false,
@@ -535,11 +540,20 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             provider.seen.lock().unwrap()[0].url,
             "https://example.com/page"
         );
-        assert!(http.received_requests().is_empty());
+        assert_eq!(
+            http.received_requests().len(),
+            1,
+            "only the domain preflight runs locally"
+        );
     }
     #[tokio::test]
     async fn provider_fetch_failure_never_falls_back_to_local_http() {
+        let _globals = crate::testsupport::web_globals_lock().await;
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
         let (mut builtin, http, _) = make_web_ctx();
+        builtin.skip_web_fetch_preflight = false;
+        http.enqueue(preflight_allow());
         let provider = Arc::new(ProviderFetch {
             seen: std::sync::Mutex::new(vec![]),
             fail: true,
@@ -559,7 +573,41 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("provider failure");
         assert!(error.to_string().contains("fetch denied"));
         assert_eq!(provider.seen.lock().unwrap().len(), 1);
-        assert!(http.received_requests().is_empty());
+        assert_eq!(
+            http.received_requests().len(),
+            1,
+            "only the domain preflight runs locally"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_fetch_never_sends_a_blocked_domain_to_the_provider() {
+        let _globals = crate::testsupport::web_globals_lock().await;
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
+        let (mut builtin, http, _) = make_web_ctx();
+        builtin.skip_web_fetch_preflight = false;
+        http.enqueue(ok_response(200, r#"{"can_fetch":false}"#));
+        let provider = Arc::new(ProviderFetch {
+            seen: Default::default(),
+            fail: false,
+        });
+        builtin.hosted_search = Some(provider.clone());
+        let tool = WebFetchTool::new(builtin);
+        let mut ctx = fresh_ctx();
+        ctx.options.main_loop_model = "deepseek-flash".into();
+        ctx.options.model_profile = Some("deepseek".into());
+        let error = tool
+            .call(
+                generated(json!({"url":"https://hosted-blocked.example/page"})),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect_err("blocked domain");
+        assert!(error.to_string().contains("hosted-blocked.example"));
+        assert!(provider.seen.lock().unwrap().is_empty());
+        assert_eq!(http.received_requests().len(), 1);
     }
 
     fn make_web_ctx() -> (

@@ -35,6 +35,7 @@ pub(super) async fn next(
                     .and_then(|coordinator| coordinator.usage_attribution());
                 if let Err(error) =
                     response.set_per_turn_effort(s.per_turn_effort.as_ref())
+                        .and_then(|_| response.set_diagnostics(&s.diagnostics))
                 {
                     s.finished = true;
                     return Some((Err(error), s));
@@ -113,6 +114,9 @@ pub(super) async fn next(
             if let Err(error) = s.attempt.finish().await {
                 return Some((Err(error), s));
             }
+            if let Some(coordinator) = s.account_coordinator.as_mut() {
+                coordinator.release().await;
+            }
             return None;
         }
         // Watchdog: bound the blocking frame read by the
@@ -127,7 +131,7 @@ pub(super) async fn next(
             None => crate::execution::classifier_attempt_bound(s.classifier_attempt_deadline, async { match s.idle_timeout {
                 Some(timeout) => tokio::time::timeout(
                     timeout,
-                    crate::execution::next_batch_with_capture(&mut s.frames, s.native_stream_capture.as_ref()),
+                    crate::execution::next_batch_with_capture(s.frames.as_mut().expect("live provider stream"), s.native_stream_capture.as_ref()),
                 )
                 .await
                 .unwrap_or_else(|_elapsed| {
@@ -135,7 +139,7 @@ pub(super) async fn next(
                         timeout,
                     ))
                 }),
-                None => crate::execution::next_batch_with_capture(&mut s.frames, s.native_stream_capture.as_ref()).await,
+                None => crate::execution::next_batch_with_capture(s.frames.as_mut().expect("live provider stream"), s.native_stream_capture.as_ref()).await,
             }}).await,
         };
         match frame {
@@ -196,7 +200,7 @@ pub(super) async fn next(
                 let quote = if let Some(lane) =
                     s.server_fallback_lane.as_ref()
                 {
-                    let fallback = s.frames.anthropic_fallback();
+                    let fallback = s.frames.as_ref().expect("live provider stream").anthropic_fallback();
                     let native_branch = fallback
                         .and_then(|facts| facts.iterations.as_ref())
                         .is_some_and(|iterations| {
@@ -335,7 +339,7 @@ pub(super) async fn next(
                     )
                 };
                 if let Err(error) =
-                    s.decoder.observe_model_metadata(&s.frames)
+                    s.decoder.observe_model_metadata(s.frames.as_ref().expect("live provider stream"))
                 {
                     s.pending_service_error = Some(error);
                     s.finished = true;
@@ -449,8 +453,8 @@ pub(super) async fn next(
                     frozen_stream_quote(
                         s.pricing.as_ref(),
                         &s.pricing_model,
-                        &s.frames.usage_report(),
-                        &s.frames.inference_report(),
+                        &s.frames.as_ref().expect("live provider stream").usage_report(),
+                        &s.frames.as_ref().expect("live provider stream").inference_report(),
                     )
                 };
                 match s.decoder.finish() {
@@ -478,6 +482,16 @@ pub(super) async fn next(
                             s.attempt.observe(&usage, completeness);
                         } else {
                             s.attempt.observe_events(&events);
+                        }
+                        // A bare EOF would lose the admitted route in a consumer's
+                        // synthesized truncation error. Keep the transport-close
+                        // classification so already visible text can be salvaged.
+                        if !s.allow_replay && !s.done && !events.iter().any(|event| {
+                            matches!(event, HistoryEvent::MessageStop | HistoryEvent::Completed { .. })
+                        }) {
+                            s.pending_service_error = Some(LlmError::Transport {
+                                message: "stream ended without message_stop or completed event".into(),
+                            });
                         }
                         s.queue.extend(events);
                     }
@@ -546,6 +560,14 @@ pub(super) async fn next(
     }.await;
     match result {
         Some((item, mut state)) => {
+            if state.finished {
+                state.frames.take();
+                state.side_ws_lease.take();
+            }
+            let item = item.map_err(|error| {
+                error.with_response_diagnostics(state.diagnostics.provider_request_id(), None)
+                    .with_route_replay(state.allow_replay)
+            });
             if let Some(coordinator) = state.account_coordinator.as_mut() {
                 match &item {
                     Ok(event) => {
@@ -618,6 +640,8 @@ pub(super) async fn next(
                             state
                                 .account_retry_scope
                                 .mark_account_failed(coordinator.last_failed_account_key());
+                        } else {
+                            coordinator.release().await;
                         }
                     }
                 }

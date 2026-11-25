@@ -1847,11 +1847,6 @@ impl NearLimitHintApiClient {
 
 #[async_trait]
 impl crate::api::SubagentApiClient for NearLimitHintApiClient {
-    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
-        self.consume_calls.fetch_add(1, Ordering::SeqCst);
-        self.pending_hint.swap(false, Ordering::SeqCst)
-    }
-
     fn dispatch_near_limit_checkpoint(&self, request: crate::api::NearLimitCheckpointRequest) {
         self.checkpoint_requests.lock().unwrap().push(request);
     }
@@ -1872,7 +1867,16 @@ impl crate::api::SubagentApiClient for NearLimitHintApiClient {
     > {
         let _model = request.model.as_str();
         let _system = request.system.as_ref();
-        let messages = request.messages;
+        let mut messages = request.messages;
+        if let Some(hint) = request.opts.wrap_up {
+            self.consume_calls.fetch_add(1, Ordering::SeqCst);
+            if self.pending_hint.swap(false, Ordering::SeqCst) && hint.publish().await {
+                messages.push(ConversationMessage::user_meta(
+                    hint.message_id,
+                    hint.text.to_owned(),
+                ));
+            }
+        }
         let _tools = request.tools;
         let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
             *self.last_messages.lock().unwrap() = messages;
@@ -4082,6 +4086,44 @@ async fn disabled_near_limit_flag_consumes_and_drops_the_pending_hint() {
                 ContentBlock::Text { text, .. } if text == NEAR_LIMIT_WRAP_UP_NOTE
             ))
     )));
+}
+
+#[tokio::test]
+async fn capped_child_sends_the_valid_request_and_defers_the_near_limit_note() {
+    async fn run(api: Arc<NearLimitHintApiClient>, cap: Option<u64>) {
+        let mut ctx = loop_ctx(api, None, 1);
+        ctx.depth = 1;
+        ctx.max_input_bytes_per_turn = cap;
+        let (input, events) = mpsc::channel(1);
+        drop(input);
+        let (output, observed) = mpsc::channel(16);
+        run_subagent(ctx, events, output).await;
+        let _ = drain(observed).await;
+    }
+
+    let _flag_lock = near_limit_wrap_up_write();
+    let _flag = NearLimitWrapUpFlagOn::set();
+    let api = NearLimitHintApiClient::new(text_response("done", Some("end_turn")), false);
+    run(api.clone(), None).await;
+    let base = api.last_messages();
+    assert!(!base.is_empty());
+    let cap = measure_serialized_input_unit(&base).serialized_bytes;
+    api.pending_hint.store(true, Ordering::SeqCst);
+    api.last_messages.lock().unwrap().clear();
+
+    run(api.clone(), Some(cap)).await;
+    assert!(
+        !api.last_messages().is_empty(),
+        "the capped child still dispatched"
+    );
+    assert!(api.pending_hint.load(Ordering::SeqCst));
+    assert!(api.checkpoint_requests().is_empty());
+    assert_eq!(api.near_limit_observations.load(Ordering::SeqCst), 0);
+
+    run(api.clone(), None).await;
+    assert!(!api.pending_hint.load(Ordering::SeqCst));
+    assert_eq!(api.checkpoint_requests().len(), 1);
+    assert_eq!(api.near_limit_observations.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -9996,6 +10038,35 @@ async fn generic_workflow_does_not_retry_response_body_transport_errors() {
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
         lingxi_core::host::WorkflowQueryWatchdog::default(),
+        Vec::new(),
+    ));
+    let ctx = loop_ctx(wrapped, None, 6);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(api.call_count(), 1);
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Failed { error, .. } if error.contains("error decoding response body")
+    )));
+}
+
+#[tokio::test]
+async fn workflow_body_retry_honors_the_physical_route_veto() {
+    let error = LlmError::ResponseDiagnostics {
+        source: Box::new(response_body_transport_error()),
+        route_replay_forbidden: true,
+        request_id: Some("failed-generation".into()),
+        rate_limit_message: None,
+    };
+    let api = ResultStreamMockApiClient::new(vec![vec![Err(error)], valid_design_turn()]);
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        lingxi_core::host::WorkflowQueryWatchdog {
+            stall_timeout_ms: 60_000,
+            max_retries: 2,
+            retry_response_body: true,
+        },
         Vec::new(),
     ));
     let ctx = loop_ctx(wrapped, None, 6);

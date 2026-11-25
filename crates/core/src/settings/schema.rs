@@ -1799,8 +1799,9 @@ pub struct SettingsJson {
     ///   and threaded into the adapter as per-model fallback overrides.
     ///   Per-model entry wins over the global `DesktopConfig.fallback_model` /
     ///   argv fallback.  Only chain[0] is used; longer chains log a warning.
-    /// - `retry.maxAttempts`: **WIRED** — sets `RetryControl.max_retries`.
-    ///   Precedence: `LINGXI_MAX_RETRIES` env > `maxAttempts` > default (10).
+    /// - `retry.maxAttempts` sets the total attempts per chain entry, including
+    ///   the initial dispatch. `LINGXI_MAX_RETRIES` overrides the number of
+    ///   additional retries. The normal default is 10 retries.
     /// - `retry.backoffMs`: **WIRED** — sets the exponential-backoff ladder's
     ///   first rung (overrides the default base of 500ms). Ladder is
     ///   `min(backoffMs * 2^attempt, 32000)`; `backoffMs=1000` →

@@ -135,14 +135,7 @@ pub(crate) fn supports_native_mid_conversation_tool_changes_route(
     protocol: &llm_runtime::ProtocolFamily,
     first_party_anthropic: bool,
 ) -> bool {
-    match protocol {
-        // Native's `vh()` admits first-party Anthropic, Anthropic AWS/GCP, and
-        // Foundry. The current runtime route identity exposes direct
-        // Anthropic and Foundry, but no distinct Anthropic AWS/GCP providers.
-        llm_runtime::ProtocolFamily::AnthropicMessages => first_party_anthropic,
-        llm_runtime::ProtocolFamily::FoundryClaude => true,
-        _ => false,
-    }
+    first_party_anthropic && *protocol == llm_runtime::ProtocolFamily::AnthropicMessages
 }
 
 pub(crate) fn supports_native_classifier_route(
@@ -1594,7 +1587,7 @@ mod tests {
             &ProtocolFamily::AnthropicMessages,
             false
         ));
-        assert!(supports_native_mid_conversation_tool_changes_route(
+        assert!(!supports_native_mid_conversation_tool_changes_route(
             &ProtocolFamily::FoundryClaude,
             false
         ));

@@ -6,8 +6,8 @@ use crate::service::anthropic;
 use crate::service::anthropic::prompt::CacheEditingInputs;
 use crate::service::conversation::ConversationSlot;
 use crate::service::request::parse_fallback_chain;
-use crate::service::response::{PromptCacheOverageState, SubscriberState};
-use crate::service::{ApiService, ACCOUNT_CALL_CLIENT};
+use crate::service::response::{PromptCacheOverageState, RateLimitState, SubscriberState};
+use crate::service::{ApiService, ConfiguredFallbackTarget};
 use crate::{CostEstimator, LlmError, LlmRequest, ModelRuntime, PromptCacheQuerySource, Transport};
 use std::sync::{Arc, Mutex, RwLock};
 #[cfg(test)]
@@ -135,9 +135,7 @@ impl ApiService {
         settings_backoff_ms: Option<u64>,
     ) -> Self {
         let models = client.available_models();
-        // Build alias→display map once so configured model fallback can
-        // normalize an alias request to the display model before looking up
-        // per-model fallback overrides (whose keys are display-normalized).
+        // The fast-mode policy resolves its legacy model names through this map.
         let mut alias_to_display = std::collections::BTreeMap::new();
         for m in &models {
             for alias in &m.aliases {
@@ -153,9 +151,11 @@ impl ApiService {
             .unwrap_or_default();
         let fast_availability = Arc::new(crate::model::fast_admission::Availability::default());
         let prompt_cache_overage = Arc::new(PromptCacheOverageState::default());
+        let rate_limits = Arc::new(RateLimitState::default());
         let account_change_observer = Arc::new(ApiServiceAccountObserver {
             fast_availability: fast_availability.clone(),
             prompt_cache_overage: prompt_cache_overage.clone(),
+            rate_limits: rate_limits.clone(),
         });
         Self {
             anthropic: anthropic::State {
@@ -201,20 +201,27 @@ impl ApiService {
             analytics,
             fallback_models,
             interactive_session: None,
-            fallback_overrides,
+            fallback_overrides: fallback_overrides
+                .into_iter()
+                .map(|(source, targets)| {
+                    (
+                        source,
+                        targets
+                            .into_iter()
+                            .map(ConfiguredFallbackTarget::Model)
+                            .collect(),
+                    )
+                })
+                .collect(),
             alias_to_display,
             settings_max_retries,
             settings_backoff_ms,
             estimator,
-            last_rate_limit: Mutex::new(None),
+            rate_limits,
             last_request_id: Mutex::new(None),
             last_retry_count: Mutex::new(0),
             thinking_recovery: crate::thinking_scope::ThinkingRecoveryScope::default(),
-            last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
-            pending_near_limit_wrap_up_hint: Mutex::new(false),
-            near_limit_wrap_up_window_key: Mutex::new(None),
-            last_rate_limit_record_ts_ms: Mutex::new(None),
             stream_idle_timeout_override: None,
             stream_first_byte_timeout_override: None,
             responses_ws_session: Arc::new(Mutex::new(ConversationSlot {
@@ -222,6 +229,7 @@ impl ApiService {
                 session: Some(Default::default()),
             })),
             history_projection_cache: Mutex::default(),
+            deepseek_fetch_cache: tokio::sync::Mutex::default(),
             side_sessions: Arc::default(),
         }
     }
@@ -240,7 +248,7 @@ impl ApiService {
             None,
             None,
             self.estimator.clone(),
-            self.fallback_overrides.clone(),
+            Default::default(),
             self.settings_max_retries,
             self.settings_backoff_ms,
         );
@@ -257,6 +265,7 @@ impl ApiService {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         child.fallback_models = self.fallback_models.clone();
+        child.fallback_overrides = self.fallback_overrides.clone();
         child.scope_output_quota = self.scope_output_quota.clone();
         child.subscription = self.subscription.clone();
         child.anthropic.aws_auth = self.anthropic.aws_auth.clone();
@@ -279,6 +288,16 @@ impl ApiService {
         child.anthropic.fast_policy = self.anthropic.fast_policy.clone();
         child.thinking = RwLock::new(self.thinking_state());
         child
+    }
+
+    /// Set per-model fallback chains with provider-qualified destinations.
+    #[must_use]
+    pub fn with_configured_fallbacks(
+        mut self,
+        overrides: std::collections::BTreeMap<String, Vec<ConfiguredFallbackTarget>>,
+    ) -> Self {
+        self.fallback_overrides.extend(overrides);
+        self
     }
 
     /// Fork an app task without inheriting a conversation's fallback models.
@@ -372,8 +391,8 @@ impl ApiService {
     }
 
     /// Install the host's merged current main/subagent cache-TTL settings.
-    /// The source is sampled while building each request so file, CLI, managed,
-    /// and mobile settings updates reach the SDK's Native TTL resolver.
+    /// The first Anthropic-family generation attempt samples the source for the
+    /// logical request. Its retries reuse that snapshot.
     #[must_use]
     pub fn with_prompt_cache_ttl_settings_source(
         mut self,
@@ -506,11 +525,7 @@ impl ApiService {
     }
 
     pub(super) fn client(&self) -> Arc<ModelRuntime> {
-        let owner = Arc::as_ptr(&self.client) as usize;
-        ACCOUNT_CALL_CLIENT
-            .try_with(|(selected_owner, client)| (*selected_owner == owner).then(|| client.clone()))
-            .ok()
-            .flatten()
+        self.scoped_account_client()
             .unwrap_or_else(|| crate::catalog_task::client(&self.client))
     }
 }

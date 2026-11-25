@@ -93,8 +93,23 @@ impl ApiService {
             .provider_metadata
             .payload_at("/stream")
             .unwrap_or_else(|| usage.provider_metadata.clone());
-        let observed_profile = provider_metadata.string_at("/llm_client/executed_profile");
         let route = self.client().resolve_media_route(model, profile)?.main;
+        let observation = provider_metadata.payload_at("/llm_client/output_budget");
+        let different_route = observation.as_ref().is_some_and(|budget| {
+            budget
+                .string_at("/profile")
+                .is_some_and(|profile| profile != route.profile_name)
+                || budget
+                    .string_at("/model")
+                    .is_some_and(|model| model != route.request_model)
+        });
+        if different_route
+            || provider_metadata
+                .string_at("/llm_client/executed_profile")
+                .is_some_and(|profile| profile != route.profile_name)
+        {
+            return Ok(None);
+        }
         let profiles = self.client().provider_service_profiles();
         let Some(connection) = profiles
             .iter()
@@ -102,10 +117,6 @@ impl ApiService {
         else {
             return Ok(None);
         };
-        if observed_profile.is_some_and(|actual| actual != route.profile_name) {
-            return Ok(None);
-        }
-        let observation = provider_metadata.payload_at("/llm_client/output_budget");
         // A request budget is recoverable after confirmed output exhaustion.
         // The SDK bounds growth by this route's model and remaining context;
         // administrative LINGXI_MAX_OUTPUT_TOKENS remains a hard ceiling.
@@ -228,7 +239,11 @@ impl ApiService {
     /// Check each physical route before generation. Only a provider count may
     /// produce ContextOverflow; approximations can enforce an application soft
     /// budget but are explicitly identified as estimates in that local error.
-    pub(super) async fn ensure_context_fit(&self, request: &LlmRequest) -> Result<(), LlmError> {
+    pub(super) async fn ensure_context_fit(
+        &self,
+        request: &LlmRequest,
+        prior_dispatch: bool,
+    ) -> Result<(), LlmError> {
         use lingxi_llm_client::protocol::{ContextPolicy, ThinkingMode};
         // An opaque/overridden native model source may not have a catalog row.
         // Do not borrow the route selector's limits for another wire identity.
@@ -260,12 +275,20 @@ impl ApiService {
         if estimate < budget.saturating_sub(13_000.min(budget / 10)) {
             return Ok(());
         }
+        // Exact counting sends the prompt and tools. Output-limited invocations
+        // reserve live host authorization and dispatch receipts for generation.
+        if self.scope_output_quota.is_some() {
+            return crate::model::context_admission::check(&context, estimate, None);
+        }
         let mut counted = request.clone();
         counted.profile = Some(context.profile_name.clone());
-        let exact = crate::model::count_tokens::try_count_tokens_exact(
+        let scope = crate::model::retry_scope::ModelCallRetryScope::current_or_new();
+        let exact = crate::model::count_tokens::try_count_tokens_exact_in_scope(
             self.client().as_ref(),
             self.transport.clone(),
             &counted,
+            Some(&scope),
+            || request.execution.check_dispatch_admission(prior_dispatch),
         )
         .await?;
         crate::model::context_admission::check(&context, estimate, exact)

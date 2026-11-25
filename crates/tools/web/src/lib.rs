@@ -34,7 +34,7 @@ pub mod url_safety;
 pub mod web_fetch;
 pub mod web_search;
 pub use web_fetch::WebFetchTool;
-pub use web_search::WebSearchTool;
+pub use web_search::{WebSearchBudget, WebSearchTool};
 /// Register the web fetch + search tools against `reg`.
 ///
 /// `side_query`: the small-fast client powering WebFetch's apply step. `None`
@@ -45,11 +45,22 @@ pub fn register_all(
     ctx: tool_api::BuiltinToolContext,
     side_query: Option<std::sync::Arc<dyn sidequery::SideQueryClient>>,
 ) {
+    register_all_with_search_budget(reg, ctx, side_query, WebSearchBudget::default());
+}
+
+/// Register web tools for a session that retains its search budget across
+/// tool registry rebuilds.
+pub fn register_all_with_search_budget(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    side_query: Option<std::sync::Arc<dyn sidequery::SideQueryClient>>,
+    budget: WebSearchBudget,
+) {
     use std::sync::Arc;
     let web_fetch = match side_query {
         Some(client) => WebFetchTool::new(ctx.clone()).with_side_query(client),
         None => WebFetchTool::new(ctx.clone()),
     };
     reg.register_builtin(Arc::new(web_fetch));
-    reg.register_builtin(Arc::new(WebSearchTool::new(ctx)));
+    reg.register_builtin(Arc::new(WebSearchTool::with_search_budget(ctx, budget)));
 }

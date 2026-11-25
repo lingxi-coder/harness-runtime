@@ -2398,7 +2398,7 @@ impl ConversationOrchestrator {
         assistant_id: MessageId,
         stop_reason: &str,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
-        let request_id = self.api.last_request_id();
+        let request_id = self.api.response_request_id(pumped.diagnostics.as_ref());
         let api_error = crate::turn_loop::terminal_api_error_text(
             request_model,
             self.prompt_is_interactive(),
@@ -2478,8 +2478,8 @@ impl ConversationOrchestrator {
         request_model: &str,
         stop_details: Option<&llm_runtime::HistoryStopDetails>,
         response_message_id: Option<&str>,
+        request_id: Option<String>,
     ) -> Result<bool, OrchestratorError> {
-        let request_id = self.api.last_request_id();
         let text = crate::turn_loop::terminal_api_error_text(
             request_model,
             self.prompt_is_interactive(),
@@ -4895,6 +4895,7 @@ pub(super) fn llm_response_to_pumped_turn(
     });
 
     PumpedTurn {
+        diagnostics: resp.diagnostics(),
         per_turn_effort: resp.per_turn_effort(),
         tool_use_removals: Vec::new(),
         served_model,

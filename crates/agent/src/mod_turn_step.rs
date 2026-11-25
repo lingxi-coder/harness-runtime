@@ -114,6 +114,19 @@ impl ChildStepRequest {
                 &messages,
                 context.max_input_bytes_per_turn,
             )?;
+            if let (Some(hint), Some(max)) = (&call_opts.wrap_up, context.max_input_bytes_per_turn)
+            {
+                let note = ConversationMessage::user_meta(hint.message_id, hint.text.to_owned());
+                messages.push(note);
+                let fits =
+                    crate::runner::validate_request_input_bytes(&messages, Some(max)).is_ok();
+                messages.pop();
+                if !fits {
+                    // The ordinary request fits. Leave the optional notice
+                    // pending for a physical request which has room for it.
+                    call_opts.wrap_up = None;
+                }
+            }
         }
         let capture = policy.map(|policy| crate::prompt_policy::CapturedRequestPrompt {
             policy,
@@ -185,6 +198,7 @@ pub(crate) fn stream(
     request: ChildStepRequest,
     cwd: PathBuf,
     physical_responses: Arc<Mutex<Vec<HistoryResponse>>>,
+    retry_scope: llm_runtime::model::retry_scope::ModelCallRetryScope,
 ) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
     let wire = Arc::new(Mutex::new(TurnStepEncoder::default()));
     let decoder = Arc::new(Mutex::new(TurnStepDecoder::new(&request.model)));
@@ -200,11 +214,13 @@ pub(crate) fn stream(
         let source_error = physical_error.clone();
         let source_requested = requested_model.clone();
         let policy_host = host.clone();
+        let source_retry_scope = retry_scope.clone();
         let source = move |forwarded: Utf16JsonProjection| {
             let request = request.clone();
             let host = policy_host.clone();
             let wire = source_wire.clone();
             let physical_error = source_error.clone();
+            let retry_scope = source_retry_scope.clone();
             let physical_responses = physical_responses.clone();
             let requested_model = source_requested.clone();
             async move {
@@ -243,8 +259,8 @@ pub(crate) fn stream(
                     request.effort.clone()
                 };
                 requested_model.store(true, Ordering::Release);
-                let provider = effective_request
-                    .open(&model, effort)
+                let provider = retry_scope
+                    .run(effective_request.open(&model, effort))
                     .await
                     .map_err(|error| {
                         *physical_error.lock().unwrap() = Some(error.clone());
@@ -389,10 +405,10 @@ pub(crate) fn stream(
                     let opened = tokio::select! {
                         biased;
                         _ = sender.closed() => return,
-                        opened = fallback_request.open(
+                        opened = retry_scope.run(fallback_request.open(
                             &fallback_request.model,
                             fallback_request.effort.clone(),
-                        ) => opened,
+                        )) => opened,
                     };
                     match opened {
                         Ok(mut provider) => {

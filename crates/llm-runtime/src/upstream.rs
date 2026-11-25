@@ -272,6 +272,23 @@ pub(crate) fn request(
     Ok(input)
 }
 
+// Local collection metadata carried by the SDK's structured response error.
+pub(crate) const RESPONSE_BODY_LIMIT_BYTES_FIELD: &str = "response_body_limit_bytes";
+
+impl LlmError {
+    /// Pinned SDK codecs report a clean EOF without terminal evidence using
+    /// these exact interruptions. Other interruptions include malformed frames,
+    /// incomplete tool input, and explicit provider errors.
+    #[must_use]
+    pub fn is_missing_stream_terminal(&self) -> bool {
+        matches!(self.classification_source(), Self::StreamInterrupted { message }
+            if matches!(message.as_str(),
+                "provider stream ended before a terminal event"
+                | "Interactions stream interrupted before terminal; submission outcome may be unknown"
+                | "stream ended without a terminal event"))
+    }
+}
+
 /// Translate SDK failures into the host execution error contract.
 pub(crate) fn error(error: wire::LlmError) -> LlmError {
     use wire::LlmError as E;
@@ -304,6 +321,26 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
             retry_after,
         } => {
             use wire::LlmErrorKind as K;
+            if (200..300).contains(&status)
+                && classification == K::StreamInterrupted
+                && body
+                    .get("response_body_interrupted")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            {
+                return LlmError::ResponseBodyInterrupted { status, request_id };
+            }
+            if let Some(limit_bytes) = body
+                .get(RESPONSE_BODY_LIMIT_BYTES_FIELD)
+                .and_then(serde_json::Value::as_u64)
+                .filter(|_| (200..300).contains(&status) && classification == K::RequestTooLarge)
+            {
+                return LlmError::ResponseBodyLimitExceeded {
+                    status,
+                    request_id,
+                    limit_bytes,
+                };
+            }
             let body = *body;
             let message = format!(
                 "{status} {}",

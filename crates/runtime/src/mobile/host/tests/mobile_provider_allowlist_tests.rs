@@ -205,3 +205,41 @@ fn mobile_allowlist_filters_providers_credentials_aliases_and_fallbacks() {
     assert_eq!(1, assembled.chains.chains["mixed"].len());
     assert!(!assembled.chains.chains.contains_key("blocked"));
 }
+
+#[test]
+fn mobile_allowlist_drops_excluded_fallback_profile_with_shared_model() {
+    let routing = json!({
+        "mobileEnabledProfiles": ["shared:allowed"],
+        "fallback": {"primary": ["shared:excluded/model"]}
+    });
+    let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
+        official_catalog: None,
+        anthropic_api_base: "https://api.anthropic.com".into(),
+        anthropic_models: anthropic_models("claude-sonnet-4-20250514"),
+        anthropic_has_api_key: false,
+        anthropic_has_oauth: false,
+        user_providers: BTreeMap::from([(
+            "shared".into(),
+            json!({
+                "type": "openai",
+                "baseUrl": "https://shared.example/v1",
+                "models": ["model"],
+                "connections": [{"id": "allowed"}, {"id": "excluded"}]
+            }),
+        )]),
+        routing: Some(routing.clone()),
+    });
+    let entry = &assembled.chains.chains["primary"][0];
+    let allowed = assembled
+        .client_config
+        .providers
+        .iter()
+        .find(|profile| profile.profile_name == "shared:allowed")
+        .unwrap();
+    assert_eq!(entry.provider_id, allowed.provider_id);
+    assert_eq!(entry.model, allowed.models[0].request_model);
+
+    apply_mobile_profile_allowlist(&mut assembled, Some(&routing));
+
+    assert!(assembled.chains.chains.is_empty());
+}

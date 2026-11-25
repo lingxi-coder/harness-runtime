@@ -2,7 +2,7 @@
 
 use crate::dispatch_header::{DispatchAttempt, DispatchHeaderState};
 use crate::model::retry_scope::ModelCallRetryScope;
-use crate::service::ApiService;
+use crate::service::{ApiService, ACCOUNT_CALL_CLIENT};
 use crate::{LlmError, LlmRequest, ModelRuntime};
 use std::sync::Arc;
 
@@ -49,8 +49,21 @@ impl<'a> AttemptAdmission<'a> {
     }
 
     pub(super) fn check_computer_submission(&mut self) -> Result<(), LlmError> {
-        if self.request.computer_submission.is_some() && !self.host_admitted() {
-            return Err(self.reject());
+        if self.request.computer_submission.is_some() {
+            if !self.host_admitted() || self.quota.is_some_and(|quota| quota.is_revoked()) {
+                return Err(self.reject());
+            }
+            if self
+                .request
+                .api_attempts_left
+                .as_ref()
+                .is_some_and(|budget| budget.remaining() == 0)
+                || self
+                    .quota
+                    .is_some_and(|quota| quota.remaining_dispatches() == 0)
+            {
+                return Err(LlmError::ApiAttemptsExhausted);
+            }
         }
         Ok(())
     }
@@ -103,10 +116,7 @@ impl<'a> AttemptAdmission<'a> {
     }
 
     fn host_admitted(&self) -> bool {
-        self.request
-            .request_dispatch_admission
-            .as_ref()
-            .is_none_or(|admission| admission.is_admitted())
+        self.request.check_dispatch_admission(false).is_ok()
     }
 
     fn reject(&mut self) -> LlmError {
@@ -147,6 +157,72 @@ impl DispatchObservations {
 }
 
 impl ApiService {
+    pub(super) fn scoped_account_client(&self) -> Option<Arc<ModelRuntime>> {
+        let owner = Arc::as_ptr(&self.client) as usize;
+        ACCOUNT_CALL_CLIENT
+            .try_with(|(selected_owner, client)| (*selected_owner == owner).then(|| client.clone()))
+            .ok()
+            .flatten()
+    }
+
+    /// Resolve the current account routing before a logical request is built.
+    /// Build and execute within this scope to use the same route snapshot for
+    /// protocol-specific request construction and physical attempts.
+    pub async fn with_account_call_snapshot<T, E>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, E>
+    where
+        E: From<LlmError>,
+    {
+        if !self.client.has_account_pool() || self.scoped_account_client().is_some() {
+            return operation.await;
+        }
+        let scope = ModelCallRetryScope::current_or_new();
+        let (client, _) = self.account_call_client(&scope, true).await?;
+        let owner = Arc::as_ptr(&self.client) as usize;
+        scope
+            .run(ACCOUNT_CALL_CLIENT.scope((owner, client), operation))
+            .await
+    }
+
+    pub(super) async fn account_call_client(
+        &self,
+        scope: &ModelCallRetryScope,
+        use_host_deadline: bool,
+    ) -> Result<(Arc<ModelRuntime>, Option<tokio::time::Instant>), LlmError> {
+        let deadline_for = |client: &ModelRuntime| {
+            if !client.has_account_pool() {
+                return Ok(None);
+            }
+            if let Some(error) = scope.account_replay_error() {
+                return Err(error);
+            }
+            if use_host_deadline {
+                return Ok(Some(scope.account_deadline(
+                    crate::model::request_timeout::non_stream_timeout()?,
+                )));
+            }
+            Ok(None)
+        };
+        if let Some(client) = self.scoped_account_client() {
+            let deadline = deadline_for(&client)?;
+            return Ok((client, deadline));
+        }
+        let capture = self.client.account_call_snapshot();
+        if let Some(deadline) = deadline_for(&self.client)? {
+            let client = tokio::time::timeout_at(deadline, capture)
+                .await
+                .map_err(|_| LlmError::TransportTimeout {
+                    message: "logical account call deadline exceeded".into(),
+                })??;
+            return Ok((client, Some(deadline)));
+        }
+        let client = capture.await?;
+        let deadline = deadline_for(&client)?;
+        Ok((client, deadline))
+    }
+
     /// Install the host's registered-attempt authority after composition.
     /// Ordinary requests without context never invoke this hook.
     pub fn set_model_attempt_hooks(&self, hooks: Arc<dyn crate::ModelAttemptHooks>) {
@@ -239,20 +315,73 @@ impl ApiService {
         Ok(crate::model_attempt::WireAttempt::new(Some(lease)).with_classifier(request, prepared))
     }
 
+    pub(super) fn configure_api_attempt_budget(
+        &self,
+        request: &mut LlmRequest,
+        scope: &ModelCallRetryScope,
+        pooled: bool,
+    ) {
+        let execution = &mut request.execution;
+        if pooled && execution.api_attempts_left.is_none() {
+            execution.api_attempts_left = Some(scope.account_api_budget());
+        }
+        if let Some(retries) = execution.side_query_max_retries {
+            let attempts = retries.saturating_add(1);
+            execution.api_attempts_left = Some(execution.api_attempts_left.take().map_or_else(
+                || crate::ApiAttemptsLeft::new(attempts),
+                |operation| operation.capped(attempts),
+            ));
+        }
+    }
+
     /// Bind estimation and admission to the selected physical route.
     pub(super) async fn bind_attempt_route(
         &self,
         request: &mut LlmRequest,
         inherit_effort: bool,
-    ) -> Result<Arc<ModelRuntime>, LlmError> {
+        prior_dispatch: bool,
+        wrap_up: Option<(&str, lingxi_core::types::MessageId)>,
+    ) -> Result<(Arc<ModelRuntime>, Option<LlmRequest>), LlmError> {
         if inherit_effort {
             self.refresh_effort_settings(request)?;
             request.execution.resolve_native_effort = true;
         }
         let client = self.client();
         client.bind_context_usage_for_route(request)?;
-        self.ensure_context_fit(request).await?;
-        Ok(client)
+        let mut projected = self.project_cached_foundry_tool_features(request);
+        if let Some((text, id)) = wrap_up {
+            // A reroute starts with the canonical request, so the projection
+            // and its quota note can only reach the account which claimed it.
+            let projection = projected.get_or_insert_with(|| request.clone());
+            projection.execution.wrap_up_credential_bound = true;
+            let index = projection.input.messages.len();
+            projection.execution.request_message_source_ids.insert(id);
+            projection
+                .execution
+                .request_message_source_indices
+                .insert(id, index);
+            if projection.execution.request_content_source_ids.len() == index {
+                projection
+                    .execution
+                    .request_content_source_ids
+                    .push(vec![[id].into_iter().collect()]);
+            }
+            projection
+                .input
+                .messages
+                .push(lingxi_llm_client::protocol::ConversationMessage {
+                    role: lingxi_llm_client::protocol::MessageRole::User,
+                    content: vec![lingxi_llm_client::protocol::ContentBlock::Text {
+                        text: text.to_owned(),
+                        citations: None,
+                        thought_signature: None,
+                    }],
+                    native_options: Vec::new(),
+                });
+        }
+        self.ensure_context_fit(projected.as_ref().unwrap_or(request), prior_dispatch)
+            .await?;
+        Ok((client, projected))
     }
 
     /// Apply the selected provider's host policy before the SDK seals the call.

@@ -1828,6 +1828,10 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::increment_web_search_calls(self);
     }
 
+    fn try_reserve_web_search_call(&self, max: u32) -> Result<(), u32> {
+        TaskRegistry::try_reserve_web_search_call(self, max)
+    }
+
     fn reset_web_search_calls(&self) {
         // `resetWebSearchCalls(){n=0}` — the inherent atomic store.
         TaskRegistry::reset_web_search_calls(self);
@@ -1997,6 +2001,13 @@ mod tests {
         assert_eq!(handle.web_search_calls(), 2, "seam must observe increments");
         // Inherent and seam views share the same atomic.
         assert_eq!(registry.web_search_calls(), 2);
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| handle.try_reserve_web_search_call(3));
+            let second = scope.spawn(|| handle.try_reserve_web_search_call(3));
+            let outcomes = [first.join().unwrap(), second.join().unwrap()];
+            assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+            assert!(outcomes.contains(&Err(3)));
+        });
         handle.reset_web_search_calls();
         assert_eq!(handle.web_search_calls(), 0);
     }

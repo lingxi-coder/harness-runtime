@@ -428,7 +428,8 @@ pub fn resolve_retry_control(
 }
 
 /// Extended form of [`resolve_retry_control`] that additionally accepts a
-/// `settings_max_retries` value from `routing.retry.maxAttempts`.
+/// `settings_max_retries` value after subtracting the initial attempt from
+/// `routing.retry.maxAttempts`.
 ///
 /// ## Precedence
 ///
@@ -555,6 +556,9 @@ pub fn next_step_with_backoff(
 ) -> DriveStep {
     use crate::LlmError;
 
+    if !error.allows_automatic_replay() {
+        return DriveStep::Terminal;
+    }
     if error.is_proxy_auth_helper_retry() {
         state.consecutive_overloaded = 0;
         if state.attempt >= ctl.max_retries {
@@ -724,6 +728,8 @@ pub fn next_step_with_backoff(
         | LlmError::ContextOverflow { .. }
         | LlmError::InputBudgetExceeded { .. }
         | LlmError::RequestTooLarge
+        | LlmError::ResponseBodyLimitExceeded { .. }
+        | LlmError::ResponseBodyInterrupted { .. }
         | LlmError::FileUploadOutcomeUnknown { .. }
         | LlmError::QuotaExceeded
         | LlmError::ModelUnavailable
@@ -737,7 +743,7 @@ pub fn next_step_with_backoff(
             state.consecutive_overloaded = 0;
             DriveStep::Terminal
         }
-        LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+        LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } | LlmError::ResponseDiagnostics { .. } => {
             unreachable!("classification_source removes carrier wrappers")
         }
     }

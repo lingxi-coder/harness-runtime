@@ -1005,20 +1005,7 @@ pub fn api_service_from_stack(
     } else {
         cfg
     };
-    // Same CHAINS BRIDGE as `build`: the assembled per-model chain becomes the
-    // adapter's `fallback_overrides`, keyed by model id.
-    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = stack
-        .chains
-        .chains
-        .iter()
-        .map(|(key, entries)| {
-            (
-                key.clone(),
-                entries.iter().map(|e| e.model.clone()).collect(),
-            )
-        })
-        .collect();
-    let settings_max_retries = stack.chains.retry.as_ref().map(|r| r.max_attempts);
+    let settings_max_retries = stack.chains.retry.as_ref().map(|r| r.max_retries());
     let settings_backoff_ms = stack.chains.retry.as_ref().map(|r| r.backoff_ms);
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
 
@@ -1035,10 +1022,11 @@ pub fn api_service_from_stack(
         Some(analytics_bus.clone()),
         cfg.fallback_model.clone(),
         Some(stack.cost_estimator),
-        fallback_overrides,
+        Default::default(),
         settings_max_retries,
         settings_backoff_ms,
     )
+    .with_configured_fallbacks(stack.chains.fallback_overrides())
     .with_scope_output_quota(cfg.scope_output_quota.clone())
     .with_subscription(stack.subscription)
     .with_custom_cli_betas(cfg.custom_betas.clone())

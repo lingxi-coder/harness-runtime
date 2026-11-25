@@ -80,9 +80,7 @@ async fn native_stream_hq_unknown_400_uses_the_same_provenance_guards() {
     while let Some(event) = stream.next().await {
         event.expect("successful retry stream");
     }
-    assert!(scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
+    assert!(bedrock_tbc_state(&scope).beta_rejected);
 }
 
 #[tokio::test]
@@ -167,9 +165,7 @@ async fn ordinary_stream_context_1m_generic_refusal_retires_tbc_before_context_1
     while let Some(event) = stream.next().await {
         event.expect("remaining successful stream events");
     }
-    assert!(scope.beta_rejected(
-        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingBindingControls
-    ));
+    assert!(bedrock_tbc_state(&scope).beta_rejected);
     assert!(!scope.context_1m_refused(&model_key));
 }
 
@@ -577,6 +573,7 @@ async fn streaming_429_with_retry_after_header_drives_7s_not_1s() {
 #[tokio::test]
 async fn streaming_openrouter_free_429_surfaces_provider_detail_without_retrying() {
     let model = "z-ai/glm-5.2:free";
+    let alias = "free-router-model";
     let stream_transport = FakeStreamTransport::sequence(vec![FakeStreamResp::Status {
         status: 429,
         headers: BTreeMap::new(),
@@ -587,7 +584,7 @@ async fn streaming_openrouter_free_429_surfaces_provider_detail_without_retrying
             }
         })),
     }]);
-    let adapter = make_adapter_for_protocol_with_transport(
+    let mut adapter = make_adapter_for_protocol_with_transport(
         ProtocolFamily::OpenAiChat,
         ProviderId::OpenAICompatible {
             name: "openrouter".to_string(),
@@ -597,10 +594,13 @@ async fn streaming_openrouter_free_429_surfaces_provider_detail_without_retrying
         model,
         Arc::clone(&stream_transport) as Arc<dyn Transport>,
     );
+    let mut config = adapter.client.configuration();
+    config.providers[0].models[0].aliases.push(alias.to_owned());
+    adapter.client = Arc::new(adapter.client.reconfigured(config).unwrap());
 
     let result = adapter
         .stream_with_attempt_opts(
-            model,
+            alias,
             Some("openrouter"),
             None,
             Vec::new(),
@@ -769,7 +769,38 @@ async fn repeated_identical_stream_overflow_stops_after_one_adjustment() {
 #[tokio::test(start_paused = true)]
 async fn streaming_idle_watchdog_aborts_hung_stream() {
     use futures::StreamExt;
-    let adapter = make_adapter(Arc::new(HangingStreamTransport) as Arc<dyn Transport>)
+    let (body_dropped, observed) = tokio::sync::oneshot::channel();
+    struct PendingBody(Option<tokio::sync::oneshot::Sender<()>>);
+    impl futures::Stream for PendingBody {
+        type Item = Result<bytes::Bytes, lingxi_llm_client::protocol::LlmError>;
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending
+        }
+    }
+    impl Drop for PendingBody {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(());
+        }
+    }
+    struct PendingTransport(Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+    #[async_trait::async_trait]
+    impl Transport for PendingTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            Ok(lingxi_llm_client::StreamResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: Box::pin(PendingBody(self.0.lock().unwrap().take())),
+            })
+        }
+    }
+    let adapter = make_adapter(Arc::new(PendingTransport(Mutex::new(Some(body_dropped)))))
         .with_stream_idle_timeout_override(Some(std::time::Duration::from_millis(50)));
     let mut stream = adapter
         .stream(
@@ -792,6 +823,13 @@ async fn streaming_idle_watchdog_aborts_hung_stream() {
         crate::model::stream_watchdog::is_stream_idle_timeout(&err),
         "expected a watchdog idle-timeout abort, got {err:?}"
     );
+    let mut observed = observed;
+    assert_eq!(
+        observed.try_recv(),
+        Ok(()),
+        "timeout must release the live body before yielding"
+    );
+    assert!(stream.next().await.is_none());
 }
 
 /// Stream telemetry twin — succeed path:

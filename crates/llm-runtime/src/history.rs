@@ -98,8 +98,56 @@ pub struct HistoryResponse {
     )]
     pub resumable: Option<JsonPayload>,
 }
-impl HistoryResponse {}
+/// Correlation and retry data for the physical response that produced this result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseDiagnostics {
+    pub request_id: Option<String>,
+    pub request_id_origin: Option<crate::service::RequestIdOrigin>,
+    pub retries: u32,
+}
+
+impl ResponseDiagnostics {
+    pub(crate) fn provider_request_id(&self) -> Option<String> {
+        match self.request_id_origin {
+            Some(crate::service::RequestIdOrigin::Server) => self.request_id.clone(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn new(id: Option<(String, crate::service::RequestIdOrigin)>, retries: u32) -> Self {
+        let (request_id, request_id_origin) = id
+            .map(|(id, origin)| (Some(id), Some(origin)))
+            .unwrap_or_default();
+        Self {
+            request_id,
+            request_id_origin,
+            retries,
+        }
+    }
+}
+
 impl HistoryResponse {
+    /// Diagnostics carried by this response, including explicit absence of an ID.
+    pub fn diagnostics(&self) -> Option<ResponseDiagnostics> {
+        let value = self
+            .provider_metadata
+            .payload_at("/llm_client/response_diagnostics")?;
+        serde_json::from_str(value.as_json_source()).ok()
+    }
+
+    pub(crate) fn set_diagnostics(
+        &mut self,
+        diagnostics: &ResponseDiagnostics,
+    ) -> Result<(), crate::LlmError> {
+        let value = serde_json::to_value(diagnostics).expect("typed response diagnostics");
+        let value = JsonPayload::from_generated_value(&value).map_err(|error| {
+            crate::LlmError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+        self.set_host_metadata("response_diagnostics", &value)
+    }
+
     /// Admitted host request effort, never decoded from provider output.
     pub fn per_turn_effort(&self) -> Option<Utf16JsonProjection> {
         let source = self
@@ -128,6 +176,10 @@ impl HistoryResponse {
                 message: error.to_string(),
             }
         })?;
+        self.set_host_metadata("per_turn_effort", &effort)
+    }
+
+    fn set_host_metadata(&mut self, key: &str, value: &JsonPayload) -> Result<(), crate::LlmError> {
         let empty = || JsonPayload::parse("{}").expect("static JSON object is valid");
         let root = if self.provider_metadata.is_root_object() {
             self.provider_metadata.clone()
@@ -138,7 +190,7 @@ impl HistoryResponse {
             .payload_at("/llm_client")
             .filter(|value| value.is_root_object())
             .unwrap_or_else(empty)
-            .with_object_field("per_turn_effort", &effort)
+            .with_object_field(key, value)
             .map_err(|error| crate::LlmError::InvalidRequest {
                 message: error.to_string(),
             })?;

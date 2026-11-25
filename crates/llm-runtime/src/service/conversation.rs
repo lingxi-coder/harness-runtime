@@ -175,7 +175,7 @@ impl ApiService {
         req.execution.resolve_native_effort = true;
         let request_client = self.client();
         let mut prepared = request_client
-            .prepare_on(&req, self.transport.clone())
+            .prepare_on(&req, self.transport.clone(), Default::default())
             .await?;
         // Responses-WebSocket prewarm only — never a first-party Anthropic
         // route, so the dispatch gate is inert here.

@@ -60,7 +60,23 @@ pub async fn try_count_tokens_exact(
     transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<Option<u64>, LlmError> {
-    match client.count_tokens_exact(request, transport).await {
+    try_count_tokens_exact_in_scope(client, transport, request, None, || {
+        request.execution.check_dispatch_admission(false)
+    })
+    .await
+}
+
+pub(crate) async fn try_count_tokens_exact_in_scope(
+    client: &ModelRuntime,
+    transport: Arc<dyn Transport>,
+    request: &LlmRequest,
+    scope: Option<&crate::model::retry_scope::ModelCallRetryScope>,
+    before_dispatch: impl FnOnce() -> Result<(), LlmError> + Send,
+) -> Result<Option<u64>, LlmError> {
+    match client
+        .count_tokens_exact(request, transport, scope, before_dispatch)
+        .await
+    {
         // Compatible Messages endpoints may omit this auxiliary API. Only a
         // concrete unsupported-endpoint response permits estimation; auth,
         // permissions, rate limits, TLS and transport errors remain failures.
@@ -263,14 +279,11 @@ fn estimated_block_bytes(block: &lingxi_llm_client::protocol::ContentBlock) -> u
             ..
         } => {
             let base = serialized_len(tool_use_id).saturating_add(TOOL_RESULT_WRAPPER_BYTES);
-            let Some(length) = blocks.array_len("") else {
+            let Some(items) = crate::protocol::json_array_items(blocks, "") else {
                 return base.saturating_add(serialized_len(blocks));
             };
-            (0..length).fold(base, |bytes, index| {
-                let item = blocks
-                    .array_item(index)
-                    .expect("array item exists within reported length");
-                bytes.saturating_add(tool_result_block_bytes(&item, media_bytes))
+            items.iter().fold(base, |bytes, item| {
+                bytes.saturating_add(tool_result_block_bytes(item, media_bytes))
             })
         }
         _ => serialized_len(block),
@@ -879,6 +892,78 @@ mod tests {
             seen.headers.get("x-api-key").map(String::as_str),
             Some("ct-test-key")
         );
+    }
+
+    #[tokio::test]
+    async fn retry_scope_reuses_only_an_unchanged_exact_count_request() {
+        let transport = Arc::new(ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 2095 }),
+        )));
+        let client = anthropic_client();
+        let original = LlmRequest::new("claude").with_user_text("original");
+        let changed = LlmRequest::new("claude").with_user_text("changed");
+        let scope = crate::model::retry_scope::ModelCallRetryScope::default();
+        let fresh = crate::model::retry_scope::ModelCallRetryScope::default();
+        for (request, scope, sends_request) in [
+            (&original, &scope, true),
+            (&original, &scope, false),
+            (&changed, &scope, true),
+            (&changed, &fresh, true),
+        ] {
+            let count = try_count_tokens_exact_in_scope(
+                &client,
+                transport.clone(),
+                request,
+                Some(scope),
+                || Ok(()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(count, Some(2095));
+            assert_eq!(
+                transport.seen.lock().unwrap().take().is_some(),
+                sends_request
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_count_spends_attempt_budget_only_on_dispatch() {
+        let transport = Arc::new(ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 42 }),
+        )));
+        let client = anthropic_client();
+        let mut request = LlmRequest::new("claude").with_user_text("hello");
+        let budget = crate::ApiAttemptsLeft::new(1);
+        request.execution.api_attempts_left = Some(budget.clone());
+        request
+            .execution
+            .set_request_dispatch_admission(Some(crate::RequestDispatchAdmission::new(|| false)));
+        assert!(matches!(
+            try_count_tokens_exact(&client, transport.clone(), &request).await,
+            Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false
+            })
+        ));
+        assert_eq!(budget.remaining(), 1);
+        assert!(transport.seen.lock().unwrap().is_none());
+
+        request.execution.set_request_dispatch_admission(None);
+        assert_eq!(
+            count_tokens(&client, transport.clone(), &request)
+                .await
+                .unwrap(),
+            42
+        );
+        assert_eq!(budget.remaining(), 0);
+        assert!(transport.seen.lock().unwrap().take().is_some());
+        assert!(matches!(
+            try_count_tokens_exact(&client, transport.clone(), &request).await,
+            Err(LlmError::ApiAttemptsExhausted)
+        ));
+        assert!(transport.seen.lock().unwrap().is_none());
     }
 
     #[tokio::test]

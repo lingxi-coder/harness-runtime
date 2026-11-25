@@ -137,55 +137,106 @@ impl ApiService {
         })
     }
 
-    pub(in crate::service) fn strip_cached_foundry_tool_features(
+    pub(in crate::service) fn project_cached_foundry_tool_features(
         &self,
-        request: &mut LlmRequest,
-        model_source_units: &[u16],
-    ) -> bool {
-        let Some(key) = self.foundry_deployment_key(
+        request: &LlmRequest,
+    ) -> Option<LlmRequest> {
+        if !request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.defer_loading || tool.strict)
+        {
+            return None;
+        }
+        let key = self.foundry_deployment_key(
             &request.input.model,
             request.profile.as_deref(),
-            model_source_units,
+            &super::endpoint::native_request_model_identity(request),
+        )?;
+        let (search_unsupported, strict_unsupported) = {
+            let capabilities = self
+                .anthropic
+                .foundry_capabilities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let features = capabilities.get(&key)?;
+            (
+                features.contains("tool_search_server") || features.contains("tool_search"),
+                features.contains("structured_outputs"),
+            )
+        };
+        if !request.input.tools.iter().any(|tool| {
+            (search_unsupported && tool.defer_loading) || (strict_unsupported && tool.strict)
+        }) {
+            return None;
+        }
+        let mut projected = request.clone();
+        projected.input.tools.retain_mut(|tool| {
+            if search_unsupported {
+                if native_deferred_tool_placeholder_matches(tool) {
+                    return false;
+                }
+                tool.defer_loading = false;
+            }
+            if strict_unsupported {
+                tool.strict = false;
+            }
+            true
+        });
+        Some(projected)
+    }
+
+    /// A rejected feature warrants another call only if this attempt sent it.
+    pub(in crate::service) fn recover_foundry_tools(
+        &self,
+        request: &LlmRequest,
+        prepared: &crate::PreparedLlmCall,
+        error: &crate::LlmError,
+        status: u16,
+        body: &lingxi_llm_client::protocol::JsonPayload,
+        scope: &crate::model::retry_scope::ModelCallRetryScope,
+    ) -> bool {
+        let route = &prepared.route;
+        if route.protocol != crate::ProtocolFamily::FoundryClaude {
+            return false;
+        }
+        let profile = &route.resolved_route.profile_name;
+        let model = super::endpoint::native_request_model_identity(request);
+        let Some(features) = self.record_foundry_capability_observation(
+            &request.input.model,
+            &model,
+            profile,
+            route.protocol,
+            &route.resolved_route.provider_id,
+            status,
+            body,
+            error.provider_message(),
         ) else {
             return false;
         };
-        let unsupported = self
-            .anthropic
-            .foundry_capabilities
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&key)
-            .cloned();
-        let Some(unsupported) = unsupported else {
+        let search = features
+            .iter()
+            .any(|feature| matches!(feature.as_str(), "tool_search" | "tool_search_server"));
+        let strict = features
+            .iter()
+            .any(|feature| feature == "structured_outputs");
+        let sent = |tool: &lingxi_llm_client::protocol::JsonPayload, field| {
+            tool.payload_at(field)
+                .is_some_and(|value| value.as_json_source() == "true")
+        };
+        let Some(tools) =
+            crate::protocol::json_array_items(&prepared.provider_request.body_json, "/tools")
+        else {
             return false;
         };
-        let mut changed = false;
-        let search_unsupported =
-            unsupported.contains("tool_search_server") || unsupported.contains("tool_search");
-        if search_unsupported {
-            let mut retained = Vec::with_capacity(request.input.tools.len());
-            for mut tool in request.input.tools.drain(..) {
-                if tool.defer_loading {
-                    if native_deferred_tool_placeholder_matches(&tool) {
-                        changed = true;
-                        continue;
-                    }
-                    tool.defer_loading = false;
-                    changed = true;
-                }
-                retained.push(tool);
-            }
-            request.input.tools = retained;
-        }
-        if unsupported.contains("structured_outputs") {
-            for tool in &mut request.input.tools {
-                if tool.strict {
-                    tool.strict = false;
-                    changed = true;
-                }
-            }
-        }
-        changed
+        let search_retry = search
+            && tools.iter().any(|tool| sent(tool, "/defer_loading"))
+            && scope.take_foundry_tool_repair(profile, &model, "tool_search");
+        let strict_retry = strict
+            && tools.iter().any(|tool| sent(tool, "/strict"))
+            && scope.take_foundry_tool_repair(profile, &model, "structured_outputs");
+        search_retry || strict_retry
     }
 
     pub(in crate::service) fn record_foundry_capability_observation(

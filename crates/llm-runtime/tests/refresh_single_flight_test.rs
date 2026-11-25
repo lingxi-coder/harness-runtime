@@ -7,12 +7,10 @@
 //! invariants explicitly listed.
 //!
 //! Build/run:
-//!   `RUSTFLAGS="--cfg loom" cargo test -p lingxi-anthropic-oauth --test refresh_single_flight_test`
+//!   `cargo test -p llm-runtime --features loom-tests --test refresh_single_flight_test`
 //!
-//! This file is gated behind `#[cfg(loom)]` so it does NOT compile in normal
-//! `cargo test` runs (loom replaces std primitives with model-checking variants).
-
-#![cfg(loom)]
+//! The test target requires the `loom-tests` feature. Tokio and the rest of
+//! the workspace use their normal configurations.
 
 use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::{Arc, Mutex};

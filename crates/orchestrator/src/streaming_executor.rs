@@ -1357,8 +1357,11 @@ impl<'a> StreamingToolExecutor<'a> {
         self.orch.remove_assistant_stream_rows(rows).await
     }
 
-    pub(crate) fn last_request_id(&self) -> Option<String> {
-        self.orch.api.last_request_id()
+    pub(crate) fn response_request_id(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> Option<String> {
+        self.orch.api.response_request_id(diagnostics)
     }
 }
 

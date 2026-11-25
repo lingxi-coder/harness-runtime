@@ -1,7 +1,7 @@
 //! Claude Code 2.1.319 Kvn/Pvn media projection. Input is already normalized
 //! and tool-paired; this pass changes only the outgoing request clone.
 use crate::convert::ConversationMessagesWithSources;
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 use lingxi_core::types::{ContentBlock, ConversationMessage};
 use std::collections::HashSet;
 
@@ -72,23 +72,27 @@ fn media_item(kind: &str, bytes: usize) -> Option<MediaItem> {
     })
 }
 
-fn projected_media_item(value: &Utf16JsonProjection) -> Option<MediaItem> {
-    let kind = value.string_at("/type")?;
+fn projected_media_item(value: JsonValueView<'_>) -> Option<MediaItem> {
+    let kind = value.get_property("type")?.as_str()?;
+    if !matches!(kind, "image" | "document") {
+        return None;
+    }
+    let source = value.get_property("source");
+    let source_kind = source
+        .and_then(|source| source.get_property("type"))
+        .and_then(JsonValueView::as_str);
     // Native project-read text documents are context carriers, not media.
     if kind == "document"
-        && value.string_at("/source/type") == Some("text")
+        && source_kind == Some("text")
         && value
-            .string_at("/context")
+            .get_property("context")
+            .and_then(JsonValueView::as_str)
             .is_some_and(|text| text.starts_with("A doc of this project."))
     {
         return None;
     }
-    let data = (value.string_at("/source/type") == Some("base64"))
-        .then(|| {
-            value
-                .at_pointer("/source/data")
-                .and_then(|data| data.code_units())
-        })
+    let data = (source_kind == Some("base64"))
+        .then(|| source?.get_property("data")?.code_units())
         .flatten();
     media_item(kind, data.map_or(0, <[u16]>::len))
 }
@@ -107,38 +111,59 @@ fn block_media_item(block: &ContentBlock) -> Option<MediaItem> {
             }
         },
         ContentBlock::ProviderContent { protocol, value } if protocol == "anthropic_messages" => {
-            projected_media_item(value)
+            value.at_pointer("").and_then(projected_media_item)
         }
         _ => None,
     }
 }
 
-fn nested_content(block: &ContentBlock) -> Option<&Utf16JsonProjection> {
+fn nested_content(block: &ContentBlock) -> Option<JsonValueView<'_>> {
     match block {
         ContentBlock::ToolResult {
             content,
             content_blocks,
             ..
-        } => {
-            let value = content_blocks.as_ref().unwrap_or(content);
-            value.array_len("").map(|_| value)
-        }
+        } => content_blocks.as_ref().unwrap_or(content).at_pointer(""),
         ContentBlock::ProviderContent { protocol, value }
             if protocol == "anthropic_messages"
                 && value.string_at("/type") == Some("tool_result") =>
         {
-            value.array_len("/content").map(|_| value)
+            value.at_pointer("/content")
         }
         _ => None,
     }
 }
 
-fn content_pointer(block: &ContentBlock) -> &'static str {
-    if matches!(block, ContentBlock::ProviderContent { .. }) {
-        "/content"
+fn rebuild_nested_array(
+    original: JsonValueView<'_>,
+    length: u32,
+    entries: Vec<(u32, JsonValueView<'_>)>,
+) -> Utf16JsonProjection {
+    let mut builder = Utf16JsonBuilder::new();
+    let properties = original.array_named_properties().unwrap_or_default();
+    let entries: Vec<_> = entries
+        .into_iter()
+        .map(|(index, value)| {
+            let node = builder.import_view(value).expect("valid array item");
+            (index, node)
+        })
+        .collect();
+    let root = if entries.len() == length as usize && properties.is_empty() {
+        builder.push_array(entries.into_iter().map(|(_, node)| node).collect())
     } else {
-        ""
+        let properties = properties
+            .into_iter()
+            .map(|property| {
+                let node = builder
+                    .import_view(property.value)
+                    .expect("valid array property");
+                (property.code_units.to_vec(), node)
+            })
+            .collect();
+        builder.push_sparse_array_with_properties(length, entries, properties)
     }
+    .expect("valid array");
+    builder.finish(root).expect("valid nested content")
 }
 
 fn removed_projection() -> Utf16JsonProjection {
@@ -180,18 +205,14 @@ fn strip_native_media_with_host_rejections(
         for block in content {
             if let Some(item) = block_media_item(block) {
                 items.push(item);
-            } else if let Some(value) = nested_content(block) {
-                let pointer = content_pointer(block);
-                for index in 0..value.array_len(pointer).unwrap_or(0) {
-                    if let Some(item) = value
-                        .subprojection(&format!("{pointer}/{index}"))
-                        .ok()
-                        .as_ref()
-                        .and_then(projected_media_item)
-                    {
-                        items.push(item);
-                    }
-                }
+            } else if let Some((_, entries)) =
+                nested_content(block).and_then(JsonValueView::array_entries)
+            {
+                items.extend(
+                    entries
+                        .into_iter()
+                        .filter_map(|(_, value)| projected_media_item(value)),
+                );
             }
         }
     }
@@ -253,6 +274,8 @@ fn strip_native_media_with_host_rejections(
     if !removed.iter().any(|removed| *removed) {
         return messages;
     }
+    let placeholder = removed_projection();
+    let placeholder = placeholder.at_pointer("").expect("valid media placeholder");
     let mut index = 0;
     for (message, sources) in messages
         .messages
@@ -275,28 +298,24 @@ fn strip_native_media_with_host_rejections(
                     dropped_sources.extend(source);
                     continue;
                 }
-            } else if let Some(value) = nested_content(&block) {
-                let pointer = content_pointer(&block);
+            } else if let Some((array, length, mut entries)) =
+                nested_content(&block).and_then(|array| {
+                    let (length, entries) = array.array_entries()?;
+                    Some((array, length, entries))
+                })
+            {
                 let mut changed = false;
-                let nested = (0..value.array_len(pointer).unwrap_or(0))
-                    .map(|offset| {
-                        let nested = value
-                            .subprojection(&format!("{pointer}/{offset}"))
-                            .expect("native nested content is valid JSON");
-                        if projected_media_item(&nested).is_some() {
-                            let drop = removed[index];
-                            index += 1;
-                            if drop {
-                                changed = true;
-                                return removed_projection();
-                            }
+                for (_, item) in &mut entries {
+                    if projected_media_item(*item).is_some() {
+                        if removed[index] {
+                            *item = placeholder;
+                            changed = true;
                         }
-                        nested
-                    })
-                    .collect::<Vec<_>>();
+                        index += 1;
+                    }
+                }
                 if changed {
-                    let replacement = Utf16JsonProjection::array(nested)
-                        .expect("native nested content is a JSON array");
+                    let replacement = rebuild_nested_array(array, length, entries);
                     match &mut block {
                         ContentBlock::ToolResult {
                             content,

@@ -39,7 +39,7 @@ fn native_prompt_cache_1h_allowlist() -> Vec<String> {
         .clone()
 }
 
-pub(in crate::service) fn sdk_prompt_cache_ttl_settings(
+fn sdk_prompt_cache_ttl_settings(
     settings: lingxi_core::settings::schema::PromptCacheTtlSettings,
 ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheTtlSettings {
     use lingxi_core::settings::schema::PromptCacheTtl as HostTtl;
@@ -493,6 +493,22 @@ impl ApiService {
     ) -> Self {
         self.anthropic.cache_editing_inputs = inputs;
         self
+    }
+
+    pub(in crate::service) fn request_prompt_cache_ttl_settings(
+        &self,
+    ) -> Option<crate::execution_context::PromptCacheSettingsLoader> {
+        let source = self.anthropic.prompt_cache_ttl_settings_source.clone()?;
+        let snapshot = OnceLock::new();
+        Some(Arc::new(move || {
+            snapshot
+                .get_or_init(|| {
+                    source()
+                        .map(sdk_prompt_cache_ttl_settings)
+                        .map_err(LlmError::from)
+                })
+                .clone()
+        }))
     }
 
     pub(in crate::service) fn prompt_cache_ttl_inputs(

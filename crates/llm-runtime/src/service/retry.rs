@@ -26,6 +26,45 @@ pub(super) struct ConnectionRetry {
     )>,
 }
 
+/// Route-local normalization must not change the next route's logical controls.
+pub(super) struct LogicalReasoning {
+    thinking: Option<lingxi_llm_client::protocol::ThinkingConfig>,
+    temperature: Option<f32>,
+    automatic: bool,
+    native_budget: Option<lingxi_llm_client::client::NativeLsnManualBudget>,
+    native_request_type_disabled: Option<bool>,
+    native_mechanically_disabled: Option<bool>,
+    context:
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicContextManagement>,
+}
+
+impl LogicalReasoning {
+    pub(super) fn capture(request: &LlmRequest) -> Self {
+        Self {
+            thinking: request.input.thinking.clone(),
+            temperature: request.input.temperature,
+            automatic: request.execution.automatic_thinking_budget,
+            native_budget: request.execution.native_lsn_manual_budget,
+            native_request_type_disabled: request.execution.native_thinking_request_type_disabled,
+            native_mechanically_disabled: request.execution.native_thinking_mechanically_disabled,
+            context: request.execution.anthropic_context_management.clone(),
+        }
+    }
+
+    pub(super) fn restore(&self, request: &mut LlmRequest) {
+        request.input.thinking.clone_from(&self.thinking);
+        request.input.temperature = self.temperature;
+        request.execution.automatic_thinking_budget = self.automatic;
+        request.execution.native_lsn_manual_budget = self.native_budget;
+        request.execution.native_thinking_request_type_disabled = self.native_request_type_disabled;
+        request.execution.native_thinking_mechanically_disabled = self.native_mechanically_disabled;
+        request
+            .execution
+            .anthropic_context_management
+            .clone_from(&self.context);
+    }
+}
+
 impl ConnectionRetry {
     pub(super) fn new() -> Self {
         Self { hops: None }
@@ -43,6 +82,7 @@ impl ConnectionRetry {
         &mut self,
         request: &mut LlmRequest,
         state: &mut RetryState,
+        retry_scope: &ModelCallRetryScope,
         error: &LlmError,
     ) -> Option<String> {
         let (hops, triggers) = self.hops.as_mut()?;
@@ -52,7 +92,9 @@ impl ConnectionRetry {
         let hop = hops.next()?;
         request.profile = Some(hop.profile_name.clone());
         request.input.model = hop.request_model;
+        request.input.model_source = None;
         state.consecutive_overloaded = 0;
+        retry_scope.reset_model_overloads();
         Some(hop.profile_name)
     }
 }
@@ -84,8 +126,195 @@ pub(super) fn allows_automatic_replay(request: &LlmRequest) -> bool {
     {
         return false;
     }
-    lingxi_llm_client::execution_safety::request_replay_safety(&request.input)
-        == lingxi_llm_client::execution_safety::RequestReplaySafety::Stateless
+    use lingxi_llm_client::execution_safety::{request_replay_safety, RequestReplaySafety};
+    if request_replay_safety(&request.input) == RequestReplaySafety::Stateless {
+        return true;
+    }
+    // Older SDK revisions still used by the runtime treated every native
+    // message option as stateful. Ignore only the typed host effort marker.
+    if !request.input.messages.iter().any(is_per_turn_effort_marker) {
+        return false;
+    }
+    let mut input = request.input.clone();
+    input
+        .messages
+        .retain(|message| !is_per_turn_effort_marker(message));
+    request_replay_safety(&input) == RequestReplaySafety::Stateless
+}
+
+pub(crate) fn is_per_turn_effort_marker(
+    message: &lingxi_llm_client::protocol::ConversationMessage,
+) -> bool {
+    message.role == lingxi_llm_client::protocol::MessageRole::System
+        && message.content.is_empty()
+        && message.native_options.len() == 1
+        && message
+            .anthropic_options()
+            .is_some_and(|options| options.effort.is_some() && options.clear_at.is_none())
+}
+
+/// Inspect the sealed SDK body as well as the canonical input. Profile and
+/// per-request body overrides can introduce provider work after SDK validation.
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct WireReplayControls {
+    tools: Vec<lingxi_llm_client::protocol::JsonPayload>,
+    mcp_servers: Vec<serde::de::IgnoredAny>,
+    plugins: Vec<serde::de::IgnoredAny>,
+    web_search_options: Option<serde::de::IgnoredAny>,
+    search_parameters: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "cachedContent", alias = "cached_content")]
+    cached_content: Option<serde::de::IgnoredAny>,
+    container: Option<serde::de::IgnoredAny>,
+    web_search: bool,
+    enable_search: bool,
+    background: bool,
+    #[serde(deserialize_with = "present_wire_field")]
+    thread: Option<lingxi_llm_client::protocol::JsonPayload>,
+    #[serde(deserialize_with = "present_wire_field")]
+    previous_interaction_id: Option<serde::de::IgnoredAny>,
+    #[serde(deserialize_with = "present_wire_field")]
+    previous_response_id: Option<serde::de::IgnoredAny>,
+    #[serde(deserialize_with = "present_wire_field")]
+    conversation: Option<serde::de::IgnoredAny>,
+}
+
+// An explicitly supplied reference, including null, follows the same policy
+// as its original source-backed field-presence check.
+fn present_wire_field<'de, T: serde::Deserialize<'de>, D: serde::Deserializer<'de>>(
+    de: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(de).map(Some)
+}
+
+impl WireReplayControls {
+    fn has_provider_work(&self, request: &LlmRequest, protocol: crate::ProtocolFamily) -> bool {
+        self.enable_search
+            || self.web_search
+            || self.background
+            || self.web_search_options.is_some()
+            || self.search_parameters.is_some()
+            || (matches!(
+                protocol,
+                crate::ProtocolFamily::GeminiGenerateContent | crate::ProtocolFamily::VertexGemini
+            ) && self.cached_content.is_some())
+            || self.container.is_some()
+            || !self.mcp_servers.is_empty()
+            || !self.plugins.is_empty()
+            || self.tools.iter().any(|tool| {
+                if matches!(
+                    protocol,
+                    crate::ProtocolFamily::GeminiGenerateContent
+                        | crate::ProtocolFamily::VertexGemini
+                ) {
+                    // A Tool may combine functions with grounding, code execution or
+                    // other hosted facilities. Only a pure declaration is local.
+                    return tool.object_len("") != Some(1)
+                        || (tool.array_len("/functionDeclarations").is_none()
+                            && tool.array_len("/function_declarations").is_none());
+                }
+                let kind = tool.string_at("/type");
+                if protocol.is_anthropic_family() {
+                    return match kind.as_deref() {
+                        None | Some("custom") => tool.string_at("/name").is_none(),
+                        Some(kind) => !request
+                            .input
+                            .anthropic_client_toolsets()
+                            .iter()
+                            .any(|local| local.wire_type() == kind),
+                    };
+                }
+                match kind.as_deref() {
+                    Some("function" | "custom") => tool
+                        .string_at("/function/name")
+                        .or_else(|| tool.string_at("/name"))
+                        .is_none_or(|name| name.starts_with('$')),
+                    Some("tool_search") => {
+                        tool.string_at("/execution").as_deref() != Some("client")
+                    }
+                    _ => true,
+                }
+            })
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn gemini_cached_content_and_hosted_tools_require_explicit_replay() {
+    let request = LlmRequest::new("model");
+    for protocol in [
+        crate::ProtocolFamily::GeminiGenerateContent,
+        crate::ProtocolFamily::VertexGemini,
+    ] {
+        for (body, expected) in [
+            (r#"{"cachedContent":"cachedContents/prompt"}"#, true),
+            (r#"{"cached_content":"cachedContents/prompt"}"#, true),
+            (
+                r#"{"tools":[{"functionDeclarations":[{"name":"lookup"}]}]}"#,
+                false,
+            ),
+            (
+                r#"{"tools":[{"functionDeclarations":[],"googleSearch":{}}]}"#,
+                true,
+            ),
+        ] {
+            let wire: WireReplayControls = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                wire.has_provider_work(&request, protocol),
+                expected,
+                "{body}"
+            );
+        }
+    }
+}
+
+fn prepared_replay_allowed(
+    request: &LlmRequest,
+    prepared: &crate::PreparedLlmCall,
+    recover_continuation: bool,
+) -> bool {
+    let protocol = prepared.route.protocol;
+    if protocol == crate::ProtocolFamily::GeminiInteractions || !allows_automatic_replay(request) {
+        return false;
+    }
+    // Deserialize only the controls. Arbitrary transcripts and tool schemas
+    // retain their exact JSON source and need no recursive Value conversion.
+    let Ok(wire) = serde_json::from_str::<WireReplayControls>(
+        prepared.provider_request.body_json.as_json_source(),
+    ) else {
+        return false;
+    };
+    if wire.has_provider_work(request, protocol) {
+        return false;
+    }
+    use lingxi_llm_client::ConversationRequestMode;
+    let mode = prepared.continuation_snapshot.mode;
+    if recover_continuation && mode == ConversationRequestMode::Continue {
+        return true;
+    }
+    // The SDK's fresh Anthropic thread is an ephemeral cache optimization.
+    let implicit_fresh_thread = mode == ConversationRequestMode::Create
+        && wire
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.string_at("/type").as_deref() == Some("create"));
+    (wire.thread.is_none() || implicit_fresh_thread)
+        && wire.previous_interaction_id.is_none()
+        && wire.previous_response_id.is_none()
+        && wire.conversation.is_none()
+}
+
+pub(super) fn allows_route_replay(request: &LlmRequest, prepared: &crate::PreparedLlmCall) -> bool {
+    prepared_replay_allowed(request, prepared, false)
+}
+
+/// A definitive rejection can recover an implicit SDK continuation on the same
+/// route. Provider-executed tools still require their own recovery policy.
+pub(super) fn allows_continuation_recovery(
+    request: &LlmRequest,
+    prepared: &crate::PreparedLlmCall,
+) -> bool {
+    prepared_replay_allowed(request, prepared, true)
 }
 
 pub(super) fn allows_account_switch(request: &LlmRequest) -> bool {
@@ -114,32 +343,27 @@ pub(super) fn is_free_tier_model(model: &str) -> bool {
     model.ends_with(":free")
 }
 
-/// Profiles whose credential is a SUBSCRIPTION rather than an API key.
-///
-/// The distinction is the whole point: an API key's 429 is burst throttling and
-/// clears in seconds, while a plan's quota resets on the plan's own clock —
-/// minutes to hours. Retrying the second kind spends the entire ladder to reach
-/// the same failure, which is what made a rate-limited ChatGPT-login turn sit on
-/// "Thinking…" for minutes before reporting "api call failed: rate limited".
-///
-/// Anthropic's Claude.ai subscription is NOT listed: it is already covered by
-/// the parity subscriber gate (`RetryState::is_subscriber`, fed from the live
-/// subscription snapshot). That gate speaks Claude.ai's vocabulary
-/// (`subscription_type == "enterprise"`), so an OpenAI plan can never set it —
-/// which is exactly why the ChatGPT profile has to be named here.
-fn is_subscription_profile(profile: Option<&str>) -> bool {
-    matches!(profile, Some("openai-chatgpt"))
+/// Whether a 429 on this route is known not to clear inside the retry-backoff
+/// window. Use the selected credential and wire model rather than aliases.
+pub(super) fn rate_limit_cannot_clear(auth: crate::AuthStrategy, wire_model: &str) -> bool {
+    is_free_tier_model(wire_model)
+        || matches!(
+            auth,
+            crate::AuthStrategy::ChatGptPlan | crate::AuthStrategy::ChatGptOAuth
+        )
 }
 
-/// Whether a 429 on this route is known not to clear inside the retry-backoff
-/// window, and so must surface immediately rather than burn the ~160s ladder.
-///
-/// Both arms are the same criterion — a quota that resets on someone else's
-/// clock — reached by the two identities we can see before the error arrives.
-/// A server-named `Retry-After` that outlasts the window is handled separately,
-/// per-error, in `next_step_with_backoff`.
-pub(super) fn rate_limit_cannot_clear(profile: Option<&str>, model: &str) -> bool {
-    is_free_tier_model(model) || is_subscription_profile(profile)
+pub(super) fn bind_rate_limit_retry_policy(
+    state: &mut crate::model::retry::RetryState,
+    subscriber: super::SubscriberState,
+    prepared: &crate::PreparedLlmCall,
+) {
+    state.is_subscriber = prepared.uses_session_subscription && subscriber.is_subscriber;
+    state.is_enterprise = state.is_subscriber && subscriber.is_enterprise;
+    state.rate_limit_terminal = rate_limit_cannot_clear(
+        prepared.request_auth,
+        &prepared.route.resolved_route.request_model,
+    );
 }
 
 pub(super) fn openrouter_free_rate_limit_message(
@@ -355,6 +579,8 @@ impl ApiService {
             // lacks "context window" → `"request_too_large"` (distinct from the
             // context-window `"prompt_too_long"` above).
             LlmError::RequestTooLarge => "request_too_large",
+            LlmError::ResponseBodyLimitExceeded { .. } => "response_body_limit_exceeded",
+            LlmError::ResponseBodyInterrupted { .. } => "response_body_interrupted",
             // llm-runtime-only classes — no api-client analogue; use descriptive names.
             LlmError::InvalidRequest { .. } => "invalid_request",
             LlmError::RequestDispatchRejected { .. } => "request_dispatch_rejected",
@@ -367,7 +593,9 @@ impl ApiService {
             | LlmError::MediaDelegationPartial { .. } => "media_delegation_unavailable",
             LlmError::SettingsSource { .. } => "settings_source",
             LlmError::UnsupportedCapability { .. } => "unsupported_capability",
-            LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+            LlmError::ProviderErrorText { .. }
+            | LlmError::ProxyAuthHelperRetry { .. }
+            | LlmError::ResponseDiagnostics { .. } => {
                 unreachable!("classification_source removes carrier wrappers")
             }
         }
@@ -385,7 +613,9 @@ impl ApiService {
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => Some(429),
             LlmError::ModelUnavailable => Some(404),
             LlmError::ProviderInternal => Some(500),
-            LlmError::ProviderTimeout { .. } => err.http_status(),
+            LlmError::ProviderTimeout { .. }
+            | LlmError::ResponseBodyInterrupted { .. }
+            | LlmError::ResponseBodyLimitExceeded { .. } => err.http_status(),
             LlmError::Overloaded { .. } => Some(529),
             LlmError::ProxyTunnelResponse { status, .. } => Some(*status),
             // No HTTP status: the request never reached the model API. The
@@ -408,7 +638,9 @@ impl ApiService {
             | LlmError::SettingsSource { .. }
             | LlmError::RequestDispatchRejected { .. }
             | LlmError::ApiAttemptsExhausted => None,
-            LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+            LlmError::ProviderErrorText { .. }
+            | LlmError::ProxyAuthHelperRetry { .. }
+            | LlmError::ResponseDiagnostics { .. } => {
                 unreachable!("classification_source removes carrier wrappers")
             }
         }

@@ -75,7 +75,8 @@ fn complete_response_error(error: &LlmError, turn: &PumpedTurn) -> bool {
     matches!(
         error.classification_source(),
         LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
-    ) || llm_runtime::model::stream_watchdog::is_stream_idle_timeout(error)
+    ) || error.is_missing_stream_terminal()
+        || llm_runtime::model::stream_watchdog::is_stream_idle_timeout(error)
         || llm_runtime::model::stream_watchdog::is_stream_suspended(error)
         || (matches!(
             error.classification_source(),
@@ -202,6 +203,7 @@ pub(crate) fn native_server_fallback_supersedes_enabled(query_source: &str) -> b
 /// Outcome of consuming one stream.
 #[derive(Debug, Default)]
 pub struct PumpedTurn {
+    pub(crate) diagnostics: Option<llm_runtime::history::ResponseDiagnostics>,
     pub per_turn_effort: Option<Utf16JsonProjection>,
     /// Host-owned sweeps of exact live executor ids. These are runtime control
     /// facts and never become provider events or synthetic tool-result rows.
@@ -1428,6 +1430,9 @@ pub(crate) fn partial_finalize_cause(error: &OrchestratorError) -> Option<Partia
         }
         // A stream that closed before `message_stop` is a mid-response connection
         // close — cc's `network_down` bucket.
+        OrchestratorError::Streaming(error) if error.is_missing_stream_terminal() => {
+            Some(PartialFinalizeCause::NetworkDown)
+        }
         OrchestratorError::StreamEndedWithoutStop => Some(PartialFinalizeCause::NetworkDown),
         _ => None,
     }
@@ -1476,6 +1481,9 @@ pub(crate) fn stream_failure_cause(
         {
             Some(Cause::ConnectionLost)
         }
+        OrchestratorError::Streaming(error) if error.is_missing_stream_terminal() => {
+            Some(Cause::Truncated)
+        }
         OrchestratorError::Streaming(e) => match e.classification_source() {
             LlmError::Overloaded { .. } => Some(Cause::Overloaded),
             LlmError::ProviderTimeout { .. } => Some(Cause::TimedOut),
@@ -1515,10 +1523,13 @@ fn build_failure(
     // its stable interruption notice. Provider errors (not transport closes)
     // retain their existing retry/fallback semantics for incomplete blocks.
     let is_transport_close = match &error {
-        OrchestratorError::Streaming(error) => matches!(
-            error.classification_source(),
-            LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
-        ),
+        OrchestratorError::Streaming(error) => {
+            error.is_missing_stream_terminal()
+                || matches!(
+                    error.classification_source(),
+                    LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
+                )
+        }
         OrchestratorError::StreamEndedWithoutStop => true,
         _ => false,
     };
@@ -1984,6 +1995,9 @@ async fn pump_stream_inner(
         any_event = true;
         if let HistoryEvent::Completed { response } = &event {
             completed_reconciled = true;
+            if let Some(diagnostics) = response.diagnostics() {
+                turn.diagnostics = Some(diagnostics);
+            }
             // Completed is an authoritative response, including for clients
             // that do not emit any incremental callbacks. Only missing/open
             // source blocks enter the admission path; accepted rows and tool
@@ -2465,6 +2479,9 @@ async fn pump_stream_inner(
             turn.server_fallback_events.push(observation);
         }
         if let HistoryEvent::MessageStart { response } = &event {
+            if let Some(diagnostics) = response.diagnostics() {
+                turn.diagnostics = Some(diagnostics);
+            }
             if let Some(capture) = &timing_capture {
                 capture.observe_first_stream_start_at(event_received_at);
             }
@@ -2654,9 +2671,9 @@ async fn pump_stream_inner(
                     stop_details: None,
                     resumable: None,
                     usage: None,
-                    request_id: pump
-                        .as_ref()
-                        .and_then(|pump| pump.executor.last_request_id()),
+                    request_id: pump.as_ref().and_then(|pump| {
+                        pump.executor.response_request_id(turn.diagnostics.as_ref())
+                    }),
                     timestamp: assistant_row_timestamp(),
                     persisted_link: None,
                     content: vec![block],
@@ -2768,9 +2785,9 @@ async fn pump_stream_inner(
                     stop_details: None,
                     resumable: None,
                     usage: None,
-                    request_id: pump
-                        .as_ref()
-                        .and_then(|pump| pump.executor.last_request_id()),
+                    request_id: pump.as_ref().and_then(|pump| {
+                        pump.executor.response_request_id(turn.diagnostics.as_ref())
+                    }),
                     timestamp: assistant_row_timestamp(),
                     persisted_link: None,
                     content: vec![block],
@@ -4254,6 +4271,41 @@ mod tests {
             Some("foo.rs")
         );
         assert_eq!(turn.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[tokio::test]
+    async fn sdk_missing_terminal_keeps_unclosed_text_and_route_replay_veto() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let mut events: Vec<_> = [
+            message_start("m1", "model"),
+            content_block_start_text(0),
+            text_delta(0, "already visible"),
+        ]
+        .into_iter()
+        .map(Ok)
+        .collect();
+        events.push(Err(LlmError::ResponseDiagnostics {
+            source: Box::new(LlmError::StreamInterrupted {
+                message: "provider stream ended before a terminal event".into(),
+            }),
+            request_id: Some("request-id".into()),
+            rate_limit_message: None,
+            route_replay_forbidden: true,
+        }));
+        let failure = pump_stream_inner(stream::iter(events).boxed(), &out, None, None)
+            .await
+            .err()
+            .expect("incomplete turn");
+        assert!(
+            matches!(failure.partial.assistant_blocks.as_slice(), [ContentBlock::Text { text, .. }] if text == "already visible")
+        );
+        assert!(
+            matches!(&failure.error, OrchestratorError::Streaming(error) if !error.allows_automatic_replay())
+        );
+        assert!(matches!(
+            partial_finalize_cause(&failure.error),
+            Some(PartialFinalizeCause::NetworkDown)
+        ));
     }
 
     #[tokio::test]

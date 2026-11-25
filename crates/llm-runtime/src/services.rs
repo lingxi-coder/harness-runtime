@@ -156,14 +156,18 @@ impl std::fmt::Debug for SelectedServiceAccount {
             .finish_non_exhaustive()
     }
 }
+pub(crate) fn sdk_retry_after(error: &sdk::protocol::LlmError) -> Option<std::time::Duration> {
+    match error.classification_source() {
+        sdk::protocol::LlmError::ProviderResponse { retry_after, .. } => *retry_after,
+        _ => None,
+    }
+}
+
 impl SelectedServiceAccount {
     /// Record a typed SDK service failure, preserving machine codes and reset
     /// timing. This settles health only and never retries the operation.
     pub async fn failed_sdk(&mut self, error: &sdk::protocol::LlmError) -> bool {
-        let retry_after = match error.classification_source() {
-            sdk::protocol::LlmError::ProviderResponse { retry_after, .. } => *retry_after,
-            _ => None,
-        };
+        let retry_after = sdk_retry_after(error);
         self.failed_with_retry_after(&crate::upstream::error(error.clone()), retry_after)
             .await
     }
@@ -188,6 +192,9 @@ impl SelectedServiceAccount {
             }
             source = current.source();
         }
+        if let Some(coordinator) = self.coordinator.as_mut() {
+            coordinator.release().await;
+        }
         false
     }
     pub async fn succeeded(&mut self) {
@@ -203,13 +210,15 @@ impl SelectedServiceAccount {
         error: &crate::LlmError,
         retry_after: Option<std::time::Duration>,
     ) -> bool {
-        if self.coordinator.is_some()
-            && matches!(
-                error.classification_source(),
-                crate::LlmError::Authentication { .. } | crate::LlmError::OAuthRefreshDead
-            )
-        {
+        let Some(coordinator) = self.coordinator.as_mut() else {
+            return false;
+        };
+        if matches!(
+            error.classification_source(),
+            crate::LlmError::Authentication { .. } | crate::LlmError::OAuthRefreshDead
+        ) {
             let Some(source) = self.services.credential_source.as_ref() else {
+                coordinator.release().await;
                 return false;
             };
             if !source
@@ -217,18 +226,18 @@ impl SelectedServiceAccount {
                 .await
                 .is_ok_and(|current| current == self.credential_revision)
             {
+                coordinator.release().await;
                 return false;
             }
         }
-        match self.coordinator.as_mut() {
-            Some(coordinator) => {
-                coordinator.set_rejected_credential_revision(self.credential_revision);
-                coordinator
-                    .failed_with_retry_after(error, retry_after)
-                    .await
-            }
-            None => false,
+        coordinator.set_rejected_credential_revision(self.credential_revision);
+        let recorded = coordinator
+            .failed_with_retry_after(error, retry_after)
+            .await;
+        if !recorded {
+            coordinator.release().await;
         }
+        recorded
     }
 }
 fn audio_eligible(
@@ -472,11 +481,7 @@ impl ProviderServices {
             let account_scope = if let Some(scope) = scope.as_ref() {
                 serde_json::to_string(scope).expect("account resource scope")
             } else {
-                use sha2::{Digest, Sha256};
-                format!(
-                    "explicit-service.{:x}",
-                    Sha256::digest(credential.expose_secret().as_bytes())
-                )
+                explicit_service_scope(&credential)
             };
             if scope.is_none() && pinned_scope.is_some_and(|expected| expected != account_scope) {
                 return Err(crate::LlmError::InvalidRequest {
@@ -502,6 +507,14 @@ impl ProviderServices {
             });
         }
     }
+}
+
+pub(crate) fn explicit_service_scope(credential: &sdk::protocol::Secret<String>) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "explicit-service.{:x}",
+        Sha256::digest(credential.expose_secret().as_bytes())
+    )
 }
 
 #[cfg(test)]
@@ -647,6 +660,49 @@ mod account_tests {
             }
             routes
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_audio_binding_admits_only_the_current_service_credential() {
+        let mut profile = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "openai")
+            .unwrap();
+        profile.credential = crate::CredentialConfig::Static {
+            id: "test.audio".into(),
+        };
+        let base = crate::ModelRuntime::from_config(crate::ClientConfig {
+            providers: vec![profile],
+        })
+        .unwrap();
+        let service = |key: &str| {
+            let runtime = base.clone().with_credential_provider(Arc::new(
+                crate::auth::provider::StaticCredentialProvider::new(Credential::ApiKey(
+                    key.into(),
+                )),
+            ));
+            crate::ApiService::new(
+                Arc::new(runtime),
+                Arc::new(NoNetwork),
+                Default::default(),
+                Default::default(),
+                "test",
+                None,
+                None,
+            )
+        };
+        let scope = explicit_service_scope(&sdk::protocol::Secret::new("first-key".into()));
+        assert!(
+            service("first-key")
+                .audio_account_binding_is_current("openai", "openai", &scope)
+                .await
+        );
+        assert!(
+            !service("second-key")
+                .audio_account_binding_is_current("openai", "openai", &scope)
+                .await
+        );
     }
 
     #[tokio::test]

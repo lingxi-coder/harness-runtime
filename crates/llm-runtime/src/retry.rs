@@ -12,6 +12,9 @@ impl RetryPolicy {
     /// Classify an error into a retry decision.
     #[must_use]
     pub fn classify_error(&self, error: &LlmError) -> RetryDecision {
+        if !error.allows_automatic_replay() {
+            return RetryDecision::DoNotRetry;
+        }
         if error.is_proxy_auth_helper_retry() {
             return RetryDecision::Retry { after: None };
         }
@@ -45,6 +48,8 @@ impl RetryPolicy {
             | LlmError::ContextOverflow { .. }
             | LlmError::InputBudgetExceeded { .. }
             | LlmError::RequestTooLarge
+            | LlmError::ResponseBodyLimitExceeded { .. }
+            | LlmError::ResponseBodyInterrupted { .. }
             | LlmError::ModelUnavailable
             | LlmError::StreamInterrupted { .. }
             | LlmError::MalformedToolInput { .. }
@@ -55,7 +60,7 @@ impl RetryPolicy {
             | LlmError::MediaDelegationPartial { .. }
             | LlmError::SettingsSource { .. } => RetryDecision::DoNotRetry,
             LlmError::ProxyTunnelResponse { .. } => RetryDecision::DoNotRetry,
-            LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+            LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } | LlmError::ResponseDiagnostics { .. } => {
                 unreachable!("classification_source removes carrier wrappers")
             }
         }

@@ -1209,30 +1209,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     };
     let api_calls_recorded = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-    // Phase 2a-mobile CHAINS BRIDGE: translate the assembled `ChainConfig` into
-    // main's richer adapter's `fallback_overrides` shape (same as harness-runtime::desktop —
-    // we reuse main's `ProviderApiAdapter::new_with_routing`, NOT parity's leaner
-    // `new`). `assemble` keys each chain by the request/display model id with an
-    // ordered list of `ChainEntry`; main's adapter routes by model-id through the
-    // multi-provider registry, so the informational `ChainEntry.provider_id` is
-    // dropped here — the per-entry `model` ids are the fallback chain. Cross-
-    // provider routing still resolves because every provider's models are
-    // registered in the assembled `ClientConfig`. The adapter's own alias map is
-    // rebuilt from the client's `available_models()` (whose aliases `assemble`
-    // already populated from `chains.aliases`), so no separate alias pass here.
-    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = assembled
-        .chains
-        .chains
-        .iter()
-        .map(|(key, entries)| {
-            (
-                key.clone(),
-                entries.iter().map(|e| e.model.clone()).collect(),
-            )
-        })
-        .collect();
     // Retry override → main's scalar settings_max_retries / settings_backoff_ms.
-    let settings_max_retries = assembled.chains.retry.as_ref().map(|r| r.max_attempts);
+    let settings_max_retries = assembled.chains.retry.as_ref().map(|r| r.max_retries());
     let settings_backoff_ms = assembled.chains.retry.as_ref().map(|r| r.backoff_ms);
 
     // ONE adapter implements BOTH `OrchestratorApiClient` (batched) and
@@ -1267,10 +1245,11 @@ pub(super) async fn build_mobile_inner_with_ask(
             Some(analytics_bus.clone()), // audit fix: API events share the one bus
             None,
             Some(cost_estimator),
-            fallback_overrides,
+            Default::default(),
             settings_max_retries,
             settings_backoff_ms,
         )
+        .with_configured_fallbacks(assembled.chains.fallback_overrides())
         .with_fast_policy_source({
             let home = cfg.lingxi_home.clone();
             Arc::new(move || crate::fast_settings::policy(&home, None, &[]).map_err(Into::into))

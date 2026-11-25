@@ -454,6 +454,7 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
             match locate(&providers, target) {
                 Some((pi, mi)) => entries.push(ChainEntry {
                     provider_id: providers[pi].provider_id.clone(),
+                    profile_name: providers[pi].profile_name.clone(),
                     model: providers[pi].models[mi].request_model.clone(),
                 }),
                 None => warnings.push(format!(
@@ -613,8 +614,8 @@ mod tests {
         assert_eq!(saved["mixed"]["connections"][0]["enabled"], false);
     }
 
-    #[test]
-    fn protocol_defaults_route_real_accounts_and_preserve_search_credentials() {
+    #[tokio::test]
+    async fn protocol_defaults_route_real_accounts_and_preserve_search_credentials() {
         let mut inputs = anthropic_only_inputs();
         inputs.routing = Some(json!({"defaultProtocols": {
             "deepseek": "open_ai_responses", "openai-chatgpt": "open_ai_chat"
@@ -638,6 +639,72 @@ mod tests {
         };
         assert_eq!(credential("deepseek"), credential("deepseek-responses"));
         assert_eq!(credential("deepseek"), credential("deepseek-search"));
+
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountMetadata, CredentialRef,
+        };
+        let mut account_config = assembled.client_config.clone();
+        let account = AccountMetadata {
+            account_id: "named-deepseek".into(),
+            provider_id: "deepseek".into(),
+            display_name: "Named DeepSeek".into(),
+            execution_binding_id: "deepseek".into(),
+            auth_kind: AccountAuthKind::ApiKey,
+            credential_ref: CredentialRef {
+                store_scope: "test".into(),
+                secret_ref: "acct.named-deepseek".into(),
+            },
+            enabled: true,
+            user_priority: 0,
+            config_revision: 1,
+            identity_generation: 1,
+        };
+        crate::assemble_account_client_config(&mut account_config, std::slice::from_ref(&account))
+            .unwrap();
+        let named = account_config
+            .providers
+            .iter()
+            .find(|profile| profile.profile_name == "account.named-deepseek")
+            .unwrap();
+        assert_eq!(named.protocol, llm_runtime::ProtocolFamily::OpenAiResponses);
+        assert_eq!(
+            named.credential,
+            CredentialConfig::Static {
+                id: "acct.named-deepseek".into()
+            }
+        );
+        let registry = llm_runtime::ModelRegistry::from_config(account_config.clone()).unwrap();
+        let route = registry
+            .resolve_in("deepseek-flash", Some("account.named-deepseek"))
+            .unwrap();
+        assert_eq!(route.profile_name, "account.named-deepseek");
+        account_config.providers.retain(|profile| {
+            matches!(
+                profile.profile_name.as_str(),
+                "deepseek" | "deepseek-responses" | "account.named-deepseek"
+            )
+        });
+        let pool = std::sync::Arc::new(llm_runtime::accounts::AccountPool::new(
+            vec![account],
+            std::sync::Arc::new(llm_runtime::accounts::MemoryAccountPoolStore::default()),
+        ));
+        let runtime = llm_runtime::ModelRuntime::from_config(account_config)
+            .unwrap()
+            .with_account_pool(pool);
+        for (model, profile) in [
+            ("deepseek-flash", Some("deepseek")),
+            ("deepseek-flash", None),
+            ("deepseek/deepseek-flash", None),
+        ] {
+            let mut coordinator = runtime
+                .account_coordinator(model, profile)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                coordinator.select().await.unwrap().profile_name,
+                "account.named-deepseek"
+            );
+        }
         assert!(assembled
             .warnings
             .iter()
@@ -1061,6 +1128,7 @@ mod tests {
         let chain = out.chains.chains.get("primary").unwrap();
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].provider_id, ProviderId::AnthropicFirstParty);
+        assert_eq!(chain[0].profile_name, "anthropic");
         assert_eq!(chain[0].model, "claude-opus-4-6");
         assert_eq!(
             chain[1].provider_id,
@@ -1068,6 +1136,7 @@ mod tests {
                 name: "deepseek-user".to_string()
             }
         );
+        assert_eq!(chain[1].profile_name, "deepseek-user");
         assert_eq!(chain[1].model, "deepseek-chat");
     }
 

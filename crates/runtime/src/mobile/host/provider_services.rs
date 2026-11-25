@@ -371,20 +371,6 @@ pub(super) fn apply_mobile_profile_allowlist(
         .map(|profile| profile.profile_name.clone())
         .collect();
 
-    let allowed_routes: Vec<(llm_runtime::ProviderId, String)> = assembled
-        .client_config
-        .providers
-        .iter()
-        .filter(|provider| enabled_profiles.contains(&provider.profile_name))
-        .flat_map(|provider| {
-            let provider_id = provider.provider_id.clone();
-            provider
-                .models
-                .iter()
-                .map(move |model| (provider_id.clone(), model.request_model.clone()))
-        })
-        .collect();
-
     assembled
         .client_config
         .providers
@@ -398,11 +384,7 @@ pub(super) fn apply_mobile_profile_allowlist(
             .is_some_and(|(profile, _)| enabled_profiles.contains(profile))
     });
     assembled.chains.chains.retain(|_, entries| {
-        entries.retain(|entry| {
-            allowed_routes.iter().any(|(provider_id, model)| {
-                provider_id == &entry.provider_id && model == &entry.model
-            })
-        });
+        entries.retain(|entry| enabled_profiles.contains(&entry.profile_name));
         !entries.is_empty()
     });
 }

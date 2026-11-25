@@ -4094,9 +4094,7 @@ async fn build_surfaces_provider_auth_methods_from_catalog() {
 /// profile AND a routing fallback chain must merge into the assembled
 /// `ClientConfig` (a user-provider model + a built-in catalog model), surface
 /// the user profile in `model_providers` + `provider_availability`, and the
-/// routing chain must translate into main's `fallback_overrides` shape (the
-/// translation `build()` performs is re-derived here from `assemble`, since
-/// the adapter's overrides field is private).
+/// routing chain retains the provider profile selected by configuration.
 #[tokio::test]
 async fn build_with_providers_and_routing_merges_config_chains_availability() {
     let (_tmp, mut cfg) = test_config(true);
@@ -4299,22 +4297,12 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
     assert_eq!(rt.provider_availability.get("anthropic"), Some(&false));
     assert!(rt.provider_availability.contains_key("deepseek"));
 
-    // (3) The routing chain translates into main's `fallback_overrides` shape.
-    //     Re-derive the same translation `build()` performs from `assemble`
-    //     (the adapter's private `fallback_overrides` field is not inspectable).
-    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = assembled
-        .chains
-        .chains
-        .iter()
-        .map(|(k, entries)| (k.clone(), entries.iter().map(|e| e.model.clone()).collect()))
-        .collect();
-    assert_eq!(
-        fallback_overrides
-            .get("claude-sonnet-4-6")
-            .map(Vec::as_slice),
-        Some(&["llama-3.3-70b-versatile".to_string()][..]),
-        "fallback chain must translate to the bare model-id list (provider_id dropped); got: {fallback_overrides:?}"
-    );
+    let fallback_overrides = assembled.chains.fallback_overrides();
+    assert!(matches!(
+        fallback_overrides.get("claude-sonnet-4-6").map(Vec::as_slice),
+        Some([llm_runtime::ConfiguredFallbackTarget::Profile { profile_name, model, .. }])
+            if profile_name == "groq" && model == "llama-3.3-70b-versatile"
+    ));
 }
 
 fn fusion_catalog_row(profile: &str, model: &str) -> fusion::CatalogModel {

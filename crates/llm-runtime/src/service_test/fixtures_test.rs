@@ -1039,47 +1039,68 @@ fn make_adapter_with_subscriber(
     subscriber: SubscriberState,
 ) -> ApiService {
     std::env::set_var("ADAPTER_TEST_KEY", "test-key");
-    let client = Arc::new(
-        ModelRuntime::from_config(ClientConfig {
-            providers: vec![ProviderProfile {
-                wire_profile: None,
-                regions: lingxi_llm_client::protocol::Region::all(),
-                provider_id: ProviderId::AnthropicFirstParty,
-                profile_name: "anthropic".to_string(),
-                base_url: "https://api.anthropic.com".to_string(),
-                protocol: ProtocolFamily::AnthropicMessages,
-                auth: AuthStrategy::ApiKey,
-                credential: CredentialConfig::Env {
-                    var: "ADAPTER_TEST_KEY".to_string(),
+    let (auth, credential) = if subscriber.is_subscriber {
+        (
+            AuthStrategy::OAuthBearer,
+            CredentialConfig::HostManaged {
+                id: "anthropic-oauth".into(),
+            },
+        )
+    } else {
+        (
+            AuthStrategy::ApiKey,
+            CredentialConfig::Env {
+                var: "ADAPTER_TEST_KEY".into(),
+            },
+        )
+    };
+    let client = ModelRuntime::from_config(ClientConfig {
+        providers: vec![ProviderProfile {
+            wire_profile: None,
+            regions: lingxi_llm_client::protocol::Region::all(),
+            provider_id: ProviderId::AnthropicFirstParty,
+            profile_name: "anthropic".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            protocol: ProtocolFamily::AnthropicMessages,
+            auth,
+            credential,
+            models: vec![ModelProfile {
+                display_model: "claude-sonnet-4-20250514".to_string(),
+                request_model: "claude-sonnet-4-20250514".to_string(),
+                billing_model: "claude-sonnet-4".to_string(),
+                aliases: vec!["claude".to_string()],
+                description: None,
+                metadata: Default::default(),
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    reasoning: true,
+                    ..Default::default()
                 },
-                models: vec![ModelProfile {
-                    display_model: "claude-sonnet-4-20250514".to_string(),
-                    request_model: "claude-sonnet-4-20250514".to_string(),
-                    billing_model: "claude-sonnet-4".to_string(),
-                    aliases: vec!["claude".to_string()],
-                    description: None,
-                    metadata: Default::default(),
-                    capabilities: Capabilities {
-                        streaming: true,
-                        tools: true,
-                        reasoning: true,
-                        ..Default::default()
-                    },
-                }],
-                pricing: PricingConfig::default(),
-                signing: None,
-                azure: None,
-                supports_websockets: false,
-                supports_websocket_compression: false,
-                websocket_connect_timeout_ms: None,
-                vision_delegate: None,
-                connection: Default::default(),
             }],
-        })
-        .expect("client"),
-    );
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+            vision_delegate: None,
+            connection: Default::default(),
+        }],
+    })
+    .expect("client");
+    let client = if subscriber.is_subscriber {
+        client.with_credential_provider(Arc::new(crate::StaticCredentialProvider::new(
+            crate::Credential::AnthropicOAuth {
+                access_token: "test-oauth-token".into(),
+                scopes: vec!["user:inference".into()],
+            },
+        )))
+    } else {
+        client
+    };
     ApiService::new(
-        client,
+        Arc::new(client),
         transport,
         subscriber,
         UserAgentEnv {
@@ -1273,6 +1294,32 @@ fn make_adapter_for_protocol(
         "p",
         "model",
         FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+    )
+}
+
+fn fixture_tbc_state(
+    scope: &crate::thinking_scope::ThinkingRecoveryScope,
+    provider: ProviderId,
+    profile: &str,
+    url: &str,
+    protocol: ProtocolFamily,
+) -> crate::thinking_scope::NativeThinkingBindingControlsState {
+    scope.native_thinking_binding_controls_state(
+        &crate::CredentialScope::new(provider, profile).with_route(url, protocol),
+        None,
+        0,
+    )
+}
+
+fn bedrock_tbc_state(
+    scope: &crate::thinking_scope::ThinkingRecoveryScope,
+) -> crate::thinking_scope::NativeThinkingBindingControlsState {
+    fixture_tbc_state(
+        scope,
+        ProviderId::BedrockClaude,
+        "bedrock",
+        "https://bedrock.example.test",
+        ProtocolFamily::BedrockClaude,
     )
 }
 

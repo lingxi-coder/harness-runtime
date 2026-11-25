@@ -80,6 +80,10 @@ impl TeamAccountEnvelope {
         }
         private.provider_account_home = home.to_owned();
         let scope = &private.provider_accounts.store_scope;
+        let metadata =
+            crate::provider_accounts::account_directory_metadata(&private.provider_accounts);
+        let bytes = crate::provider_accounts::encode_account_directory(&metadata)
+            .map_err(|_| TeamProcessError::Model)?;
         let _lock = lingxi_core::host::rooted_fs::lock_exclusive(
             home,
             &PathBuf::from(format!("provider-accounts/{scope}.lock")),
@@ -90,7 +94,7 @@ impl TeamAccountEnvelope {
         lingxi_core::host::rooted_fs::atomic_write(
             home,
             &PathBuf::from(format!("provider-accounts/{scope}.json")),
-            &serde_json::to_vec(&private.provider_accounts).map_err(|_| TeamProcessError::Model)?,
+            &bytes,
             Default::default(),
         )
         .map_err(|_| TeamProcessError::Model)?;

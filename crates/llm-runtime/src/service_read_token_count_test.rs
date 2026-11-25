@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 #[derive(Debug, Default)]
-struct CaptureTransport(Mutex<Vec<ProviderRequest>>, std::sync::atomic::AtomicBool);
+struct CaptureTransport(Mutex<Vec<ProviderRequest>>, std::sync::atomic::AtomicU16);
 
 impl crate::test_support::FixtureTransport for CaptureTransport {
     fn execute<'a>(
@@ -14,12 +14,33 @@ impl crate::test_support::FixtureTransport for CaptureTransport {
         request: &'a ProviderRequest,
     ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
         self.0.lock().unwrap().push(request.clone());
-        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+        let status = self.1.load(std::sync::atomic::Ordering::SeqCst);
+        if status == 401 {
             return Box::pin(async {
                 Ok(ProviderResponse::json(
                     401,
                     serde_json::json!({"type":"error","error":{
                         "type":"authentication_error","message":"fixture rejected token"
+                    }}),
+                ))
+            });
+        }
+        if status == 500 {
+            return Box::pin(async {
+                Ok(ProviderResponse::json(
+                    500,
+                    serde_json::json!({"type":"error","error":{
+                        "type":"api_error","message":"count service unavailable"
+                    }}),
+                ))
+            });
+        }
+        if matches!(status, 404 | 405 | 501) {
+            return Box::pin(async move {
+                Ok(ProviderResponse::json(
+                    status,
+                    serde_json::json!({"type":"error","error":{
+                        "type":"not_found_error","message":"count_tokens endpoint is not implemented"
                     }}),
                 ))
             });
@@ -377,7 +398,7 @@ async fn read_token_count_model_billing_override_keeps_generation_eligible_accou
 async fn read_token_count_rejection_retains_selected_account_generation_and_credential_revision() {
     let (service, transport, _, credentials) =
         named_account_service(crate::ProtocolFamily::AnthropicMessages);
-    transport.1.store(true, std::sync::atomic::Ordering::SeqCst);
+    transport.1.store(401, std::sync::atomic::Ordering::SeqCst);
     let error = service
         .count_read_text_tokens_exact(
             "read-count-model",
@@ -405,6 +426,363 @@ async fn read_token_count_rejection_retains_selected_account_generation_and_cred
     assert_eq!(scope, crate::accounts::FailureScope::Account);
     assert_eq!(record.status, crate::accounts::HealthStatus::NeedsAuth);
     assert_eq!(record.credential_revision, Some(11));
+}
+
+#[tokio::test]
+async fn output_limited_standalone_counts_use_local_results_before_account_selection() {
+    let (base, transport, _, credentials) =
+        named_account_service(crate::ProtocolFamily::AnthropicMessages);
+    let quota = Arc::new(crate::ScopeOutputQuota::new(
+        32u32.try_into().unwrap(),
+        1u32.try_into().unwrap(),
+    ));
+    let service = base.with_scope_output_quota(Some(quota.clone()));
+    let model = "read-count-model";
+    let profile = Some("read-count-fixture");
+    let system = Some("count these words");
+    let local = service
+        .count_tokens(model, profile, system, vec![], vec![])
+        .await
+        .unwrap();
+    assert!(local > 0);
+    assert_eq!(
+        service
+            .count_tokens_exact(model, profile, system, vec![], vec![])
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        service
+            .count_read_text_tokens_exact(model, profile, &Utf16JsonProjection::from("count this"))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        service
+            .count_read_text_tokens_exact(model, profile, &Utf16JsonProjection::from(""))
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    assert_eq!(quota.remaining_dispatches(), 1);
+    assert!(transport.0.lock().unwrap().is_empty());
+    assert!(credentials.0.lock().unwrap().is_empty());
+    assert!(credentials.1 .0.lock().unwrap().identities.is_empty());
+}
+
+#[tokio::test]
+async fn standalone_count_endpoint_failure_leaves_generation_available() {
+    let (service, transport, _, _) =
+        named_account_service(crate::ProtocolFamily::AnthropicMessages);
+    transport.1.store(500, std::sync::atomic::Ordering::SeqCst);
+    let model = "read-count-model";
+    let profile = Some("account.b");
+    assert!(service
+        .count_tokens_exact(model, profile, None, vec![], vec![])
+        .await
+        .is_err());
+    let mut generation = service
+        .client()
+        .account_coordinator(model, profile)
+        .unwrap()
+        .unwrap();
+    assert_eq!(generation.select().await.unwrap().profile_name, "account.b");
+    generation.succeeded().await;
+    assert!(matches!(
+        service
+            .count_read_text_tokens_exact(model, profile, &Utf16JsonProjection::from("source"))
+            .await,
+        Err(LlmError::AllAccountsUnavailable { .. })
+    ));
+    assert_eq!(transport.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn managed_duplicate_wire_rows_keep_the_exact_selected_model_through_count_and_preparation() {
+    let (base, transport, pool, credentials) =
+        named_account_service(crate::ProtocolFamily::AnthropicMessages);
+    let mut config = base.client().configuration();
+    for profile in &mut config.providers {
+        let mut other = profile.models[0].clone();
+        other.display_model = "other-row".into();
+        other.billing_model = "other-billing".into();
+        other.metadata.status = Some("disabled".into());
+        profile.models.insert(0, other);
+    }
+    let availability =
+        ModelRuntime::project_account_model_availability(&config, &pool.snapshot(), 0).unwrap();
+    assert_eq!(availability.len(), 1);
+    assert_eq!(availability[0].eligible_account_ids, ["a", "b"]);
+    let runtime = Arc::new(
+        ModelRuntime::from_config(config)
+            .unwrap()
+            .with_account_pool(pool)
+            .with_credential_provider(credentials.clone()),
+    );
+    let service = ApiService::new(
+        runtime.clone(),
+        transport.clone(),
+        Default::default(),
+        Default::default(),
+        "test",
+        None,
+        None,
+    );
+    let qualified = "read-count-fixture/read-count-model";
+    assert_eq!(
+        service
+            .count_tokens(qualified, None, None, vec![], vec![])
+            .await
+            .unwrap(),
+        2500
+    );
+    assert_eq!(
+        service
+            .count_tokens_exact(qualified, None, None, vec![], vec![])
+            .await
+            .unwrap(),
+        Some(2500)
+    );
+    assert!(transport.0.lock().unwrap().iter().all(|request| request
+        .body_json
+        .string_at("/model")
+        .as_deref()
+        == Some("claude-sonnet-4-6")));
+    let mut request = LlmRequest::new(qualified).with_user_text("ready");
+    let scope = crate::model::retry_scope::ModelCallRetryScope::default();
+    let mut coordinator = service
+        .make_account_coordinator(&request, &scope)
+        .await
+        .unwrap();
+    service
+        .select_attempt_account(coordinator.as_mut(), &scope, &mut request)
+        .await
+        .unwrap();
+    let actual = runtime
+        .prepare(&request)
+        .await
+        .unwrap()
+        .route
+        .resolved_route;
+    assert_eq!(actual.profile_name, "account.a");
+    assert_eq!(actual.display_model, "read-count-model");
+    let original = runtime.resolve_media_route(qualified, None).unwrap().main;
+    let selected = request.execution.selected_account.as_ref().unwrap();
+    assert!(service
+        .authorized_account_route(&original, selected, &actual)
+        .is_some());
+    let wrong = runtime
+        .resolve_media_route("other-row", Some("account.a"))
+        .unwrap()
+        .main;
+    assert!(service
+        .authorized_account_route(&original, selected, &wrong)
+        .is_none());
+}
+
+#[tokio::test]
+async fn managed_shared_display_rows_select_the_unique_wire_id() {
+    let (base, transport, pool, credentials) =
+        named_account_service(crate::ProtocolFamily::AnthropicMessages);
+    let mut config = base.client().configuration();
+    for profile in &mut config.providers {
+        let mut other = profile.models[0].clone();
+        other.request_model = "other-wire".into();
+        other.billing_model = "other-billing".into();
+        other.metadata.status = Some("disabled".into());
+        profile.models.insert(0, other);
+    }
+    let availability =
+        ModelRuntime::project_account_model_availability(&config, &pool.snapshot(), 0).unwrap();
+    assert!(availability
+        .iter()
+        .find(|row| row.model_id == "other-wire")
+        .unwrap()
+        .eligible_account_ids
+        .is_empty());
+    assert_eq!(
+        availability
+            .iter()
+            .find(|row| row.model_id == "claude-sonnet-4-6")
+            .unwrap()
+            .eligible_account_ids,
+        ["a", "b"]
+    );
+    let runtime = Arc::new(
+        ModelRuntime::from_config(config)
+            .unwrap()
+            .with_account_pool(pool)
+            .with_credential_provider(credentials),
+    );
+    let service = ApiService::new(
+        runtime.clone(),
+        transport.clone(),
+        Default::default(),
+        Default::default(),
+        "test",
+        None,
+        None,
+    );
+    let model = "claude-sonnet-4-6";
+    let profile = Some("read-count-fixture");
+    assert_eq!(
+        service
+            .count_tokens_exact(model, profile, None, vec![], vec![])
+            .await
+            .unwrap(),
+        Some(2500)
+    );
+    let mut request = LlmRequest::new(model).with_user_text("ready");
+    request.profile = profile.map(str::to_owned);
+    let scope = crate::model::retry_scope::ModelCallRetryScope::default();
+    let mut coordinator = service
+        .make_account_coordinator(&request, &scope)
+        .await
+        .unwrap();
+    service
+        .select_attempt_account(coordinator.as_mut(), &scope, &mut request)
+        .await
+        .unwrap();
+    let original = runtime.resolve_media_route(model, profile).unwrap().main;
+    let actual = runtime
+        .prepare(&request)
+        .await
+        .unwrap()
+        .route
+        .resolved_route;
+    assert_eq!(actual.request_model, model);
+    assert_eq!(actual.display_model, "read-count-model");
+    assert!(service
+        .authorized_account_route(
+            &original,
+            request.execution.selected_account.as_ref().unwrap(),
+            &actual
+        )
+        .is_some());
+}
+
+#[tokio::test]
+async fn disabled_logical_model_cannot_select_an_enabled_account_copy() {
+    let (base, transport, pool, credentials) =
+        named_account_service(crate::ProtocolFamily::AnthropicMessages);
+    let mut config = base.client().configuration();
+    config
+        .providers
+        .iter_mut()
+        .find(|p| p.profile_name == "read-count-fixture")
+        .unwrap()
+        .models[0]
+        .metadata
+        .status = Some("disabled".into());
+    let runtime = ModelRuntime::from_config(config)
+        .unwrap()
+        .with_account_pool(pool)
+        .with_credential_provider(credentials.clone());
+    assert!(matches!(
+        runtime.account_coordinator("read-count-model", Some("read-count-fixture")),
+        Err(LlmError::ModelUnavailable)
+    ));
+    assert!(credentials.0.lock().unwrap().is_empty());
+    assert!(transport.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unsupported_count_releases_account_probe_and_preserves_health() {
+    use crate::accounts::{FailureScope, HealthStatus};
+
+    for status in [404, 405, 501] {
+        let (service, transport, _, credentials) =
+            named_account_service(crate::ProtocolFamily::AnthropicMessages);
+        transport
+            .1
+            .store(status, std::sync::atomic::Ordering::SeqCst);
+        let model = "read-count-model";
+        let profile = Some("account.b");
+        for error in [LlmError::ProviderInternal, LlmError::QuotaExceeded] {
+            let mut generation = service
+                .client()
+                .account_coordinator(model, profile)
+                .unwrap()
+                .unwrap();
+            assert_eq!(generation.select().await.unwrap().profile_name, "account.b");
+            assert!(generation.failed(&error).await);
+            for record in credentials.1 .0.lock().unwrap().records.values_mut() {
+                record.recovery_at_ms = Some(0);
+            }
+        }
+
+        assert!(
+            service
+                .count_tokens(model, profile, Some("estimate this"), vec![], vec![])
+                .await
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            service
+                .count_tokens_exact(model, profile, None, vec![], vec![])
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            service
+                .count_read_text_tokens_exact(model, profile, &Utf16JsonProjection::from("source"))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(transport.0.lock().unwrap().len(), 3);
+
+        let health = credentials.1 .0.lock().unwrap();
+        assert_eq!(health.records.len(), 2);
+        assert!(health.model_entitlements.is_empty());
+        for record in health.records.values() {
+            match record.scope {
+                FailureScope::Account => assert_eq!(record.status, HealthStatus::QuotaExhausted),
+                FailureScope::Endpoint(_) => assert_eq!(record.status, HealthStatus::CoolingDown),
+                ref scope => panic!("unexpected health scope: {scope:?}"),
+            }
+            assert_eq!(record.recovery_at_ms, Some(0));
+            assert_eq!(record.failures, 1);
+            assert_eq!(record.probe_owner, None);
+            assert_eq!(record.probe_until_ms, None);
+        }
+    }
+}
+
+#[tokio::test]
+async fn disabled_account_model_is_rejected_before_count_credentials() {
+    let (service, transport, pool, credentials) =
+        named_account_service(crate::ProtocolFamily::AnthropicMessages);
+    let mut config = service.client().configuration();
+    for profile in &mut config.providers {
+        profile.models[0].metadata.status = Some("disabled".into());
+    }
+    let runtime = ModelRuntime::from_config(config)
+        .unwrap()
+        .with_account_pool(pool)
+        .with_credential_provider(credentials.clone());
+    let model = "read-count-model";
+    let profile = "account.b";
+    let mut request = LlmRequest::new(model).with_user_text("source");
+    request.profile = Some(profile.into());
+    assert!(matches!(
+        runtime.prepare_count_tokens(&request).await,
+        Err(LlmError::ModelUnavailable)
+    ));
+    assert!(matches!(
+        crate::model::count_tokens::try_count_tokens_exact(&runtime, transport.clone(), &request)
+            .await,
+        Err(LlmError::ModelUnavailable)
+    ));
+    assert!(transport.0.lock().unwrap().is_empty());
+    assert!(credentials.0.lock().unwrap().is_empty());
+    let health = credentials.1 .0.lock().unwrap();
+    assert!(health.records.is_empty());
+    assert!(health.model_entitlements.is_empty());
 }
 
 #[tokio::test]

@@ -832,6 +832,21 @@ impl ResponseAccumulator {
         self.malformed_input.take()
     }
 
+    /// Prefer a known malformed tool call while retaining the physical route's
+    /// prohibition on replaying a failed generation.
+    pub fn stream_failure(&mut self, error: LlmError) -> LlmError {
+        if let Some(malformed) = self.take_malformed_error() {
+            malformed
+                .with_response_diagnostics(
+                    error.response_request_id().map(str::to_owned),
+                    error.rate_limit_message().map(str::to_owned),
+                )
+                .with_route_replay(error.allows_automatic_replay())
+        } else {
+            error
+        }
+    }
+
     /// Report the canonical incomplete-stream error at end of input.
     pub fn finish(self) -> (Vec<ContentBlock>, LlmError) {
         if let Some(error) = self.malformed_input {
@@ -862,8 +877,7 @@ pub async fn accumulate_stream_salvaging_remaining(
             Ok(event) => event,
             Err(error) => {
                 let partial = accumulator.partial_content().to_vec();
-                let malformed = accumulator.take_malformed_error();
-                return Err((partial, malformed.unwrap_or(error)));
+                return Err((partial, accumulator.stream_failure(error)));
             }
         };
         match accumulator.observe(event) {

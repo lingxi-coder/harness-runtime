@@ -242,7 +242,7 @@ async fn measured_context_rejects_a_changed_prompt_before_new_request_binding() 
         assert!(changed.execution.context_usage_estimate.is_none());
         assert!(estimate_input_tokens(&changed) > 1000);
         assert!(matches!(
-            service.ensure_context_fit(&changed).await,
+            service.ensure_context_fit(&changed, false).await,
             Err(LlmError::InputBudgetExceeded { .. })
         ));
         let new_system = SystemPromptInput::custom_prompt(PromptText::from_string(
@@ -430,7 +430,7 @@ async fn context_policy_measured_prefix_ignores_opaque_bytes_but_admits_new_inpu
             .unwrap();
         assert!(approximate_tokens(&request) > 272_000);
         assert_eq!(estimate_input_tokens(&request), 127_969);
-        service.ensure_context_fit(&request).await.unwrap();
+        service.ensure_context_fit(&request, false).await.unwrap();
 
         let (larger, _) = estimator
             .scope(async {
@@ -440,7 +440,7 @@ async fn context_policy_measured_prefix_ignores_opaque_bytes_but_admits_new_inpu
             .unwrap();
         assert_eq!(estimate_input_tokens(&larger), 277_967);
         assert!(matches!(
-            service.ensure_context_fit(&larger).await,
+            service.ensure_context_fit(&larger, false).await,
             Err(LlmError::InputBudgetExceeded {
                 input_tokens: 277_967,
                 budget: 272_000,
@@ -452,7 +452,7 @@ async fn context_policy_measured_prefix_ignores_opaque_bytes_but_admits_new_inpu
             .build_main_message_request(make_request("tailtail".into()), stream)
             .unwrap();
         assert!(matches!(
-            service.ensure_context_fit(&unmeasured).await,
+            service.ensure_context_fit(&unmeasured, false).await,
             Err(LlmError::InputBudgetExceeded { .. })
         ));
     }
@@ -471,7 +471,7 @@ async fn context_policy_fresh_provider_count_overrides_measured_prefix_estimate(
     request.execution.context_usage_estimate =
         crate::context_usage::ContextUsageEstimate::bind(&request, 7400);
     assert!(matches!(
-        service.ensure_context_fit(&request).await,
+        service.ensure_context_fit(&request, false).await,
         Err(LlmError::ContextOverflow { .. })
     ));
     assert_eq!(transport.seen_count(), 1);
@@ -508,6 +508,117 @@ async fn context_policy_missing_count_endpoint_still_dispatches_generation() {
 }
 
 #[tokio::test]
+async fn context_count_obeys_host_dispatch_admission_for_batch_and_stream() {
+    for stream in [false, true] {
+        let (service, transport, mut request) = context_policy_count_fixture(FakeResponse::Ok(
+            ProviderResponse::json(200, serde_json::json!({"input_tokens":100})),
+        ));
+        request
+            .execution
+            .set_request_dispatch_admission(Some(crate::RequestDispatchAdmission::new(|| false)));
+        let error = if stream {
+            service
+                .stream_request(request)
+                .await
+                .err()
+                .expect("stream admission failure")
+        } else {
+            service
+                .execute_non_stream_request(
+                    request,
+                    NonStreamingRequestClass::Main,
+                    Default::default(),
+                )
+                .await
+                .unwrap_err()
+        };
+        assert!(matches!(
+            error,
+            LlmError::RequestDispatchRejected {
+                prior_dispatch: false
+            }
+        ));
+        assert_eq!(transport.seen_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn output_limited_requests_use_local_counts_and_live_generation_authorization() {
+    use std::num::NonZeroU32;
+
+    for stream in [false, true] {
+        let (service, transport, mut request) = context_policy_count_fixture(FakeResponse::Ok(
+            ProviderResponse::json(200, serde_json::json!({"input_tokens":100})),
+        ));
+        let quota = Arc::new(crate::ScopeOutputQuota::new(
+            NonZeroU32::new(512).unwrap(),
+            NonZeroU32::MIN,
+        ));
+        quota
+            .set_dispatch_authorization(Arc::new(|| {
+                Box::pin(async {
+                    Err(LlmError::InvalidRequest {
+                        message: "denied by host".into(),
+                    })
+                })
+            }))
+            .unwrap();
+        let service = service.with_scope_output_quota(Some(quota));
+        request.execution.context_usage_estimate =
+            crate::context_usage::ContextUsageEstimate::bind(&request, 7400);
+        let error = if stream {
+            service
+                .stream_request(request)
+                .await
+                .err()
+                .expect("host denied generation")
+        } else {
+            service
+                .execute_non_stream_request(
+                    request,
+                    NonStreamingRequestClass::Main,
+                    Default::default(),
+                )
+                .await
+                .unwrap_err()
+        };
+        assert!(matches!(
+            error.classification_source(),
+            LlmError::InvalidRequest { message } if message == "denied by host"
+        ));
+        assert_eq!(transport.seen_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn context_count_obeys_physical_attempt_budget_for_batch_and_stream() {
+    for stream in [false, true] {
+        let (service, transport, mut request) = context_policy_count_fixture(FakeResponse::Ok(
+            ProviderResponse::json(200, serde_json::json!({"input_tokens":100})),
+        ));
+        request.execution.api_attempts_left = Some(crate::ApiAttemptsLeft::new(0));
+        let error = if stream {
+            service
+                .stream_request(request)
+                .await
+                .err()
+                .expect("stream attempt budget failure")
+        } else {
+            service
+                .execute_non_stream_request(
+                    request,
+                    NonStreamingRequestClass::Main,
+                    Default::default(),
+                )
+                .await
+                .unwrap_err()
+        };
+        assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+        assert_eq!(transport.seen_count(), 0);
+    }
+}
+
+#[tokio::test]
 async fn context_policy_count_failures_preserve_auth_and_transport_errors() {
     for (status, kind) in [
         (401, "authentication_error"),
@@ -520,7 +631,10 @@ async fn context_policy_count_failures_preserve_auth_and_transport_errors() {
                 status,
                 serde_json::json!({"error":{"type":kind,"message":"count rejected"}}),
             )));
-        let error = service.ensure_context_fit(&request).await.unwrap_err();
+        let error = service
+            .ensure_context_fit(&request, false)
+            .await
+            .unwrap_err();
         assert_eq!(error.http_status(), Some(status));
         assert_eq!(transport.seen_count(), 1);
     }
@@ -532,7 +646,10 @@ async fn context_policy_count_failures_preserve_auth_and_transport_errors() {
     ] {
         let (service, transport, request) =
             context_policy_count_fixture(FakeResponse::Err(error.clone()));
-        let actual = service.ensure_context_fit(&request).await.unwrap_err();
+        let actual = service
+            .ensure_context_fit(&request, false)
+            .await
+            .unwrap_err();
         // FixtureTransport projects host errors through the SDK transport,
         // which may enrich diagnostic text; their failure class must survive.
         assert_eq!(
@@ -576,7 +693,7 @@ fn output_recovery_grows_explicit_budget_without_crossing_route_limit() {
         ..Default::default()
     });
     usage.provider_metadata = provider_payload(serde_json::json!({"llm_client": {
-        "executed_profile":"deepseek", "output_budget":{"source":"explicit", "value":8000}
+        "output_budget":{"source":"explicit", "value":8000, "profile":"deepseek", "model":model}
     }}));
     assert_eq!(
         service
@@ -602,6 +719,17 @@ fn output_recovery_grows_explicit_budget_without_crossing_route_limit() {
             .unwrap(),
         None
     );
+    for (profile, wire_model) in [("another-route", model.as_str()), ("deepseek", "another-model")] {
+        usage.provider_metadata = provider_payload(serde_json::json!({"llm_client": {
+            "output_budget":{"source":"explicit", "value":8000, "profile":profile, "model":wire_model}
+        }}));
+        assert_eq!(
+            service
+                .next_output_budget(&model, Some("deepseek"), &usage)
+                .unwrap(),
+            None
+        );
+    }
 }
 
 #[test]

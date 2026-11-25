@@ -2,7 +2,8 @@
 
 #[cfg(test)]
 use crate::dispatch_header::{DispatchHeaderState, DISPATCH_ID_HEADER};
-use crate::model::rate_limit::{RateLimitInfo, RawUtilization};
+#[cfg(test)]
+use crate::model::rate_limit::RawUtilization;
 #[cfg(test)]
 use crate::model::retry::{resolve_retry_control_with_settings, ResolveRetryEnv, RetryControl};
 #[cfg(test)]
@@ -30,6 +31,7 @@ mod hosted_search;
 mod request;
 mod response;
 mod retry;
+pub(crate) use retry::is_per_turn_effort_marker;
 mod side_query;
 mod stream;
 mod usage;
@@ -67,11 +69,12 @@ use request::custom_system_prompt;
 #[cfg(test)]
 use request::{count_media, strip_excess_media, MAX_MEDIA_PER_REQUEST};
 pub use request::{
-    native_custom_system_prompt, FallbackPolicy, MessagesCreateOptions, MessagesCreateRequest,
-    NonStreamingRequestClass, NonStreamingRetryOptions,
+    native_custom_system_prompt, ConfiguredFallbackTarget, FallbackPolicy, MessagesCreateOptions,
+    MessagesCreateRequest, NonStreamingRequestClass, NonStreamingRetryOptions,
 };
 use response::PromptCacheOverageState;
-pub use response::{RequestIdOrigin, SubscriberState};
+pub(crate) use response::BoundWrapUpHint;
+pub use response::{RequestIdOrigin, SubagentWrapUpHint, SubscriberState};
 #[cfg(test)]
 use retry::allows_automatic_replay;
 pub use retry::{RetryInfo, RetryReporter};
@@ -111,6 +114,7 @@ pub struct ApiService {
     model_attempt_hooks: RwLock<Option<Arc<dyn crate::ModelAttemptHooks>>>,
     request_session_id_source: RwLock<Option<RequestSessionIdSource>>,
     client: Arc<ModelRuntime>,
+    deepseek_fetch_cache: tokio::sync::Mutex<hosted_search::DeepSeekFetchCache>,
     transport: Arc<dyn Transport>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
     ///
@@ -159,16 +163,11 @@ pub struct ApiService {
     interactive_session: Option<bool>,
     /// Per-model fallback chains from `routing.fallback`.
     ///
-    /// Key is the request's resolved display model; value is the ordered chain
-    /// of fallback target display models.  A per-model entry **wins** over
-    /// `fallback_model` (global).  The adapter walks the chain in order on
-    /// consecutive overload events: chain[0] fires first, chain[1] next, etc.
-    fallback_overrides: std::collections::BTreeMap<String, Vec<String>>,
+    /// Keys may qualify the source display model with its provider profile.
+    /// Per-model routing takes precedence over the global fallback chain.
+    fallback_overrides: std::collections::BTreeMap<String, Vec<ConfiguredFallbackTarget>>,
     /// Alias → display-model map built at construction from
-    /// `client.available_models()`. Used by configured model fallback
-    /// to normalize an alias request string to the display model before
-    /// probing `fallback_overrides` (whose keys are display-normalized at
-    /// parse time).
+    /// `client.available_models()` for the Anthropic fast-mode policy.
     alias_to_display: std::collections::BTreeMap<String, String>,
     /// `routing.retry.maxAttempts` override.
     ///
@@ -187,20 +186,8 @@ pub struct ApiService {
     /// unknown models leave `response.cost = None` (never an error).  The
     /// `CostTracker` budget authority is UNTOUCHED by this path.
     estimator: Option<Arc<CostEstimator>>,
-    /// Most recently observed 2xx rate-limit header snapshot.
-    ///
-    /// Parsed via [`RateLimitInfo::from_headers`] on every successful
-    /// `drive_non_stream` and `drive_stream` connect-success response.
-    /// Exposed via [`Self::last_rate_limit_info`].  `None` until the first
-    /// successful response is received.  Interior-mutable so non-`&mut self`
-    /// callers (the `OrchestratorApiClient` impls) can update it.
-    ///
-    /// TUI wiring: no existing `OrchestratorHandle` surface maps naturally to
-    /// per-request rate-limit metadata (all status APIs are session-wide
-    /// snapshots). Callers that need this should call `last_rate_limit_info()`
-    /// on the adapter directly. A future task can thread it into the handle if
-    /// needed.
-    last_rate_limit: Mutex<Option<RateLimitInfo>>,
+    /// Quota observations and the wrap-up window for the admitted credential.
+    rate_limits: Arc<response::RateLimitState>,
     /// The request id of the most recently recorded response, with its origin,
     /// captured in [`Self::record_rate_limit_from_headers_for_route`] (the stream
     /// connect-success + non-stream header pass). Read via the
@@ -225,28 +212,6 @@ pub struct ApiService {
     /// Recovery status and rejected historical identities. New message IDs
     /// remain unaffected, even when their thinking bytes match an older turn.
     thinking_recovery: crate::thinking_scope::ThinkingRecoveryScope,
-    /// Most recently observed RAW per-window utilization snapshot.
-    ///
-    /// Task 2 (llm-runtime future-work batch 5): parsed via
-    /// [`RawUtilization::from_headers`] alongside the [`RateLimitInfo`]
-    /// parse in `record_rate_limit_from_headers_for_route` — claude-code assigns
-    /// `rawUtilization = extractRawUtilization(headers)` on the same passes
-    /// that compute the limits (`claudeAiLimits.ts:476`). Assigned
-    /// UNCONDITIONALLY on every recorded response (unlike `last_rate_limit`,
-    /// which is gated on `has_unified_headers()`), so a later response
-    /// without the per-window quartet resets it to the empty snapshot
-    /// exactly like the TS module state. `None` until the first recorded
-    /// response. Recorded on success passes here AND, as of B6-T1, on a
-    /// TERMINAL 429 — TS extracts raw utilization from error headers too
-    /// (`extractRawUtilization`, `claudeAiLimits.ts:500`). The 429 path stages
-    /// the raw snapshot for the attempt and promotes it into this
-    /// cache only when the turn dies on the 429 (via
-    /// [`Self::promote_pending_429`]), never on a retried-then-recovered
-    /// attempt. EMPTY snapshots are preserved too so a later headerless
-    /// success or terminal 429 can clear stale raw-window state exactly like
-    /// the TS module assignment. Exposed via the
-    /// `OrchestratorApiClient::last_raw_utilization` override.
-    last_raw_utilization: Mutex<Option<RawUtilization>>,
     /// User-facing copy composed from the most recent 429 **error** response.
     ///
     /// Task 6 (llm-runtime future-work batch 5): claude-code builds the
@@ -260,19 +225,6 @@ pub struct ApiService {
     /// response, so it always reflects the most recent response seen. Exposed
     /// via the `OrchestratorApiClient::last_rate_limit_error_message` override.
     last_429_message: Mutex<Option<String>>,
-    /// One-shot subagent wrap-up hint, armed from a near-limit 2xx snapshot and
-    /// consumed by the query loop exactly once for that five-hour window.
-    pending_near_limit_wrap_up_hint: Mutex<bool>,
-    /// Five-hour reset epoch that already armed or consumed the near-limit
-    /// wrap-up hint. This is the per-window dedupe key: the same reset must not
-    /// re-arm after consumption; a later reset opens a new window.
-    near_limit_wrap_up_window_key: Mutex<Option<u64>>,
-    /// Monotonic guard timestamp (ms) for the rate-limit record path — the
-    /// binary's `Nha` (@210953364). A record whose timestamp is OLDER than
-    /// this is dropped so an out-of-order (parallel) response cannot overwrite
-    /// a newer rate-limit snapshot (2.1.196 flicker fix). `None` until the
-    /// first record.
-    last_rate_limit_record_ts_ms: Mutex<Option<u128>>,
     /// Test-only override for the streaming idle-watchdog timeout. `Some(d)`
     /// forces `d` (bypassing the env resolver whose floor is 5 min, which is
     /// otherwise untestable); `None` (production) uses

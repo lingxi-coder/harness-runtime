@@ -179,13 +179,6 @@ pub trait SubagentApiClient: Send + Sync {
         None
     }
 
-    /// Consume a pending near-limit wrap-up hint for the current subagent
-    /// query loop. Default no-op preserves existing mocks and non-provider
-    /// implementations.
-    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
-        false
-    }
-
     /// Dispatch the near-limit resume checkpoint without blocking the query
     /// loop. The production provider adapter delegates to the session-owned
     /// checkpoint machinery; mocks and hosts without persistence stay no-op.
@@ -246,6 +239,8 @@ pub struct SubagentApiRequest {
 /// Optional per-round-trip Fusion / COGS knobs.
 #[derive(Debug, Clone, Default)]
 pub struct SubagentApiCallOpts {
+    /// Runner notice enabled only for child calls, evaluated for the signing credential.
+    pub wrap_up: Option<llm_runtime::service::SubagentWrapUpHint>,
     /// Exact parent wire inputs for a host-owned memory fork only.
     pub memory_fork_wire: Option<Arc<crate::memory_fork::MemoryForkProjection>>,
     /// Trusted per-logical-call capability; retries retain this exact context.
@@ -317,10 +312,6 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         profile: Option<&str>,
     ) -> Option<llm_runtime::MediaRoute> {
         self.inner.resolve_mod_media_route(model, profile)
-    }
-
-    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
-        self.inner.consume_pending_near_limit_wrap_up_hint()
     }
 
     fn dispatch_near_limit_checkpoint(&self, request: NearLimitCheckpointRequest) {
@@ -414,6 +405,7 @@ mod tests {
                 forced_tool,
                 effort: Some(serde_json::json!(8192)),
                 opts: SubagentApiCallOpts {
+                    wrap_up: None,
                     memory_fork_wire: None,
                     model_attempt: Some(attempt.clone()),
                     max_output_tokens: Some(4096),

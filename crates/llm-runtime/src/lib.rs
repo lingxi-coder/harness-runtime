@@ -166,9 +166,9 @@ pub use registry::{ConnectionHop, MediaRoute, ModelListing, ModelRegistry, Resol
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
 pub use service::{
-    with_mod_request_effort, ApiService, FallbackPolicy, MessagesCreateOptions,
-    MessagesCreateRequest, NonStreamingRequestClass, NonStreamingRetryOptions,
-    RequestSessionIdSource, RetryInfo, RetryReporter, SubscriberState,
+    with_mod_request_effort, ApiService, ConfiguredFallbackTarget, FallbackPolicy,
+    MessagesCreateOptions, MessagesCreateRequest, NonStreamingRequestClass,
+    NonStreamingRetryOptions, RequestSessionIdSource, RetryInfo, RetryReporter, SubscriberState,
 };
 pub use services::{ProviderServiceSnapshot, ProviderServices};
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};

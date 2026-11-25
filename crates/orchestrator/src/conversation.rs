@@ -593,6 +593,30 @@ pub trait OrchestratorApiClient: Send + Sync {
         0
     }
 
+    /// Correlation captured with the response. Legacy adapters may supply a snapshot.
+    fn response_request_id(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> Option<String> {
+        diagnostics.map_or_else(|| self.last_request_id(), |value| value.request_id.clone())
+    }
+
+    /// Retries attributed to this response for billing.
+    fn response_retry_count(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> u32 {
+        diagnostics.map_or_else(|| self.last_retry_count(), |value| value.retries)
+    }
+
+    /// A limit message associated with this specific failure.
+    fn rate_limit_error_message(&self, error: &LlmError) -> Option<String> {
+        error
+            .rate_limit_message()
+            .map(str::to_owned)
+            .or_else(|| self.last_rate_limit_error_message())
+    }
+
     /// Sticky thinking-signature strip latch. Default `false`.
     fn thinking_signature_stripped(&self) -> bool {
         false
@@ -844,6 +868,14 @@ pub trait StreamingApiClient: Send + Sync {
     /// parity). Default `0` for mocks / non-retrying impls.
     fn last_retry_count(&self) -> u32 {
         0
+    }
+
+    /// Connect retries attributed to the stream being consumed.
+    fn response_retry_count(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> u32 {
+        diagnostics.map_or_else(|| self.last_retry_count(), |value| value.retries)
     }
 
     /// Sticky thinking-signature strip latch. Default `false`.
@@ -1102,7 +1134,9 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             match inner.classification_source() {
                 LlmError::AllAccountsUnavailable { .. } => (Some("all_accounts_unavailable"), None),
                 LlmError::AccountStorageUnavailable => (Some("account_storage_unavailable"), None),
-                LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
+                LlmError::ProviderErrorText { .. }
+                | LlmError::ProxyAuthHelperRetry { .. }
+                | LlmError::ResponseDiagnostics { .. } => {
                     unreachable!("classification_source removes carrier wrappers")
                 }
                 // 429 family → "rate_limit" (status 429). Carved out before reaching
@@ -1135,6 +1169,12 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
                 // `invalid_request` category as the context-window branch; the
                 // handler passes no `apiErrorStatus` on this `su` call → omit.
                 LlmError::RequestTooLarge => (Some("invalid_request"), None),
+                LlmError::ResponseBodyLimitExceeded { status, .. } => {
+                    (Some("response_body_limit_exceeded"), Some(*status))
+                }
+                LlmError::ResponseBodyInterrupted { status, .. } => {
+                    (Some("response_body_interrupted"), Some(*status))
+                }
                 LlmError::FileUploadOutcomeUnknown { .. } => {
                     (Some("file_upload_outcome_unknown"), None)
                 }
@@ -1186,8 +1226,14 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         | OrchestratorError::MaxBudgetReached { .. }
         | OrchestratorError::ContextState(_) => (Some("unknown"), None),
     };
+    let request_id = match e {
+        OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => {
+            inner.response_request_id().map(str::to_owned)
+        }
+        _ => None,
+    };
     ApiErrorEnvelope {
-        request_id: None,
+        request_id,
         api_error: None,
         error,
         api_error_status: parsed_status.or(api_error_status),

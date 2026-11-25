@@ -516,6 +516,41 @@ async fn physical_dispatch_287_recovery_latch_is_once_per_query() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn model_validation_dispatch_header_recovery_obeys_sealed_replay_policy() {
+    let _lock = cedar_lattice_write();
+    let _dreamy = DreamyFrostGuard::set(true);
+    for fault in [DispatchFault::Http(503, false), DispatchFault::Connection] {
+        for hosted in [true, false] {
+            let transport = Arc::new(DispatchRecoveryTransport {
+                requests: Mutex::new(Vec::new()),
+                fault,
+                failures: 1,
+            });
+            let service = make_adapter_with_retries(transport.clone(), Some(0));
+            let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("Hi");
+            request.input.max_tokens = Some(1);
+            if hosted {
+                request.input.hosted_tools.push(
+                    lingxi_llm_client::protocol::HostedTool::WebSearch(Default::default()),
+                );
+            }
+            let result = service.execute_model_validation_request(request).await;
+            if hosted {
+                let error = result.unwrap_err();
+                assert!(!error.allows_automatic_replay(), "{error:?}");
+                assert_eq!(transport.headers(), [Some("v2d".into())]);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    transport.headers(),
+                    [Some("v2d".into()), Some("v2p".into())]
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn dispatch_287_does_not_add_recovery_to_other_provider_routes() {
     let _lock = cedar_lattice_write();
     let _dreamy = DreamyFrostGuard::set(true);
