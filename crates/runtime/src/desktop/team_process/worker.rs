@@ -452,8 +452,16 @@ async fn run(
         .as_ref()
         .map_or(0, |state| state.checkpoint.dispatches_observed);
     let input = format!(
-        "Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document."
+        "Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use the published knowledge, Chat history, and tools authorized for this task. Produce a useful Markdown answer."
     );
+    let input = if visualization.is_some() {
+        format!(
+            "{input} When an interactive chart or form is helpful, use {} and include a brief Markdown reply.",
+            super::visualization::NAME
+        )
+    } else {
+        input
+    };
     let input = match &no_reply {
         Some(choice) if choice.addressed() => format!(
             "{input} This message was written to you directly: answer it, unless it plainly needs no answer from you (a thank-you or an acknowledgement); only then call {} and end your turn without writing anything.",
@@ -631,7 +639,7 @@ async fn run(
             None
         },
         visualization: if outcome == TeamProcessOutcome::Completed && !private_data {
-            visualization.and_then(|draft| draft.load())
+            visualization.as_ref().and_then(|draft| draft.load())
         } else {
             None
         },
@@ -648,6 +656,11 @@ async fn run(
         denied_tools: denied.load(Ordering::Relaxed),
     };
     let saved = super::chat_session::record_result(&rt, &task_id, &result).await;
+    if saved.is_ok() {
+        if let Some(draft) = visualization.as_ref() {
+            draft.remove();
+        }
+    }
     let drain = rt.shutdown().await;
     drop(pump);
     saved?;
@@ -757,8 +770,8 @@ fn verify_continuation(
 }
 
 /// Continue from the durable head. Persisted tool results are already in the
-/// restored history and are never executed again; each unfinished read-only
-/// Team tool runs once now under the current authorization and its result is
+/// restored history and are never executed again. The checkpoint evaluator
+/// admits replayable Team tools under the current authorization. Each result is
 /// persisted before the next model request is built.
 async fn run_continuation(
     rt: &crate::desktop::DesktopRuntime,
