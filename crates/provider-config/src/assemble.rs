@@ -655,6 +655,7 @@ mod tests {
                 secret_ref: "acct.named-deepseek".into(),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 1,
             identity_generation: 1,

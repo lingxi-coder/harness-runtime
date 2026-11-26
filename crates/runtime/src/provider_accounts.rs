@@ -734,6 +734,7 @@ impl ProviderAccountStore {
                     auth_kind,
                     credential_ref: reference.clone(),
                     enabled: true,
+                    additional_openai_models: false,
                     user_priority: 0,
                     config_revision: 0,
                     identity_generation: 1,
@@ -778,6 +779,17 @@ impl ProviderAccountStore {
             } => {
                 let mut account = find(&account_id)?;
                 account.enabled = enabled;
+                registry.update(account, command.expected_revision)?;
+            }
+            ProviderAccountAction::SetAdditionalOpenaiModels {
+                account_id,
+                enabled,
+            } => {
+                let mut account = find(&account_id)?;
+                if !account.supports_additional_openai_models() {
+                    return Err("Additional models require an OpenAI API key account".into());
+                }
+                account.additional_openai_models = enabled;
                 registry.update(account, command.expected_revision)?;
             }
             ProviderAccountAction::SetCredential { account_id } => {

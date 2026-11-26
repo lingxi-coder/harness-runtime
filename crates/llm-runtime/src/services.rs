@@ -605,6 +605,7 @@ mod account_tests {
                     secret_ref: format!("acct.{id}"),
                 },
                 enabled: true,
+                additional_openai_models: false,
                 user_priority: priority as u32,
                 config_revision: 1,
                 identity_generation: 1,

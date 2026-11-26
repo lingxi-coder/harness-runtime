@@ -57,6 +57,26 @@ pub struct CredentialRef {
     pub secret_ref: String,
 }
 
+pub const ADDITIONAL_OPENAI_MODEL_IDS: &[&str] = &[
+    "gpt-5.4",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-4.1",
+    "gpt-4o",
+    "o1",
+    "o3",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "gpt-4o-mini",
+    "o3-mini",
+    "o4-mini",
+];
+
 /// Stable account identity independent of upstream email, token, or display order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,9 +88,19 @@ pub struct AccountMetadata {
     pub execution_binding_id: String,
     pub credential_ref: CredentialRef,
     pub enabled: bool,
+    #[serde(default)]
+    pub additional_openai_models: bool,
     pub user_priority: u32,
     pub config_revision: u64,
     pub identity_generation: u64,
+}
+
+impl AccountMetadata {
+    pub fn supports_additional_openai_models(&self) -> bool {
+        self.provider_id == "openai"
+            && self.execution_binding_id == "openai"
+            && self.auth_kind == AccountAuthKind::ApiKey
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +244,10 @@ pub enum ProviderAccountAction {
         account_id: String,
         enabled: bool,
     },
+    SetAdditionalOpenaiModels {
+        account_id: String,
+        enabled: bool,
+    },
     Remove {
         account_id: String,
     },
@@ -290,6 +324,7 @@ impl std::fmt::Debug for ProviderAccountAction {
             Self::Update { .. } => "Update",
             Self::Reorder { .. } => "Reorder",
             Self::SetEnabled { .. } => "SetEnabled",
+            Self::SetAdditionalOpenaiModels { .. } => "SetAdditionalOpenaiModels",
             Self::Remove { .. } => "Remove",
             Self::Logout { .. } => "Logout",
             Self::ClearCredential { .. } => "ClearCredential",

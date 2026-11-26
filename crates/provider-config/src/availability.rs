@@ -235,6 +235,7 @@ mod tests {
                 secret_ref: String::new(),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 0,
             identity_generation: 1,

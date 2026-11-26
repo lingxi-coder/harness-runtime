@@ -392,6 +392,7 @@ mod tests {
                 secret_ref: format!("acct.{id}"),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 0,
             identity_generation: 1,

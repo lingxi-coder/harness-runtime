@@ -4656,6 +4656,7 @@ mod shared_client_regression {
                 secret_ref: "acct.a".into(),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 1,
             identity_generation: 1,

@@ -215,6 +215,7 @@ fn named_account_service(
                 secret_ref: format!("acct.{id}"),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: priority,
             config_revision: 1,
             identity_generation: 7,
