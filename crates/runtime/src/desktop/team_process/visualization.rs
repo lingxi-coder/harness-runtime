@@ -1,7 +1,9 @@
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -9,7 +11,8 @@ use std::{
 use tool_api::tool_trait::*;
 
 pub(super) const NAME: &str = "TeamVisualization";
-const MAX_HTML: usize = 48 * 1024;
+const MAX_HTML: usize = 50 * 1024 * 1024;
+const PART_BYTES: usize = 2 * 1024 * 1024;
 const ABANDONED_DRAFT_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
 
 fn wire_id(id: &str) -> bool {
@@ -46,7 +49,16 @@ struct Data {
 #[serde(deny_unknown_fields)]
 struct Bundle {
     title: String,
-    html: String,
+    html: HtmlFile,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HtmlFile {
+    path: PathBuf,
+    bytes: usize,
+    sha256: String,
+    parts: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,10 +88,16 @@ impl Artifact {
             && self.name == bundle.title
             && !bundle.title.trim().is_empty()
             && bundle.title.encode_utf16().count() <= 80
-            && bundle.html.len() <= MAX_HTML
-            && !bundle.html.trim().is_empty()
+            && (1..=MAX_HTML).contains(&bundle.html.bytes)
+            && super::checkpoint::valid_digest(&bundle.html.sha256)
+            && bundle.html.parts.len() == bundle.html.bytes.div_ceil(PART_BYTES)
+            && bundle
+                .html
+                .parts
+                .iter()
+                .all(|part| super::checkpoint::valid_digest(part))
             && part.media_type == "application/json"
-            && part.data.version == 1
+            && part.data.version == 2
             && part.data.bindings.len() <= 4
             && part.data.bindings.iter().all(|binding| {
                 wire_id(&binding.alias)
@@ -109,11 +127,15 @@ impl Draft {
                 else {
                     continue;
                 };
-                if wire_id(id)
-                    && (suffix == "json"
-                        || (suffix.len() == 32
-                            && suffix.bytes().all(|digit| digit.is_ascii_hexdigit())))
-                    && (id != task || suffix != "json")
+                let temporary =
+                    suffix.len() == 32 && suffix.bytes().all(|digit| digit.is_ascii_hexdigit());
+                let draft = wire_id(id) && (temporary || suffix == "json" && id != task);
+                let payload = id.rsplit_once('.').is_some_and(|(id, digest)| {
+                    wire_id(id)
+                        && super::checkpoint::valid_digest(digest)
+                        && (temporary || suffix == "html" && id != task)
+                });
+                if (draft || payload)
                     && entry.file_type().is_ok_and(|kind| kind.is_file())
                     && entry
                         .metadata()
@@ -138,8 +160,79 @@ impl Draft {
 
     pub(super) fn load(&self) -> Option<Artifact> {
         let artifact: Artifact = serde_json::from_slice(&std::fs::read(&self.path).ok()?).ok()?;
-        (artifact.valid() && artifact.artifact_id == self.task).then_some(artifact)
+        let html = &artifact.parts[0].data.bundle.html;
+        let expected = self.path.with_extension(format!("{}.html", html.sha256));
+        (artifact.valid() && artifact.artifact_id == self.task && html.path == expected)
+            .then_some(artifact)
     }
+
+    fn save(&self, title: String, html: &str, bindings: Vec<Binding>) -> io::Result<()> {
+        let bytes = html.as_bytes();
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let path = self.path.with_extension(format!("{sha256}.html"));
+        let previous = self
+            .load()
+            .map(|artifact| artifact.parts[0].data.bundle.html.path.clone());
+        write_atomic(&path, |file| file.write_all(bytes))?;
+        let artifact = Artifact {
+            artifact_id: self.task.clone(),
+            name: title.clone(),
+            parts: [Part {
+                media_type: "application/json".into(),
+                data: Data {
+                    version: 2,
+                    bindings,
+                    bundle: Bundle {
+                        title,
+                        html: HtmlFile {
+                            path: path.clone(),
+                            bytes: bytes.len(),
+                            sha256,
+                            parts: bytes
+                                .chunks(PART_BYTES)
+                                .map(|part| format!("{:x}", Sha256::digest(part)))
+                                .collect(),
+                        },
+                    },
+                },
+            }],
+        };
+        let saved = write_atomic(&self.path, |file| {
+            serde_json::to_writer(file, &artifact).map_err(io::Error::from)
+        });
+        if let Some(obsolete) = previous.filter(|old| saved.is_ok() && *old != path) {
+            let _ = std::fs::remove_file(obsolete);
+        }
+        saved
+    }
+}
+
+fn write_atomic(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let next = path.with_extension(uuid::Uuid::new_v4().simple().to_string());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&next)?;
+    let result = (|| {
+        write(&mut file)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&next, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(next);
+    }
+    result
 }
 
 struct PublishTool {
@@ -225,56 +318,33 @@ impl Tool for PublishTool {
                 true,
             ));
         };
-        let artifact = Artifact {
-            artifact_id: self.draft.task.clone(),
-            name: parsed.title.trim().into(),
-            parts: [Part {
-                media_type: "application/json".into(),
-                data: Data {
-                    version: 1,
-                    bindings: parsed.bindings,
-                    bundle: Bundle {
-                        title: parsed.title.trim().into(),
-                        html: parsed.html,
-                    },
-                },
-            }],
-        };
-        if !artifact.valid() {
-            return Ok(super::list_tools::done(
-                &json!({"error":"Provide a title, offline HTML under 48 KiB, and up to four unique aliases. For source message IDs and aliases use 1–64 letters, digits, underscores or hyphens."}),
-                true,
-            ));
-        }
-        if !visualization::checks::check_fragment(&artifact.parts[0].data.bundle.html)
-            .errors
-            .is_empty()
+        let title = parsed.title.trim();
+        let mut aliases = std::collections::BTreeSet::new();
+        if title.is_empty()
+            || title.encode_utf16().count() > 80
+            || parsed.bindings.len() > 4
+            || !parsed.bindings.iter().all(|binding| {
+                wire_id(&binding.alias)
+                    && aliases.insert(&binding.alias)
+                    && wire_id(&binding.message_id)
+                    && binding.source_alias.as_deref().is_none_or(wire_id)
+            })
+            || !wire_id(&self.draft.task)
         {
             return Ok(super::list_tools::done(
-                &json!({"error":"Use a valid offline HTML fragment under 48 KiB"}),
+                &json!({"error":"Provide a title and up to four unique aliases. For source message IDs and aliases use 1–64 letters, digits, underscores or hyphens."}),
                 true,
             ));
         }
-        let next = self
-            .draft
-            .path
-            .with_extension(uuid::Uuid::new_v4().simple().to_string());
-        let saved = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&next)
-            .and_then(|mut file| {
-                let result = (|| {
-                    serde_json::to_writer(&mut file, &artifact)?;
-                    file.sync_all()?;
-                    drop(file);
-                    std::fs::rename(&next, &self.draft.path)
-                })();
-                if result.is_err() {
-                    let _ = std::fs::remove_file(next);
-                }
-                result
-            });
+        if !visualization::checks::check_fragment_with_limit(&parsed.html, MAX_HTML)
+            .is_publishable()
+        {
+            return Ok(super::list_tools::done(
+                &json!({"error":"Use a valid offline HTML fragment up to 50 MiB"}),
+                true,
+            ));
+        }
+        let saved = self.draft.save(title.into(), &parsed.html, parsed.bindings);
         Ok(super::list_tools::done(
             &if saved.is_ok() {
                 json!({"prepared":true})
@@ -297,5 +367,26 @@ mod tests {
         for invalid in ["", "order rows", "库存", &"x".repeat(65)] {
             assert!(!wire_id(invalid));
         }
+    }
+
+    #[test]
+    fn large_draft_survives_with_a_small_result_frame() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("home")).unwrap();
+        let draft = Draft::new(root.path(), "task-large");
+        let mut html = "<p>Orders</p>".to_owned();
+        html.extend(std::iter::repeat_n(' ', MAX_HTML - html.len()));
+        assert!(visualization::checks::check_fragment_with_limit(&html, MAX_HTML).is_publishable());
+        draft.save("Orders".into(), &html, vec![]).unwrap();
+        let artifact = draft.load().unwrap();
+        let file = &artifact.parts[0].data.bundle.html;
+        assert_eq!(file.bytes, MAX_HTML);
+        assert_eq!(file.parts.len(), 25);
+        assert!(super::super::protocol::encode(&artifact).unwrap().len() < 4096);
+        draft.remove();
+        assert_eq!(
+            std::fs::metadata(&file.path).unwrap().len(),
+            MAX_HTML as u64
+        );
     }
 }

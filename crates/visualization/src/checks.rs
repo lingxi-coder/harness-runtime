@@ -95,10 +95,16 @@ fn line_of(text: &str, offset: usize) -> usize {
 /// Check a fragment for the rules every host enforces.
 #[must_use]
 pub fn check_fragment(fragment: &str) -> FragmentReport {
+    check_fragment_with_limit(fragment, MAX_FRAGMENT_BYTES)
+}
+
+/// Check the offline fragment with a host-specific UTF-8 byte budget.
+#[must_use]
+pub fn check_fragment_with_limit(fragment: &str, max_bytes: usize) -> FragmentReport {
     let mut report = FragmentReport::default();
-    if fragment.len() > MAX_FRAGMENT_BYTES {
+    if fragment.len() > max_bytes {
         report.errors.push(format!(
-            "The fragment is {} bytes; the limit is {MAX_FRAGMENT_BYTES} bytes (2 MiB).",
+            "The fragment is {} bytes; the limit is {max_bytes} bytes.",
             fragment.len()
         ));
         return report;
