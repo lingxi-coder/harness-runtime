@@ -10,11 +10,11 @@ mod team_account_fixture;
 
 use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
-    inspect_task, TeamContinuation, TeamDatasetOffer, TeamKnowledgeDocument, TeamListApproval,
-    TeamLocalAppOffer, TeamOperationRequest, TeamOperationResult, TeamOperationTool,
-    TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessRequest,
-    TeamProcessResult, TeamProcessStart, TeamSharedList, TeamTaskPhase, TeamWaitAnswer,
-    TeamWaitKind,
+    inspect_task, TeamContinuation, TeamDatasetOffer, TeamDelegateOffer, TeamKnowledgeDocument,
+    TeamListApproval, TeamLocalAppOffer, TeamOperationRequest, TeamOperationResult,
+    TeamOperationTool, TeamProcessDeadline, TeamProcessError, TeamProcessOutcome,
+    TeamProcessRequest, TeamProcessResult, TeamProcessStart, TeamSharedList, TeamTaskPhase,
+    TeamWaitAnswer, TeamWaitKind,
 };
 use lingxi_llm_client::protocol::ProtocolFamily;
 use serde_json::{json, Value};
@@ -76,6 +76,8 @@ struct Task {
     data: Vec<TeamDatasetOffer>,
     /// Offer the Local App tools for these apps.
     apps: Vec<TeamLocalAppOffer>,
+    /// Offer the delegation tool for these Bots.
+    delegates: Vec<TeamDelegateOffer>,
     /// Nobody asked the Bot: offer the no-reply tool.
     may_decline: bool,
     /// With `may_decline`: the member wrote to the Bot directly (a Bot DM).
@@ -92,6 +94,7 @@ impl Task {
             list: None,
             data: Vec::new(),
             apps: Vec::new(),
+            delegates: Vec::new(),
             may_decline: false,
             addressed: false,
         }
@@ -136,6 +139,7 @@ impl Task {
             shared_list: self.list.clone(),
             shared_data: self.data.clone(),
             local_apps: self.apps.clone(),
+            delegates: self.delegates.clone(),
         }
     }
     fn chat_model(
@@ -2019,6 +2023,7 @@ fn offered_only(task: &Task, apps: Vec<TeamLocalAppOffer>) -> Task {
         list: None,
         data: Vec::new(),
         apps,
+        delegates: Vec::new(),
         may_decline: false,
         addressed: false,
     }
@@ -2521,6 +2526,514 @@ async fn a_resumed_call_is_not_sent_when_no_app_is_offered_any_more() {
         tool_names(&second),
         ["TeamChatHistory", "TeamKnowledge"],
         "no Local App tool without an offer"
+    );
+    assert_eq!(tool_results(&second).len(), 1);
+}
+
+fn research() -> Vec<TeamDelegateOffer> {
+    vec![TeamDelegateOffer {
+        id: "sharedbot_research".into(),
+        name: "Research".into(),
+        description: Some("Looks up the 2026 figures.".into()),
+    }]
+}
+/// A Bot that may ask the research Bot, and may wait for its reply.
+fn delegating_task() -> Task {
+    Task {
+        ask: true,
+        delegates: research(),
+        ..Task::new()
+    }
+}
+/// The same task and batch, offered these Bots to delegate to.
+fn offered_delegates(task: &Task, delegates: Vec<TeamDelegateOffer>) -> Task {
+    Task {
+        id: task.id,
+        task_id: task.task_id.clone(),
+        input: batch(0, 2, 0),
+        ask: task.ask,
+        list: None,
+        data: Vec::new(),
+        apps: Vec::new(),
+        delegates,
+        may_decline: false,
+        addressed: false,
+    }
+}
+fn delegation(expect_reply: bool) -> Value {
+    json!({"target":"sharedbot_research","request":"Find the 2026 figures.","expectReply":expect_reply})
+}
+/// What the host is asked for when the call does not wait for a reply.
+fn hand_off() -> Value {
+    json!({"target":"sharedbot_research","request":"Find the 2026 figures."})
+}
+fn sent_to_research() -> Option<TeamOperationResult> {
+    Some(TeamOperationResult {
+        succeeded: true,
+        result: json!({"message":"Your request was sent to Research. It answers in the Chat itself."}),
+    })
+}
+/// The first process dies after the call is durable and has reached a host that never answers.
+async fn delegation_in_flight(
+    task: &Task,
+    root: &Path,
+    server: &Server,
+) -> harness_runtime::desktop::team_process::TeamTaskCheckpoint {
+    let first_broker = list_broker(root, vec![]);
+    let (handle, cancel) = first_run(task, root, &server.endpoint, first_broker.clone());
+    wait_operations(&first_broker, 1).await;
+    kill(handle, cancel).await;
+    let inspected = checkpoint(root, task);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    inspected
+}
+
+#[tokio::test]
+async fn a_delegation_that_does_not_wait_is_one_operation_named_by_its_step() {
+    // Without an offer the model has no such tool at all.
+    let (_unoffered, bare_root) = root();
+    let plain = Task::new();
+    let server = Server::new(vec![Reply::Text("Hello".into())]).await;
+    run_to_end(
+        TeamProcessStart::prepare(
+            &bare_root,
+            plain.request(&bare_root, plain.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tool_names(&server.requests.lock().unwrap()[0].body),
+        ["TeamChatHistory", "TeamKnowledge"]
+    );
+
+    let (_temp, root) = root();
+    let task = delegating_task();
+    let server = Server::new(vec![
+        // A Bot that was not offered: refused inside the worker, never sent.
+        Reply::Tool(
+            "TeamDelegate",
+            json!({"target":"sharedbot_other","request":"Find it.","expectReply":false}),
+        ),
+        // Not exactly a target, a request and whether to wait.
+        Reply::Tool("TeamDelegate", hand_off()),
+        Reply::Tool("TeamDelegate", delegation(false)),
+        Reply::Text("Research is on it.".into()),
+    ])
+    .await;
+    let broker = list_broker(&root, vec![sent_to_research()]);
+    let result = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Research is on it.");
+
+    // Only the well-formed call to the offered Bot reached the host, named by its durable step.
+    let seen = broker.operations.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0.tool, TeamOperationTool::Delegate);
+    assert_eq!(
+        seen[0].0.logical_step_id.as_deref(),
+        Some(format!("{}/t0/c2", task.task_id).as_str())
+    );
+    assert_eq!(seen[0].0.approval_ref, None);
+    assert_eq!(seen[0].0.arguments, hand_off());
+    assert!(seen[0].1, "the call row was durable before the host saw it");
+
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(
+        tool_names(&requests[0].body),
+        [
+            "TeamAskRequester",
+            "TeamChatHistory",
+            "TeamDelegate",
+            "TeamKnowledge"
+        ]
+    );
+    // The model is told whom it may ask, and that the reply is data.
+    let tool = wire_tool(&requests[0].body, "TeamDelegate");
+    let description = tool["function"]["description"].as_str().unwrap();
+    assert!(
+        description.contains("\"sharedbot_research\" (Research): Looks up the 2026 figures."),
+        "{description}"
+    );
+    assert!(description.contains("untrusted data"), "{description}");
+    assert_eq!(
+        tool["function"]["parameters"]["properties"]["target"]["enum"],
+        json!(["sharedbot_research"])
+    );
+    assert_eq!(
+        tool["function"]["parameters"]["required"],
+        json!(["target", "request", "expectReply"])
+    );
+    let last = tool_results(&requests[3].body);
+    assert_eq!(last.len(), 3);
+    assert!(result_text(&last[0]).contains("InputValidationError"));
+    assert!(result_text(&last[1]).contains("InputValidationError"));
+    assert_eq!(
+        result_text(&last[2]),
+        "Your request was sent to Research. It answers in the Chat itself."
+    );
+    assert_legal_sequence(&requests[3].body);
+}
+
+#[tokio::test]
+async fn a_delegation_that_waits_pauses_the_task_and_what_the_host_says_is_the_result_of_the_call()
+{
+    let (_temp, root) = root();
+    let task = delegating_task();
+    let server = Server::new(vec![
+        Reply::Tool("TeamDelegate", delegation(true)),
+        Reply::Text("Per Research, revenue was 12.4 million.".into()),
+    ])
+    .await;
+    let broker = Arc::new(Broker::default());
+    let paused = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(paused.outcome, TeamProcessOutcome::Waiting);
+    assert_eq!(paused.text, "");
+    assert_eq!(server.count(), 1);
+    assert!(
+        broker.operations.lock().unwrap().is_empty(),
+        "a delegation that waits goes with the pause, not as an operation"
+    );
+
+    let inspected = checkpoint(&root, &task);
+    assert_eq!(inspected.phase, TeamTaskPhase::InFlight);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    assert_eq!(inspected.pending_tool_calls.len(), 1);
+    assert_eq!(inspected.pending_tool_calls[0].tool_name, "TeamDelegate");
+    assert!(!inspected.pending_tool_calls[0].read_only);
+    let wait = inspected
+        .wait
+        .clone()
+        .expect("the checkpoint reports the wait");
+    assert_eq!(wait.kind, TeamWaitKind::Delegation);
+    assert_eq!(wait.logical_step_id, format!("{}/t0/c0", task.task_id));
+    assert_eq!(
+        serde_json::from_str::<Value>(&wait.question).unwrap(),
+        delegation(true)
+    );
+    assert!(wait.wait_id.starts_with("wait_") && wait.wait_id.len() == 45);
+    assert_eq!(wait.request_digest.len(), 64);
+    assert_eq!(checkpoint(&root, &task), inspected);
+
+    // No answer, or one that carries an approval, never reaches the model.
+    let silent = run_to_end(
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await;
+    assert!(
+        matches!(silent, Err(TeamProcessError::NotContinuable)),
+        "{silent:?}"
+    );
+    let again = checkpoint(&root, &task);
+    let approving = run_to_end(
+        replied(
+            &root,
+            &task,
+            &server.endpoint,
+            3,
+            &again.checkpoint_digest,
+            &wait.wait_id,
+            "Research replied",
+            Some(true),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await;
+    assert!(
+        matches!(approving, Err(TeamProcessError::NotContinuable)),
+        "{approving:?}"
+    );
+    assert_eq!(server.count(), 1);
+
+    let ready = checkpoint(&root, &task);
+    assert_eq!(
+        ready.wait.as_ref(),
+        Some(&wait),
+        "the wait survives refused attempts"
+    );
+    let result = run_to_end(
+        answered(
+            &root,
+            &task,
+            &server.endpoint,
+            4,
+            &ready.checkpoint_digest,
+            &wait.wait_id,
+            "Research replied:\n\nREPLY_SENTINEL revenue was 12.4 million",
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Per Research, revenue was 12.4 million.");
+    assert_eq!(server.count(), 2);
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    let results = tool_results(&second);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["tool_call_id"], "call_fixture_0");
+    assert!(result_text(&results[0]).contains("REPLY_SENTINEL revenue was 12.4 million"));
+    assert_eq!(
+        checkpoint(&root, &task).phase,
+        TeamTaskPhase::ResultRecorded
+    );
+}
+
+#[tokio::test]
+async fn a_delegation_wait_is_continued_only_by_a_process_that_offers_the_tool() {
+    let (_temp, root) = root();
+    let task = delegating_task();
+    let server = Server::new(vec![
+        Reply::Tool("TeamDelegate", delegation(true)),
+        Reply::Text("Done".into()),
+    ])
+    .await;
+    let paused = run_to_end(
+        TeamProcessStart::prepare(
+            &root,
+            task.request(&root, task.chat_model(&server.endpoint)),
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(paused.outcome, TeamProcessOutcome::Waiting);
+    let inspected = checkpoint(&root, &task);
+    let wait = inspected.wait.clone().expect("the wait");
+
+    // The host that no longer offers any Bot cannot give the call its result.
+    let none = offered_delegates(&task, Vec::new());
+    let refused = run_to_end(
+        answered(
+            &root,
+            &none,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+            &wait.wait_id,
+            "Research replied",
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(TeamProcessError::NotContinuable)),
+        "{refused:?}"
+    );
+    assert_eq!(server.count(), 1);
+
+    let ready = checkpoint(&root, &task);
+    assert_eq!(ready.wait.as_ref(), Some(&wait));
+    let result = run_to_end(
+        answered(
+            &root,
+            &task,
+            &server.endpoint,
+            3,
+            &ready.checkpoint_digest,
+            &wait.wait_id,
+            "Research replied",
+        )
+        .unwrap(),
+        Arc::new(Broker::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+}
+
+#[tokio::test]
+async fn a_killed_delegation_is_repeated_as_the_same_operation_and_never_before_its_call_is_durable(
+) {
+    let (_temp, root) = root();
+    let task = delegating_task();
+    let server = Server::new(vec![
+        Reply::Tool("TeamDelegate", delegation(false)),
+        Reply::Text("Research is on it.".into()),
+    ])
+    .await;
+    let first_broker = list_broker(&root, vec![]);
+    let (handle, cancel) = first_run(&task, &root, &server.endpoint, first_broker.clone());
+    wait_operations(&first_broker, 1).await;
+    kill(handle, cancel).await;
+    let step = format!("{}/t0/c0", task.task_id);
+    {
+        let seen = first_broker.operations.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0.tool, TeamOperationTool::Delegate);
+        assert_eq!(seen[0].0.logical_step_id.as_deref(), Some(step.as_str()));
+        assert_eq!(seen[0].0.approval_ref, None);
+        assert_eq!(seen[0].0.arguments, hand_off());
+        assert!(
+            seen[0].1,
+            "the call row was durable before the host saw the call"
+        );
+    }
+
+    let inspected = checkpoint(&root, &task);
+    assert_eq!(inspected.phase, TeamTaskPhase::InFlight);
+    assert!(inspected.continuable, "{:?}", inspected.reason);
+    assert_eq!(inspected.pending_tool_calls.len(), 1);
+    assert_eq!(inspected.pending_tool_calls[0].tool_name, "TeamDelegate");
+    assert!(!inspected.pending_tool_calls[0].read_only);
+    assert!(
+        inspected.wait.is_none(),
+        "a delegation that does not wait for a reply is not a wait"
+    );
+
+    let second_broker = list_broker(&root, vec![sent_to_research()]);
+    let result = run_to_end(
+        continuation(
+            &root,
+            &task,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
+        second_broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert_eq!(result.text, "Research is on it.");
+    let repeated = second_broker.operations.lock().unwrap();
+    assert_eq!(repeated.len(), 1);
+    assert_eq!(repeated[0].0.tool, TeamOperationTool::Delegate);
+    assert_eq!(
+        repeated[0].0.logical_step_id.as_deref(),
+        Some(step.as_str())
+    );
+    assert_eq!(repeated[0].0.arguments, hand_off());
+    assert!(repeated[0].1);
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    let results = tool_results(&second);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["tool_call_id"], "call_fixture_0");
+    assert_eq!(
+        result_text(&results[0]),
+        "Your request was sent to Research. It answers in the Chat itself."
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_delegation_is_not_sent_to_a_bot_that_is_no_longer_offered() {
+    let (_temp, root) = root();
+    let task = delegating_task();
+    let server = Server::new(vec![
+        Reply::Tool("TeamDelegate", delegation(false)),
+        Reply::Text("Nobody to ask".into()),
+    ])
+    .await;
+    let inspected = delegation_in_flight(&task, &root, &server).await;
+
+    // The next host offers another Bot only: the schema no longer admits the Bot of the call.
+    let other = offered_delegates(
+        &task,
+        vec![TeamDelegateOffer {
+            id: "sharedbot_other".into(),
+            name: "Other".into(),
+            description: None,
+        }],
+    );
+    let second_broker = list_broker(&root, vec![sent_to_research()]);
+    let result = run_to_end(
+        continuation(
+            &root,
+            &other,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
+        second_broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert!(
+        second_broker.operations.lock().unwrap().is_empty(),
+        "the host was asked about a Bot that is no longer offered"
+    );
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    let refused = result_text(&tool_results(&second)[0]);
+    assert!(refused.contains("InputValidationError"), "{refused}");
+    assert!(
+        refused.contains("sharedbot_other") && !refused.contains("sharedbot_research"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_delegation_is_not_sent_when_no_bot_is_offered_any_more() {
+    let (_temp, root) = root();
+    let task = delegating_task();
+    let server = Server::new(vec![
+        Reply::Tool("TeamDelegate", delegation(false)),
+        Reply::Text("Nobody to ask".into()),
+    ])
+    .await;
+    let inspected = delegation_in_flight(&task, &root, &server).await;
+
+    // The tool does not exist in the next process, so nothing can reach a host.
+    let none = offered_delegates(&task, Vec::new());
+    let second_broker = list_broker(&root, vec![sent_to_research()]);
+    let result = run_to_end(
+        continuation(
+            &root,
+            &none,
+            &server.endpoint,
+            2,
+            &inspected.checkpoint_digest,
+        )
+        .unwrap(),
+        second_broker.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    assert!(second_broker.operations.lock().unwrap().is_empty());
+    let second = server.requests.lock().unwrap()[1].body.clone();
+    assert_legal_sequence(&second);
+    assert_eq!(
+        tool_names(&second),
+        ["TeamAskRequester", "TeamChatHistory", "TeamKnowledge"],
+        "no delegation tool without an offer"
     );
     assert_eq!(tool_results(&second).len(), 1);
 }

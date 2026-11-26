@@ -9,6 +9,7 @@ mod checkpoint;
 mod data;
 mod data_tools;
 mod decline_tool;
+mod delegate_tool;
 mod interaction;
 pub(crate) mod list_tools;
 mod local_app_tools;
@@ -21,6 +22,7 @@ pub use checkpoint::{
 };
 pub use data::TeamDataRef;
 pub use data_tools::TeamDatasetOffer;
+pub use delegate_tool::TeamDelegateOffer;
 pub use list_tools::{
     TeamListApproval, TeamOperationRequest, TeamOperationResult, TeamOperationTool, TeamSharedList,
 };
@@ -131,6 +133,11 @@ pub struct TeamProcessRequest {
     /// operation ledger. At most 16 apps. Ignored on routes without
     /// continuation support, where an interrupted call could not be finished.
     pub local_apps: Vec<TeamLocalAppOffer>,
+    /// Offer the Bot a tool to hand part of the request to one of these other
+    /// Bots of the Chat, with or without waiting for its reply. At most 20
+    /// Bots. Ignored on routes without continuation support, where an
+    /// interrupted delegation could not be finished.
+    pub delegates: Vec<TeamDelegateOffer>,
     /// Nobody asked the Bot for this task: offer it the tool that leaves the
     /// message unanswered. The task then ends as `Declined` and posts nothing.
     pub may_decline: bool,
@@ -412,6 +419,7 @@ impl TeamProcessStart {
             || request.shared_list.is_some()
             || !request.shared_data.is_empty()
             || !request.local_apps.is_empty()
+            || !request.delegates.is_empty()
             || request.may_decline
             || !request.knowledge.is_empty()
         {
@@ -548,6 +556,14 @@ impl TeamProcessStart {
                     Vec::new()
                 }
             },
+            delegates: {
+                delegate_tool::validate_offers(&request.delegates)?;
+                if checkpoint::route_supports_continuation(protocol) {
+                    request.delegates
+                } else {
+                    Vec::new()
+                }
+            },
             may_decline: request.may_decline,
             addressed: request.addressed,
         };
@@ -667,6 +683,7 @@ impl TeamProcessStart {
                 self.bootstrap.private_data,
                 &self.bootstrap.shared_data,
                 &self.bootstrap.local_apps,
+                &self.bootstrap.delegates,
                 self.bootstrap
                     .shared_list
                     .as_ref()
@@ -724,6 +741,7 @@ async fn broker_exchange(
     private_data: bool,
     shared_data: &[TeamDatasetOffer],
     local_apps: &[TeamLocalAppOffer],
+    delegates: &[TeamDelegateOffer],
     approval: TeamListApproval,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     use protocol::{ParentFrame, WorkerFrame};
@@ -792,6 +810,11 @@ async fn broker_exchange(
                     request.tool,
                     TeamOperationTool::LocalAppTools | TeamOperationTool::LocalAppCall
                 ) && !local_app_tools::permitted(local_apps, request.tool, &request.arguments)
+                {
+                    return Err(TeamProcessError::Protocol);
+                }
+                if request.tool == TeamOperationTool::Delegate
+                    && !delegate_tool::permitted(delegates, &request.arguments)
                 {
                     return Err(TeamProcessError::Protocol);
                 }
@@ -1109,6 +1132,14 @@ mod local_app_broker_tests {
         apps: &[TeamLocalAppOffer],
         private_data: bool,
     ) -> (Option<TeamProcessError>, Vec<TeamOperationRequest>) {
+        exchange_with(request, apps, &[], private_data).await
+    }
+    async fn exchange_with(
+        request: TeamOperationRequest,
+        apps: &[TeamLocalAppOffer],
+        delegates: &[TeamDelegateOffer],
+        private_data: bool,
+    ) -> (Option<TeamProcessError>, Vec<TeamOperationRequest>) {
         let broker = Arc::new(Recorder::default());
         // What the worker writes is what the parent reads, and the other way round.
         let (mut worker_out, mut parent_reads) = tokio::io::duplex(1 << 20);
@@ -1123,6 +1154,7 @@ mod local_app_broker_tests {
             private_data,
             &[],
             apps,
+            delegates,
             TeamListApproval::None,
         ));
         let worker = async {
@@ -1210,6 +1242,73 @@ mod local_app_broker_tests {
         }
         // A private Data workspace has no operations at all.
         let (error, seen) = exchange(listing("notes"), &offers(), true).await;
+        assert!(matches!(error, Some(TeamProcessError::Protocol)));
+        assert!(seen.is_empty());
+    }
+    fn delegates() -> Vec<TeamDelegateOffer> {
+        vec![TeamDelegateOffer {
+            id: "sharedbot_research".into(),
+            name: "Research".into(),
+            description: None,
+        }]
+    }
+    fn delegation(target: &str, step: Option<&str>) -> TeamOperationRequest {
+        TeamOperationRequest {
+            id: "interaction-1".into(),
+            tool: TeamOperationTool::Delegate,
+            logical_step_id: step.map(str::to_owned),
+            approval_ref: None,
+            arguments: json!({"target":target,"request":"Find the 2026 figures."}),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_host_is_asked_only_to_delegate_to_offered_bots() {
+        let ask = delegation("sharedbot_research", Some("task_1/t0/c1"));
+        let (error, seen) = exchange_with(ask.clone(), &[], &delegates(), false).await;
+        assert!(error.is_none());
+        assert_eq!(seen, [ask]);
+
+        // A Bot that was not offered never reaches the host, nor does anything when no Bot is offered.
+        for (request, offers) in [
+            (
+                delegation("sharedbot_other", Some("task_1/t0/c1")),
+                delegates(),
+            ),
+            (
+                delegation("sharedbot_research", Some("task_1/t0/c1")),
+                vec![],
+            ),
+        ] {
+            let (error, seen) = exchange_with(request.clone(), &[], &offers, false).await;
+            assert!(
+                matches!(error, Some(TeamProcessError::Protocol)),
+                "{request:?}"
+            );
+            assert!(seen.is_empty(), "{request:?}");
+        }
+        // A delegation without its durable step, for another task, with a flag of its own or in a private workspace never does.
+        let mut flagged = delegation("sharedbot_research", Some("task_1/t0/c1"));
+        flagged.arguments["expectReply"] = json!(false);
+        for request in [
+            delegation("sharedbot_research", None),
+            delegation("sharedbot_research", Some("task_2/t0/c1")),
+            flagged,
+        ] {
+            let (error, seen) = exchange_with(request.clone(), &[], &delegates(), false).await;
+            assert!(
+                matches!(error, Some(TeamProcessError::Protocol)),
+                "{request:?}"
+            );
+            assert!(seen.is_empty(), "{request:?}");
+        }
+        let (error, seen) = exchange_with(
+            delegation("sharedbot_research", Some("task_1/t0/c1")),
+            &[],
+            &delegates(),
+            true,
+        )
+        .await;
         assert!(matches!(error, Some(TeamProcessError::Protocol)));
         assert!(seen.is_empty());
     }

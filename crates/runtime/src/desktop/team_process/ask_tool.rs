@@ -2,18 +2,31 @@
 //! it: the worker leaves the call unfinished on the durable transcript and
 //! exits as `waiting`. The process that continues the task replays the call
 //! and this tool then returns the requester's answer as an ordinary result.
-use super::checkpoint::{ask_question, ASK_TOOL};
+//! The list-change proposal and the delegation to another Bot that waits for
+//! its reply (`delegate_tool`) open their waits through the same arbiter.
+use super::checkpoint::{ask_question, TeamWaitKind, ASK_TOOL};
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
 use std::sync::{Arc, Mutex};
 use tool_api::tool_trait::*;
 
-/// The requester's reply to the open wait. `approved` is set exactly for the
-/// reply to a list-change proposal.
+/// The reply to the open wait. `kind` is the kind of wait it answers and
+/// `approved` is set exactly for the reply to a list-change proposal. For a
+/// delegation, `text` is what the host made of the other Bot's outcome and
+/// `message_id` names that delegation.
 pub(super) struct WaitReply {
+    pub kind: TeamWaitKind,
     pub wait_id: String,
     pub message_id: String,
     pub text: String,
     pub approved: Option<bool>,
+}
+/// What a call that opens a wait is waiting for. A proposal and a delegation
+/// name their wait, which every process derives from the call's durable step.
+#[derive(Clone, Copy)]
+pub(super) enum Wait<'a> {
+    Question,
+    Proposal(&'a str),
+    Delegation(&'a str),
 }
 enum Mode {
     /// The model loop is running: the first well-formed question or proposal pauses the task.
@@ -43,18 +56,24 @@ impl AskRequester {
     pub(super) async fn asked(&self) {
         self.asked.notified().await;
     }
-    /// One wait is open at a time, whichever tool opens it. `proposal` is the
-    /// wait id of a list-change proposal and `None` for a question. `Ok(Some)`
-    /// is the requester's reply to this call: a reply to a question never
-    /// reaches a proposal, nor an approval any call but the one it names.
-    /// `Ok(None)`: this call opened the wait and must `park`, never return.
-    pub(super) fn open(&self, proposal: Option<&str>) -> Result<Option<WaitReply>, &'static str> {
+    /// One wait is open at a time, whichever tool opens it. `Ok(Some)` is the
+    /// reply to this call: a reply to a question never reaches a proposal or a
+    /// delegation, nor an approval or an outcome any call but the one it
+    /// names. `Ok(None)`: this call opened the wait and must `park`, never return.
+    pub(super) fn open(&self, wait: Wait<'_>) -> Result<Option<WaitReply>, &'static str> {
         let mut mode = self.mode.lock().unwrap_or_else(|e| e.into_inner());
         match &mut *mode {
             Mode::Replay { answer } => {
-                let meant = answer.as_ref().is_some_and(|reply| match proposal {
-                    Some(wait_id) => reply.approved.is_some() && reply.wait_id == wait_id,
-                    None => reply.approved.is_none(),
+                let meant = answer.as_ref().is_some_and(|reply| match wait {
+                    Wait::Question => reply.kind == TeamWaitKind::HumanInput,
+                    Wait::Proposal(wait_id) => {
+                        reply.kind == TeamWaitKind::ToolApproval
+                            && reply.approved.is_some()
+                            && reply.wait_id == wait_id
+                    }
+                    Wait::Delegation(wait_id) => {
+                        reply.kind == TeamWaitKind::Delegation && reply.wait_id == wait_id
+                    }
                 });
                 if meant {
                     Ok(answer.take())
@@ -88,8 +107,8 @@ pub(super) fn register(registry: &mut tool_api::ToolRegistry, ask: Arc<AskReques
         schema: generated_builtin_schema(&schema),
     }));
 }
-const ONE_AT_A_TIME: &str =
-    "Only one question or change proposal can be open at a time. Try again after the requester has replied.";
+pub(super) const ONE_AT_A_TIME: &str =
+    "Only one question, change proposal or delegation to wait for can be open at a time. Try again after the requester has replied.";
 #[async_trait::async_trait]
 impl Tool for AskTool {
     fn name(&self) -> &str {
@@ -156,7 +175,7 @@ impl Tool for AskTool {
         }
         let WaitReply {
             message_id, text, ..
-        } = match self.ask.open(None) {
+        } = match self.ask.open(Wait::Question) {
             Err(reason) => return Err(ToolError::Internal(reason.into())),
             Ok(None) => self.ask.park().await,
             Ok(Some(reply)) => reply,

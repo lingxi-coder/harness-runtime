@@ -8,8 +8,8 @@ mod team_account_fixture;
 
 use harness_runtime::desktop::team_invocation::TeamInvocationLimits;
 use harness_runtime::desktop::team_process::{
-    TeamLocalAppOffer, TeamProcessDeadline, TeamProcessError, TeamProcessOutcome,
-    TeamProcessRequest, TeamProcessStart,
+    TeamDelegateOffer, TeamLocalAppOffer, TeamProcessDeadline, TeamProcessError,
+    TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
 };
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -99,6 +99,7 @@ fn request(
         shared_list: None,
         shared_data: Vec::new(),
         local_apps: Vec::new(),
+        delegates: Vec::new(),
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
     }
 }
@@ -502,6 +503,17 @@ async fn private_data_worker_excludes_shared_history_tools_and_artifacts() {
         TeamProcessStart::prepare_private(&private_root, offered),
         Err(TeamProcessError::Protocol)
     ));
+    let mut delegating = request(&private_root, server.endpoint.clone(), id, input.clone());
+    delegating.knowledge.clear();
+    delegating.delegates = vec![TeamDelegateOffer {
+        id: "sharedbot_research".into(),
+        name: "Research".into(),
+        description: None,
+    }];
+    assert!(matches!(
+        TeamProcessStart::prepare_private(&private_root, delegating),
+        Err(TeamProcessError::Protocol)
+    ));
     let mut private = request(&private_root, server.endpoint.clone(), id, input);
     private.knowledge.clear();
     let broker = Arc::new(Broker::default());
@@ -653,6 +665,84 @@ async fn an_invalid_local_app_offer_is_refused_before_any_process_starts() {
             batch(0, 1, 0),
         );
         req.local_apps = offers;
+        assert!(matches!(
+            TeamProcessStart::prepare(&root, req),
+            Err(TeamProcessError::Protocol)
+        ));
+    }
+    // Nothing was admitted.
+    assert_eq!(
+        harness_runtime::desktop::team_process::inspect_scope(&root, &scope())
+            .unwrap()
+            .session_revision,
+        0
+    );
+}
+#[tokio::test]
+async fn delegation_is_not_offered_on_a_route_that_cannot_resume_a_call() {
+    let (_temp, root) = root();
+    let server = Server::new(vec![Reply::Text("Nobody to ask".into())]).await;
+    let mut req = request(
+        &root,
+        server.endpoint.clone(),
+        uuid::Uuid::new_v4(),
+        batch(0, 1, 0),
+    );
+    // Only a route whose interrupted task can be continued may delegate: a request that
+    // died in flight, or a wait for its reply, could otherwise never be finished.
+    req.delegates = vec![TeamDelegateOffer {
+        id: "sharedbot_research".into(),
+        name: "Research".into(),
+        description: Some("Finds the 2026 figures".into()),
+    }];
+    let result = run(&root, req).await.unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed);
+    let records = server.requests.lock().unwrap();
+    let names = records[0].body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from(["TeamChatHistory", "TeamKnowledge"])
+    );
+    assert!(!records[0].body.to_string().contains("TeamDelegate"));
+    assert!(!records[0]
+        .body
+        .to_string()
+        .contains("Finds the 2026 figures"));
+}
+#[tokio::test]
+async fn an_invalid_delegate_offer_is_refused_before_any_process_starts() {
+    let (_temp, root) = root();
+    let offer = |id: &str, name: &str| TeamDelegateOffer {
+        id: id.into(),
+        name: name.into(),
+        description: None,
+    };
+    let too_many: Vec<_> = (0..21).map(|n| offer(&format!("bot_{n}"), "Bot")).collect();
+    for offers in [
+        too_many,
+        vec![offer("research", "Research"), offer("research", "Again")],
+        vec![offer("", "Research")],
+        vec![offer("research", "  ")],
+        vec![offer(&"a".repeat(129), "Research")],
+        vec![offer("re\nsearch", "Research")],
+        vec![offer("research", &"n".repeat(121))],
+        vec![TeamDelegateOffer {
+            description: Some("d".repeat(501)),
+            ..offer("research", "Research")
+        }],
+    ] {
+        let mut req = request(
+            &root,
+            "http://127.0.0.1:9".into(),
+            uuid::Uuid::new_v4(),
+            batch(0, 1, 0),
+        );
+        req.delegates = offers;
         assert!(matches!(
             TeamProcessStart::prepare(&root, req),
             Err(TeamProcessError::Protocol)

@@ -920,6 +920,7 @@ mod tests {
                 list: None,
                 data: None,
                 local_apps,
+                delegate: None,
                 no_reply: None,
             })
         };

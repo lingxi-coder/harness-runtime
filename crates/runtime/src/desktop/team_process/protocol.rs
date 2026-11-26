@@ -47,6 +47,9 @@ pub(super) struct Bootstrap {
     /// Register the Local App tools for this process: the apps the host lets this run use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_apps: Vec<super::TeamLocalAppOffer>,
+    /// Register the delegation tool for this process: the Bots the host lets this run delegate to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegates: Vec<super::TeamDelegateOffer>,
     /// Register the no-reply tool for this process.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub may_decline: bool,
@@ -325,6 +328,54 @@ mod tests {
             "credentials":{"provider_accounts":{"storeScope":"fixture","configRevision":0,"accounts":[]},
                 "provider_account_home":"/tmp/team/home","provider_account_profiles":[]}
         })
+    }
+
+    #[test]
+    fn delegates_are_optional_in_the_bootstrap_and_strict_when_present() {
+        let parse = |value: serde_json::Value| serde_json::from_value::<Bootstrap>(value);
+        let without = parse(bootstrap_json()).unwrap();
+        assert!(without.delegates.is_empty());
+        assert!(serde_json::to_value(&without)
+            .unwrap()
+            .get("delegates")
+            .is_none());
+        let mut value = bootstrap_json();
+        value["delegates"] = json!([]);
+        assert!(parse(value).unwrap().delegates.is_empty());
+
+        let mut value = bootstrap_json();
+        value["delegates"] = json!([
+            {"id":"sharedbot_research","name":"Research","description":"Looks things up"},
+            {"id":"sharedbot_writer","name":"Writer"}
+        ]);
+        let with = parse(value.clone()).unwrap();
+        assert_eq!(with.delegates.len(), 2);
+        assert_eq!(with.delegates[0].id, "sharedbot_research");
+        assert_eq!(with.delegates[1].description, None);
+        crate::desktop::team_process::delegate_tool::validate_offers(&with.delegates).unwrap();
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["delegates"],
+            value["delegates"]
+        );
+
+        // Unknown keys are refused, inside an offer and beside the list.
+        let mut value = bootstrap_json();
+        value["delegates"] = json!([{"id":"a","name":"A","maintainer":"x"}]);
+        assert!(parse(value).is_err());
+        let mut value = bootstrap_json();
+        value["delegates"] = json!([{"id":"a"}]);
+        assert!(parse(value).is_err());
+
+        // Parsing says nothing about the limits; the worker checks them before it registers a tool.
+        let mut value = bootstrap_json();
+        value["delegates"] = json!((0..21)
+            .map(|n| json!({"id":format!("bot_{n}"),"name":"Bot"}))
+            .collect::<Vec<_>>());
+        let crowded = parse(value).unwrap();
+        assert!(
+            crate::desktop::team_process::delegate_tool::validate_offers(&crowded.delegates)
+                .is_err()
+        );
     }
 
     #[test]

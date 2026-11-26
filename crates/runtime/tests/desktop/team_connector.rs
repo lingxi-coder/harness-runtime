@@ -152,6 +152,23 @@ fn inspect_task_and_continue_reject_malformed_bootstraps_before_any_io() {
             "inspect_scope",
             json!({"localApps":[{"id":"notes","name":"Notes","path":"/Users/owner/notes"}]}),
         ),
+        // The same for the Bots a run may delegate to.
+        (
+            "inspect_scope",
+            json!({"delegates":[{"id":"research","name":"Research"}]}),
+        ),
+        (
+            "inspect_result",
+            json!({"taskId":"task_00000001","delegates":[{"id":"research","name":"Research"}]}),
+        ),
+        (
+            "inspect_task",
+            json!({"taskId":"task_00000001","model":chat_model(),"delegates":[{"id":"research","name":"Research"}]}),
+        ),
+        (
+            "inspect_scope",
+            json!({"delegates":[{"id":"research","name":"Research","path":"/Users/owner"}]}),
+        ),
     ] {
         let (result, success) = invoke_with(3, false, kind, extra);
         assert!(!success, "{kind}");

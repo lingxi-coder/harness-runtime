@@ -153,6 +153,8 @@ pub(crate) struct TeamReadTools {
     pub(super) data: Option<Arc<super::data_tools::TeamDataTools>>,
     /// Present when the host offers this run Local Apps.
     pub(super) local_apps: Option<Arc<super::local_app_tools::TeamLocalAppTools>>,
+    /// Present when the host offers this run other Bots to delegate to.
+    pub(super) delegate: Option<Arc<super::delegate_tool::TeamDelegateTools>>,
     /// Present when nobody asked the Bot for this task and it may stay silent.
     pub(super) no_reply: Option<Arc<super::decline_tool::NoReply>>,
 }
@@ -183,6 +185,9 @@ impl TeamReadTools {
             names.push(super::local_app_tools::TOOLS.to_owned());
             names.push(super::local_app_tools::CALL.to_owned());
         }
+        if self.delegate.is_some() {
+            names.push(super::delegate_tool::DELEGATE.to_owned());
+        }
         if self.no_reply.is_some() {
             names.push(super::checkpoint::NO_REPLY_TOOL.to_owned());
         }
@@ -209,6 +214,9 @@ pub(crate) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamRea
     }
     if let Some(apps) = &tools.local_apps {
         super::local_app_tools::register(registry, apps.clone());
+    }
+    if let Some(delegate) = &tools.delegate {
+        super::delegate_tool::register(registry, delegate.clone());
     }
     if let Some(choice) = &tools.no_reply {
         super::decline_tool::register(registry, choice.clone());

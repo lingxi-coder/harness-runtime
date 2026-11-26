@@ -42,6 +42,7 @@ struct Start {
     shared_list: Option<team_process::TeamSharedList>,
     shared_data: Option<Vec<team_process::TeamDatasetOffer>>,
     local_apps: Option<Vec<team_process::TeamLocalAppOffer>>,
+    delegates: Option<Vec<team_process::TeamDelegateOffer>>,
     may_decline: Option<bool>,
     addressed: Option<bool>,
 }
@@ -92,6 +93,7 @@ impl Start {
             || self.shared_list.is_some()
             || self.shared_data.is_some()
             || self.local_apps.is_some()
+            || self.delegates.is_some()
             || self.may_decline.is_some()
             || self.addressed.is_some();
         let all = self.task_id.is_some()
@@ -128,6 +130,7 @@ impl Start {
                 && self.shared_list.is_none()
                 && self.shared_data.is_none()
                 && self.local_apps.is_none()
+                && self.delegates.is_none()
                 && self.may_decline.is_none()
                 && self.addressed.is_none();
             if !only_task_and_model {
@@ -184,6 +187,7 @@ impl Start {
             shared_list: self.shared_list,
             shared_data: self.shared_data.unwrap_or_default(),
             local_apps: self.local_apps.unwrap_or_default(),
+            delegates: self.delegates.unwrap_or_default(),
             may_decline: self.may_decline.unwrap_or(false),
             addressed: self.addressed.unwrap_or(false),
         })
@@ -788,5 +792,53 @@ mod tests {
             start(&root, "run", fields).is_err(),
             "the start message is camelCase"
         );
+    }
+    fn bots() -> Value {
+        json!([{"id":"sharedbot_research","name":"Research","description":"Looks things up"},{"id":"sharedbot_writer","name":"Writer"}])
+    }
+
+    #[test]
+    fn delegates_are_part_of_a_run_and_a_continue_and_of_nothing_else() {
+        let (_directory, root) = private_root();
+        let with = |kind: &str, mut fields: Value| {
+            fields["delegates"] = bots();
+            start(&root, kind, fields).unwrap().validate()
+        };
+        assert!(with("run", run_fields()).is_ok());
+        let mut resumed = run_fields();
+        resumed["continuation"] = json!({"epoch":2,"expected_checkpoint_digest":"0".repeat(64)});
+        assert!(with("continue", resumed).is_ok());
+        // The offer reaches the process request as the host sent it.
+        let mut fields = run_fields();
+        fields["delegates"] = bots();
+        let parsed = start(&root, "run", fields).unwrap();
+        assert_eq!(
+            parsed
+                .delegates
+                .as_ref()
+                .map(|bots| bots.iter().map(|b| b.id.as_str()).collect::<Vec<_>>()),
+            Some(vec!["sharedbot_research", "sharedbot_writer"])
+        );
+        // Without the key the run delegates to nobody.
+        let plain = start(&root, "run", run_fields()).unwrap();
+        assert!(plain.validate().is_ok());
+        assert!(plain.delegates.is_none());
+        // An inspection takes no capability.
+        assert!(with("inspect_scope", json!({})).is_err());
+        assert!(with("inspect_result", json!({"taskId":"task_00000001"})).is_err());
+        assert!(with(
+            "inspect_task",
+            json!({"taskId":"task_00000001","model":model()})
+        )
+        .is_err());
+        // An offer says nothing but who the Bot is.
+        for refused in [
+            json!([{"id":"sharedbot_research","name":"Research","maintainer":"x"}]),
+            json!([{"id":"sharedbot_research"}]),
+        ] {
+            let mut fields = run_fields();
+            fields["delegates"] = refused;
+            assert!(start(&root, "run", fields).is_err());
+        }
     }
 }

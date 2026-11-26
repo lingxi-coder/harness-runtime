@@ -74,20 +74,24 @@ pub struct TeamPendingToolCall {
     pub read_only: bool,
 }
 
-/// What the requester is asked for: an answer in their own words, or a yes or
-/// no to one exact operation.
+/// What a task waits for: the requester's answer in their own words, their
+/// yes or no to one exact operation, or the reply of another Bot that this
+/// task delegated part of the request to.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamWaitKind {
     HumanInput,
     ToolApproval,
+    Delegation,
 }
 
 /// What an in-flight task is blocked on: its first unfinished, well-formed
-/// ask call or list-change proposal. `wait_id` is derived from the logical
-/// step, so every process and the host name the same wait. For an approval,
-/// `question` is the proposed write as compact JSON and `request_digest`
-/// covers it, so an approval is of exactly these parameters.
+/// ask call, list-change proposal or delegation that waits for a reply.
+/// `wait_id` is derived from the logical step, so every process and the host
+/// name the same wait. For an approval, `question` is the proposed write as
+/// compact JSON and `request_digest` covers it, so an approval is of exactly
+/// these parameters; for a delegation it is the call as compact JSON
+/// (`target`, `request`, `expectReply`), which the host sends as the delegation.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamTaskWait {
@@ -533,6 +537,7 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
                         super::data_tools::WRITE,
                         super::data_tools::HANDOFF,
                         super::local_app_tools::CALL,
+                        super::delegate_tool::DELEGATE,
                     ]
                     .contains(&c.tool_name.as_str())
             }) =>
@@ -556,6 +561,14 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
                 LIST_PROPOSE_TOOL => {
                     super::list_tools::validate_write(&asked).ok()?;
                     (TeamWaitKind::ToolApproval, asked.to_string())
+                }
+                // A delegation that does not wait for the reply is an operation
+                // of the host, named by its step; only one that waits is a wait.
+                super::delegate_tool::DELEGATE
+                    if super::delegate_tool::request_of(&asked)
+                        .is_some_and(|call| call.expect_reply) =>
+                {
+                    (TeamWaitKind::Delegation, asked.to_string())
                 }
                 _ => return None,
             };
@@ -624,6 +637,9 @@ fn wait_of(
         }
         TeamWaitKind::ToolApproval => {
             serde_json::json!({"domain":"lingxi-team-approval-1","taskId":task_id,"waitId":wait_id,"tool":LIST_WRITE_TOOL,"arguments":question})
+        }
+        TeamWaitKind::Delegation => {
+            serde_json::json!({"domain":"lingxi-team-delegation-1","taskId":task_id,"waitId":wait_id,"tool":super::delegate_tool::DELEGATE,"arguments":question})
         }
     };
     let request_digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));

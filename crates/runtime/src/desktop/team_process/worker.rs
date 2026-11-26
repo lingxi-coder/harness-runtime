@@ -57,6 +57,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             || bootstrap.shared_list.is_some()
             || !bootstrap.shared_data.is_empty()
             || !bootstrap.local_apps.is_empty()
+            || !bootstrap.delegates.is_empty()
             || bootstrap.may_decline)
     {
         return Err(TeamProcessError::Protocol);
@@ -181,6 +182,16 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             source: Default::default(),
         })
     });
+    super::delegate_tool::validate_offers(&bootstrap.delegates)?;
+    let delegate = (!bootstrap.delegates.is_empty()).then(|| {
+        Arc::new(super::delegate_tool::TeamDelegateTools {
+            bridge: bridge.clone(),
+            targets: bootstrap.delegates.clone(),
+            ask: ask.clone(),
+            task_id: bootstrap.task_id.clone(),
+            source: Default::default(),
+        })
+    });
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
@@ -189,6 +200,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         list: list.clone(),
         data: data.clone(),
         local_apps: local_apps.clone(),
+        delegate: delegate.clone(),
         no_reply: no_reply.clone(),
     }));
     let mut cfg = DesktopConfig::default();
@@ -205,7 +217,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,local_apps,no_reply,bootstrap.private_data).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,local_apps,delegate,no_reply,bootstrap.private_data).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -297,6 +309,7 @@ async fn run(
     list: Option<Arc<super::list_tools::TeamListTools>>,
     data: Option<Arc<super::data_tools::TeamDataTools>>,
     local_apps: Option<Arc<super::local_app_tools::TeamLocalAppTools>>,
+    delegate: Option<Arc<super::delegate_tool::TeamDelegateTools>>,
     no_reply: Option<Arc<super::decline_tool::NoReply>>,
     private_data: bool,
 ) -> Result<TeamProcessResult, TeamProcessError> {
@@ -331,6 +344,13 @@ async fn run(
     }
     if let Some(apps) = &local_apps {
         let _ = apps.source.set(super::list_tools::StepSource {
+            transcript: path.clone(),
+            scope: batch.scope(),
+            batch_id: batch.batch_id.clone(),
+        });
+    }
+    if let Some(delegate) = &delegate {
+        let _ = delegate.source.set(super::list_tools::StepSource {
             transcript: path.clone(),
             scope: batch.scope(),
             batch_id: batch.batch_id.clone(),
@@ -429,6 +449,7 @@ async fn run(
                 continuation,
                 captured.as_deref().unwrap_or_default(),
                 ask.is_some(),
+                delegate.is_some(),
             ) {
                 Ok(state) => Some(state),
                 Err(error) => {
@@ -704,6 +725,7 @@ fn verify_continuation(
     continuation: &super::TeamContinuation,
     captured_transcript: &str,
     can_answer: bool,
+    can_delegate: bool,
 ) -> Result<super::checkpoint::TaskState, TeamProcessError> {
     let cursor = rt.session_state.bot_chat_cursor();
     let admitted = rt
@@ -738,11 +760,12 @@ fn verify_continuation(
         return Err(TeamProcessError::NotContinuable);
     }
     // A waiting task continues only with the reply to exactly that wait, of
-    // the kind it asked for, in a process that offers the ask tool; any other
-    // task takes no answer.
+    // the kind it asked for, in a process that offers the ask tool (and, for a
+    // delegation, the delegation tool); any other task takes no answer.
     match (&state.checkpoint.wait, &continuation.answer) {
         (Some(wait), Some(answer))
             if can_answer
+                && (can_delegate || wait.kind != super::TeamWaitKind::Delegation)
                 && wait.wait_id == answer.wait_id
                 && (wait.kind == super::TeamWaitKind::ToolApproval)
                     == answer.approved.is_some() => {}
@@ -790,12 +813,18 @@ async fn run_continuation(
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
         if let Some(ask) = ask {
-            ask.begin_replay(answer.map(|a| super::ask_tool::WaitReply {
-                wait_id: a.wait_id.clone(),
-                message_id: a.message_id.clone(),
-                text: a.text.clone(),
-                approved: a.approved,
-            }));
+            let kind = state.checkpoint.wait.as_ref().map(|wait| wait.kind);
+            ask.begin_replay(
+                answer
+                    .zip(kind)
+                    .map(|(a, kind)| super::ask_tool::WaitReply {
+                        kind,
+                        wait_id: a.wait_id.clone(),
+                        message_id: a.message_id.clone(),
+                        text: a.text.clone(),
+                        approved: a.approved,
+                    }),
+            );
         }
         let replayed =
             orchestrator::replay_unfinished_read_only_tool_calls(&rt.orchestrator, calls).await;

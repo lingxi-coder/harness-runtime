@@ -66,6 +66,9 @@ pub enum TeamOperationTool {
     LocalAppTools,
     /// Write: one tool of one offered Local App, run once by the host.
     LocalAppCall,
+    /// Write: a request to one offered Bot that does not wait for its reply,
+    /// sent once by the host.
+    Delegate,
 }
 
 /// One request to the host's shared-list service. `logical_step_id` is present
@@ -121,6 +124,11 @@ impl TeamOperationRequest {
                         .as_deref()
                         .is_none_or(|step| valid_step(task_id, step))
                     && super::local_app_tools::request_app(self.tool, &self.arguments).is_some()
+            }
+            (TeamOperationTool::Delegate, Some(step)) => {
+                self.approval_ref.is_none()
+                    && valid_step(task_id, step)
+                    && super::delegate_tool::operation_target(&self.arguments).is_some()
             }
             _ => false,
         };
@@ -420,7 +428,7 @@ impl Tool for ListTool {
                 // The proposal is durable, so the wait every process derives
                 // from its step exists before this call can park on it.
                 let wait_id = super::checkpoint::wait_id(&step);
-                match ask.open(Some(&wait_id)) {
+                match ask.open(super::ask_tool::Wait::Proposal(&wait_id)) {
                     Err(reason) => return Err(ToolError::Internal(reason.into())),
                     Ok(None) => ask.park().await,
                     Ok(Some(reply)) if reply.approved != Some(true) => {
