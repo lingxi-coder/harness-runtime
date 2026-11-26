@@ -78,6 +78,12 @@ pub(crate) fn metadata_from_source(source: &str, session: SessionId) -> Vec<Sour
     let mut initial = None;
     let mut notification = None;
     for line in source.lines() {
+        if !session::jsonl::reader::may_contain_record_kind(
+            line,
+            &[CHECKPOINT_KIND, NOTIFICATION_KIND],
+        ) {
+            continue;
+        }
         let Ok(row) = Source::parse(line) else {
             continue;
         };

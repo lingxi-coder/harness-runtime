@@ -1093,6 +1093,9 @@ fn prompt_state_from_validated_source(
 ) {
     let mut matching = String::new();
     for line in source.lines() {
+        if !session::jsonl::reader::may_contain_record_kind(line, &["prompt_snapshot"]) {
+            continue;
+        }
         let Ok(row) = Utf16JsonProjection::parse(line) else {
             continue;
         };

@@ -14,6 +14,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Quickly rule out a row without any of the requested ASCII record names.
+/// A positive match still requires the exact JSON parser and field checks.
+#[must_use]
+pub fn may_contain_record_kind(line: &str, kinds: &[&str]) -> bool {
+    let bytes = line.as_bytes();
+    // A JSON Unicode escape can spell any letter in a record name.
+    if memchr::memmem::find(bytes, br"\u").is_some() {
+        return true;
+    }
+    let mut quotes = memchr::memchr_iter(b'"', bytes);
+    let Some(mut start) = quotes.next() else {
+        return false;
+    };
+    for end in quotes {
+        // Check adjacent quotes even when one occurs inside an escaped string.
+        // This can admit extra candidates but cannot hide a literal name.
+        if kinds.contains(&&line[start + 1..end]) {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
 // Transcript filenames and session IDs are UUIDs whose letter case is not
 // significant. Keep non-UUID keys unchanged for the reader's general callers.
 fn session_metadata_key(value: &str) -> String {
@@ -1244,6 +1268,21 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_kind_prefilter_keeps_exact_and_escaped_sources() {
+        let kinds = ["custom-title", "date_change", "prompt_snapshot"];
+        let image_record = format!(
+            r#"{{"type":"user","message":{{"data":"{}"}}}}"#,
+            "A".repeat(1024 * 1024)
+        );
+        assert!(!may_contain_record_kind(&image_record, &kinds));
+        assert!(!may_contain_record_kind(r#"{"type":"user","text":"some custom-title text"}"#, &kinds));
+        assert!(may_contain_record_kind(r#"{"value":"\"escaped\"","type":"custom-title"}"#, &kinds));
+        assert!(may_contain_record_kind(r#"{"attachment":{"type":"date_change"}}"#, &kinds));
+        assert!(may_contain_record_kind(r#"{"type":"cust\u006fm-title"}"#, &kinds));
+        assert!(may_contain_record_kind(r#"{"type":"prompt\u005fsnapshot"}"#, &kinds));
+    }
 
     fn attachment_row(payload_member: &str) -> String {
         let payload_member = if payload_member.is_empty() {

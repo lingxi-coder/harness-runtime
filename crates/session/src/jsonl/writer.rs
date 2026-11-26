@@ -2288,6 +2288,9 @@ impl JsonlWriter {
         ];
         let mut latest = std::collections::BTreeMap::new();
         for line in content.lines() {
+            if !crate::jsonl::reader::may_contain_record_kind(line, KINDS) {
+                continue;
+            }
             let Ok(row) = Utf16JsonProjection::parse(line) else {
                 continue;
             };
