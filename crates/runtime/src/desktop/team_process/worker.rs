@@ -458,7 +458,7 @@ async fn run(
                 continuation,
                 captured.as_deref().unwrap_or_default(),
                 ask.is_some(),
-                delegate.is_some(),
+                delegate.as_ref().map(|tools| tools.targets.as_slice()),
             ) {
                 Ok(state) => Some(state),
                 Err(error) => {
@@ -564,7 +564,17 @@ async fn run(
                             attempts: 0,
                             protocol,
                         })
-                        .is_ok_and(|state| state.checkpoint.wait.is_some());
+                        .ok()
+                        .and_then(|state| state.checkpoint.wait);
+                        // The first unfinished call must be the wait this
+                        // process opened. An earlier call of the response that
+                        // was refused has no result on the transcript yet, and
+                        // pausing would report it as the wait: the task fails
+                        // instead.
+                        if waiting.as_ref().is_some_and(|wait| !ask.opened(wait)) {
+                            return Err(TeamProcessError::Worker);
+                        }
+                        let waiting = waiting.is_some();
                         // Two sightings 50 ms apart let the response's own
                         // bookkeeping (cost journal) settle first.
                         if waiting && seen {
@@ -761,7 +771,7 @@ fn verify_continuation(
     continuation: &super::TeamContinuation,
     captured_transcript: &str,
     can_answer: bool,
-    can_delegate: bool,
+    delegates: Option<&[super::TeamDelegateOffer]>,
 ) -> Result<super::checkpoint::TaskState, TeamProcessError> {
     let cursor = rt.session_state.bot_chat_cursor();
     let admitted = rt
@@ -797,12 +807,26 @@ fn verify_continuation(
     }
     // A waiting task continues only with the reply to exactly that wait, of
     // the kind it asked for, in a process that offers the ask tool (and, for a
-    // delegation, the delegation tool); any other task takes no answer.
+    // delegation, the delegation tool with the called Bot among its offers, so
+    // the replayed call is not refused and the reply lost); any other task
+    // takes no answer.
+    let delegation_offered = |wait: &super::TeamTaskWait| {
+        delegates.is_some_and(|offers| {
+            serde_json::from_str::<serde_json::Value>(&wait.question)
+                .ok()
+                .is_some_and(|call| {
+                    super::delegate_tool::request_of(&call)
+                        .is_some_and(|call| offers.iter().any(|offer| offer.id == call.target))
+                })
+        })
+    };
     match (&state.checkpoint.wait, &continuation.answer) {
         (Some(wait), Some(answer))
             if can_answer
-                && (can_delegate || wait.kind != super::TeamWaitKind::Delegation)
+                && (wait.kind != super::TeamWaitKind::Delegation || delegation_offered(wait))
                 && wait.wait_id == answer.wait_id
+                && (wait.kind == super::TeamWaitKind::Delegation
+                    || answer.text.len() <= super::MAX_ANSWER_BYTES)
                 && (wait.kind == super::TeamWaitKind::ToolApproval)
                     == answer.approved.is_some() => {}
         (None, None) => {}

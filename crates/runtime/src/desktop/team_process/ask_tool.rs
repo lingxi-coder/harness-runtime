@@ -38,12 +38,16 @@ enum Mode {
 pub(crate) struct AskRequester {
     mode: Mutex<Mode>,
     asked: tokio::sync::Notify,
+    /// The wait this process opened: its kind and, for a proposal or a
+    /// delegation, its id (a question's id is the checkpoint's own).
+    opened: Mutex<Option<(TeamWaitKind, Option<String>)>>,
 }
 impl AskRequester {
     pub(super) fn new() -> Self {
         Self {
             mode: Mutex::new(Mode::Live { asked: false }),
             asked: tokio::sync::Notify::new(),
+            opened: Mutex::new(None),
         }
     }
     pub(super) fn begin_replay(&self, answer: Option<WaitReply>) {
@@ -84,9 +88,31 @@ impl AskRequester {
             Mode::Live { asked } if *asked => Err(ONE_AT_A_TIME),
             Mode::Live { asked } => {
                 *asked = true;
+                *self.opened.lock().unwrap_or_else(|e| e.into_inner()) = Some(match wait {
+                    Wait::Question => (TeamWaitKind::HumanInput, None),
+                    Wait::Proposal(wait_id) => {
+                        (TeamWaitKind::ToolApproval, Some(wait_id.to_owned()))
+                    }
+                    Wait::Delegation(wait_id) => {
+                        (TeamWaitKind::Delegation, Some(wait_id.to_owned()))
+                    }
+                });
                 Ok(None)
             }
         }
+    }
+    /// Whether `wait`, the first one the checkpoint finds, is the one this
+    /// process opened. It is not when an earlier call of the same response was
+    /// refused before its result was written: that call is no wait, and the
+    /// task must not pause on it.
+    pub(super) fn opened(&self, wait: &super::checkpoint::TeamTaskWait) -> bool {
+        self.opened
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|(kind, id)| {
+                *kind == wait.kind && id.as_ref().is_none_or(|id| *id == wait.wait_id)
+            })
     }
     /// The worker ends this process once the call is durable. Returning would
     /// let the model continue without the reply.
