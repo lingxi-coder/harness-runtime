@@ -36,8 +36,9 @@ const MAX_NAME: usize = 120;
 const MAX_DESCRIPTION: usize = 500;
 /// What one request to another Bot may hold, in bytes.
 pub(super) const MAX_REQUEST_BYTES: usize = 2000;
-/// What the model is shown of the other Bot's reply.
-pub(super) const MAX_REPLY_BYTES: usize = 24 * 1024;
+/// What the model is shown of the other Bot's reply: what a continuation's
+/// answer carries (the service keeps less than this of a reply).
+const MAX_REPLY_BYTES: usize = super::MAX_ANSWER_BYTES;
 /// The host's words when it could not delegate: a short message.
 const MAX_FAILURE: usize = 2000;
 

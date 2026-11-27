@@ -825,8 +825,6 @@ fn verify_continuation(
             if can_answer
                 && (wait.kind != super::TeamWaitKind::Delegation || delegation_offered(wait))
                 && wait.wait_id == answer.wait_id
-                && (wait.kind == super::TeamWaitKind::Delegation
-                    || answer.text.len() <= super::MAX_ANSWER_BYTES)
                 && (wait.kind == super::TeamWaitKind::ToolApproval)
                     == answer.approved.is_some() => {}
         (None, None) => {}

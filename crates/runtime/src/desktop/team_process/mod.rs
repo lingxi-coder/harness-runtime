@@ -173,9 +173,8 @@ pub struct TeamContinuation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<TeamWaitAnswer>,
 }
-/// What a person's answer to a question or an approval may hold, in bytes. The
-/// reply of another Bot to a delegation may hold up to
-/// `delegate_tool::MAX_REPLY_BYTES`; `verify_continuation` checks which.
+/// What the answer of a continuation may hold, in bytes: a person's answer or
+/// another Bot's reply to a delegation.
 pub(super) const MAX_ANSWER_BYTES: usize = 8192;
 impl TeamContinuation {
     pub(crate) fn validate(&self) -> Result<(), TeamProcessError> {
@@ -186,7 +185,7 @@ impl TeamContinuation {
             if !protocol::valid_id(&answer.wait_id)
                 || !protocol::valid_id(&answer.message_id)
                 || answer.text.trim().is_empty()
-                || answer.text.len() > delegate_tool::MAX_REPLY_BYTES
+                || answer.text.len() > MAX_ANSWER_BYTES
             {
                 return Err(TeamProcessError::Protocol);
             }
