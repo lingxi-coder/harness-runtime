@@ -1336,7 +1336,6 @@ impl ConversationOrchestrator {
             });
         }
 
-        let original_source_messages = messages.clone();
         let row_codec =
             std::sync::Arc::new(std::sync::Mutex::new(SessionCompactRowCodec::default()));
         let messages_rows = row_codec.lock().unwrap().rows_for_messages(&messages);
@@ -1455,10 +1454,6 @@ impl ConversationOrchestrator {
         }
 
         let compact_output = core_result.lock().await.take();
-        let source_messages_for_estimates = compact_output
-            .as_ref()
-            .map(|(output, _)| output.source_messages.clone())
-            .unwrap_or_else(|| original_source_messages.clone());
         let event_result = parse_session_compact_event_result(&result, &row_codec.lock().unwrap())?;
         match compact_output {
             Some((mut output, last_core_value)) => {
@@ -1466,7 +1461,7 @@ impl ConversationOrchestrator {
                     apply_session_compact_result(
                         &mut output.result,
                         &event_result,
-                        &source_messages_for_estimates,
+                        &output.source_messages,
                     );
                 }
                 Ok(SessionCompactDecision::Continue {
@@ -1493,14 +1488,10 @@ impl ConversationOrchestrator {
                     compaction_model: None,
                     compaction_profile: None,
                 };
-                apply_session_compact_result(
-                    &mut replacement,
-                    &event_result,
-                    &source_messages_for_estimates,
-                );
+                apply_session_compact_result(&mut replacement, &event_result, &messages);
                 Ok(SessionCompactDecision::Continue {
                     result: replacement,
-                    source_messages: original_source_messages,
+                    source_messages: messages,
                     api_duration: std::time::Duration::ZERO,
                     core_ran: false,
                 })
@@ -3614,8 +3605,7 @@ impl ConversationOrchestrator {
         {
             let s = self.session.lock().await;
             let retained_ids = s
-                .model_context_history()
-                .iter()
+                .iter_model_context_history()
                 .map(ConversationMessage::id)
                 .collect::<std::collections::HashSet<_>>();
             drop(s);
@@ -5006,7 +4996,7 @@ impl ConversationOrchestrator {
         let (persisted, notices) = self
             .with_deferred_storage_notifications(async {
                 let append = self
-                    .append_compact_boundary_row(writer, &jmsg, exact_native)
+                    .append_compact_boundary_row(writer, jmsg, exact_native)
                     .await;
                 match append {
                     Ok(()) => {

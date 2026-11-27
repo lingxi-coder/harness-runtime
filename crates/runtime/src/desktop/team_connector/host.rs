@@ -43,6 +43,7 @@ struct Start {
     shared_data: Option<Vec<team_process::TeamDatasetOffer>>,
     local_apps: Option<Vec<team_process::TeamLocalAppOffer>>,
     delegates: Option<Vec<team_process::TeamDelegateOffer>>,
+    visualizations: Option<bool>,
     may_decline: Option<bool>,
     addressed: Option<bool>,
 }
@@ -94,6 +95,7 @@ impl Start {
             || self.shared_data.is_some()
             || self.local_apps.is_some()
             || self.delegates.is_some()
+            || self.visualizations.is_some()
             || self.may_decline.is_some()
             || self.addressed.is_some();
         let all = self.task_id.is_some()
@@ -131,6 +133,7 @@ impl Start {
                 && self.shared_data.is_none()
                 && self.local_apps.is_none()
                 && self.delegates.is_none()
+                && self.visualizations.is_none()
                 && self.may_decline.is_none()
                 && self.addressed.is_none();
             if !only_task_and_model {
@@ -188,6 +191,7 @@ impl Start {
             shared_data: self.shared_data.unwrap_or_default(),
             local_apps: self.local_apps.unwrap_or_default(),
             delegates: self.delegates.unwrap_or_default(),
+            visualizations: self.visualizations.unwrap_or(false),
             may_decline: self.may_decline.unwrap_or(false),
             addressed: self.addressed.unwrap_or(false),
         })
@@ -580,6 +584,9 @@ fn result_value(result: team_process::TeamProcessResult) -> Value {
         "text":result.text,"cursor":result.cursor,"finishedAt":result.finished_at,"dispatchedRequests":result.dispatched_requests,"attemptDispatchedRequests":result.attempt_dispatched_requests,"deniedTools":result.denied_tools,"usage":result.usage});
     if let Some(document) = result.document {
         value["document"] = json!(document);
+    }
+    if let Some(visualization) = result.visualization {
+        value["visualization"] = json!(visualization);
     }
     value
 }

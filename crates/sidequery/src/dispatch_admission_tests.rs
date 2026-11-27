@@ -227,7 +227,10 @@ async fn session_retry_after_a_blocked_transport_rechecks_host_admission() {
     let run = tokio::spawn(async move {
         client
             .query_with_dispatch_admission(
-                admitted_request(),
+                SideQueryRequest {
+                    max_retries: 1,
+                    ..admitted_request()
+                },
                 llm_runtime::RequestDispatchAdmission::new(move || check.load(Ordering::Acquire)),
             )
             .await

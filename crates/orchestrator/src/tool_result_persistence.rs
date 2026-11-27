@@ -468,6 +468,52 @@ async fn persist_with_stem(
     let original_size = units.len();
     // The OS byte boundary follows JS UTF-8 encoding; preview and lengths
     // remain based on the source string before this conversion.
+    let filepath = write_result_file(
+        config_home,
+        dir,
+        stem,
+        is_json,
+        ResultFileBody::Utf16(capped),
+    )
+    .await?;
+    // `Ytt(c, …)` — the preview comes off the WRITTEN body, not the original,
+    // so a capped result previews what the file actually contains.
+    let (preview_utf16, has_more) = preview_utf16(capped, PREVIEW_CHARS);
+    Ok(Persisted {
+        filepath,
+        original_size,
+        is_json,
+        preview: String::from_utf16_lossy(&preview_utf16),
+        preview_utf16,
+        has_more,
+        truncated_at,
+    })
+}
+
+/// Store already serialized, size-checked native JSON using the ordinary
+/// result-file identity, directory checks and exclusive-create semantics.
+pub(crate) async fn persist_json_bytes(
+    config_home: &Path,
+    dir: &Path,
+    id: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let stem = result_file_stem(id);
+    write_result_file(config_home, dir, &stem, true, ResultFileBody::Utf8(bytes)).await
+}
+
+enum ResultFileBody<'a> {
+    Utf16(&'a [u16]),
+    Utf8(&'a [u8]),
+}
+
+async fn write_result_file(
+    config_home: &Path,
+    dir: &Path,
+    stem: &str,
+    is_json: bool,
+    body: ResultFileBody<'_>,
+) -> Result<PathBuf, String> {
     check_directory(config_home, dir).await?;
     let _ = tokio::fs::create_dir_all(dir).await;
     check_directory(config_home, dir).await?;
@@ -493,21 +539,27 @@ async fn persist_with_stem(
     {
         Ok(mut file) => {
             use tokio::io::AsyncWriteExt as _;
-            // Decode continuously (including pairs crossing chunk boundaries),
-            // but retain only a bounded UTF-8 chunk while awaiting disk I/O.
-            let mut encoded = String::with_capacity(16 * 1024);
-            for decoded in char::decode_utf16(capped.iter().copied()) {
-                encoded.push(decoded.unwrap_or(char::REPLACEMENT_CHARACTER));
-                if encoded.len() >= 16 * 1024 {
+            match body {
+                ResultFileBody::Utf8(bytes) => {
+                    file.write_all(bytes).await.map_err(|e| e.to_string())?;
+                }
+                ResultFileBody::Utf16(units) => {
+                    // Decode continuously so pairs can cross write boundaries.
+                    let mut encoded = String::with_capacity(16 * 1024);
+                    for decoded in char::decode_utf16(units.iter().copied()) {
+                        encoded.push(decoded.unwrap_or(char::REPLACEMENT_CHARACTER));
+                        if encoded.len() >= 16 * 1024 {
+                            file.write_all(encoded.as_bytes())
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            encoded.clear();
+                        }
+                    }
                     file.write_all(encoded.as_bytes())
                         .await
                         .map_err(|error| error.to_string())?;
-                    encoded.clear();
                 }
             }
-            file.write_all(encoded.as_bytes())
-                .await
-                .map_err(|error| error.to_string())?;
             if let Err(e) = file.flush().await {
                 return Err(e.to_string());
             }
@@ -523,18 +575,7 @@ async fn persist_with_stem(
         Err(e) => return Err(e.to_string()),
     }
 
-    // `Ytt(c, …)` — the preview comes off the WRITTEN body, not the original,
-    // so a capped result previews what the file actually contains.
-    let (preview_utf16, has_more) = preview_utf16(capped, PREVIEW_CHARS);
-    Ok(Persisted {
-        filepath,
-        original_size,
-        is_json,
-        preview: String::from_utf16_lossy(&preview_utf16),
-        preview_utf16,
-        has_more,
-        truncated_at,
-    })
+    Ok(filepath)
 }
 
 #[cfg(test)]

@@ -923,13 +923,8 @@ impl ConversationOrchestrator {
                 }
             }
         }
-        let base_wire = wire.clone();
         self.apply_mod_tool_descriptions(mod_host.as_ref(), &tools, &mut wire, false, true)
             .await;
-        // Live descriptions can change while Tool/Schema identities stay the
-        // same. Partition exact counts by those bytes as well, so a late count
-        // from an earlier description cannot refill the current cache key.
-        let token_cache_key = deferred_token_cache_key(&cache_key, &wire, &tools);
 
         let tool_search_present = tools.iter().any(|tool| tool.name() == "ToolSearch");
         let has_deferred_candidates = tools.iter().any(|tool| {
@@ -991,6 +986,8 @@ impl ConversationOrchestrator {
             && request_supported
             && has_deferred_candidates
         {
+            // A live description can change while the tool and schema identities stay the same.
+            let token_cache_key = deferred_token_cache_key(&cache_key, &complete_wire, &tools);
             let cached = self
                 .prompt_runtime
                 .deferred_tool_token_cache
@@ -1058,7 +1055,6 @@ impl ConversationOrchestrator {
         // ordinary description above; a Mod can transform either form.
         let mut loaded_tools = Vec::new();
         let mut loaded_wire = Vec::new();
-        let mut discovery_definitions = complete_wire.clone();
         for tool in &tools {
             if !self.tools.deferral().is_enabled()
                 || !self
@@ -1071,7 +1067,7 @@ impl ConversationOrchestrator {
             let Some(description) = tool.prompt_for_loading_mode(true) else {
                 continue;
             };
-            let Some(mut entry) = base_wire
+            let Some(mut entry) = complete_wire
                 .iter()
                 .find(|entry| entry.name == tool.name())
                 .cloned()
@@ -1084,7 +1080,11 @@ impl ConversationOrchestrator {
             loaded_tools.push(tool.clone());
             loaded_wire.push(entry);
         }
-        if !loaded_wire.is_empty() {
+        // Publish ordinary search text alongside the exact definitions returned on discovery.
+        if loaded_wire.is_empty() {
+            self.tools
+                .refresh_tool_search_view_from_wire(&complete_wire);
+        } else {
             self.apply_mod_tool_descriptions(
                 mod_host.as_ref(),
                 &loaded_tools,
@@ -1093,6 +1093,7 @@ impl ConversationOrchestrator {
                 false,
             )
             .await;
+            let mut discovery_definitions = complete_wire.clone();
             for loaded in loaded_wire {
                 if let Some(entry) = wire.iter_mut().find(|entry| entry.name == loaded.name) {
                     entry.description = loaded.description.clone();
@@ -1104,13 +1105,9 @@ impl ConversationOrchestrator {
                     *entry = loaded;
                 }
             }
+            self.tools
+                .refresh_tool_search_view_with_definitions(&complete_wire, &discovery_definitions);
         }
-        // Auto mode learns whether it is active only after the schemas are
-        // serialized and measured. Publish the complete deferred candidate
-        // view (including descriptions), then hide ToolSearch itself whenever
-        // the resolved request does not support the beta.
-        self.tools
-            .refresh_tool_search_view_with_definitions(&complete_wire, &discovery_definitions);
         if !self.tools.deferral().is_enabled() {
             wire.retain(|tool| tool.name != "ToolSearch");
         }

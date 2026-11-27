@@ -44,12 +44,13 @@ use crate::jsonl::title::{
     extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
 };
 use crate::jsonl::SessionMode;
-use lingxi_core::host::{FileSystem, FileSystemCacheIdentity};
+use lingxi_core::host::{FileContent, FileSystem, FileSystemCacheIdentity};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -587,20 +588,22 @@ fn parse_worktree_list(stdout: &str) -> Vec<String> {
 /// non-zero exit). A single root still identifies which aliases and retained
 /// worktree buckets belong to a session launched in a repository subdirectory.
 ///
-/// Uses [`std::process::Command`] (no new dependency; `tokio`'s `process` feature
-/// is not enabled in this crate). `output()` blocks the calling task briefly,
-/// which is acceptable for the one-shot, interactive `/resume` entry point.
-fn git_worktree_paths(cwd: &str) -> Vec<String> {
-    let output = match Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(out) if out.status.success() => out,
-        _ => return Vec::new(),
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_worktree_list(&stdout)
+/// Wait for the Git process on a blocking worker.
+async fn git_worktree_paths(cwd: &str) -> Vec<String> {
+    let cwd = cwd.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let output = match Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(cwd)
+            .output()
+        {
+            Ok(out) if out.status.success() => out,
+            _ => return Vec::new(),
+        };
+        parse_worktree_list(&String::from_utf8_lossy(&output.stdout))
+    })
+    .await
+    .unwrap_or_default()
 }
 
 async fn transcript_windows(path: &Path) -> Option<(String, String)> {
@@ -1222,11 +1225,10 @@ struct CatalogCandidate {
     uuid: Uuid,
     path: PathBuf,
     stem: String,
-    file_len: u64,
     file_modified: SystemTime,
     file_created: SystemTime,
-    /// Reuse metadata only after a guarded read succeeded in this invocation.
-    current_read_validated: bool,
+    /// Only an ordinary candidate with a current guarded probe can reuse the catalog cache.
+    cache_revision: Option<CatalogCacheRevision>,
     /// Alias admission and row enrichment share one bounded source capture.
     /// Only the small derived row survives until candidate deduplication.
     alias_capture: Option<AliasCatalogCapture>,
@@ -1234,7 +1236,7 @@ struct CatalogCandidate {
 
 #[derive(Clone)]
 struct AliasCatalogCapture {
-    revision: AliasSourceRevision,
+    revision: CatalogSourceRevision,
     backend: Option<FileSystemCacheIdentity>,
     row: Option<SessionMetadata>,
     scoped_cwd: Option<String>,
@@ -1242,7 +1244,7 @@ struct AliasCatalogCapture {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct AliasSourceRevision {
+struct CatalogSourceRevision {
     len: u64,
     modified: SystemTime,
     created: Option<SystemTime>,
@@ -1250,7 +1252,7 @@ struct AliasSourceRevision {
     inode: (u64, u64, i64, i64),
 }
 
-impl AliasSourceRevision {
+impl CatalogSourceRevision {
     fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
         if !metadata.is_file() {
             return None;
@@ -1274,6 +1276,81 @@ impl AliasSourceRevision {
 
     async fn read(path: &Path) -> Option<Self> {
         Self::from_metadata(&tokio::fs::metadata(path).await.ok()?)
+    }
+
+    fn has_subsecond_change_time(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let (_, _, _, ctime_nsec) = self.inode;
+            ctime_nsec != 0
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CatalogCacheRevision {
+    source: CatalogSourceRevision,
+    complete_digest: Option<[u8; 32]>,
+}
+
+impl CatalogCacheRevision {
+    fn from_probe(metadata: &std::fs::Metadata, prefix: &FileContent) -> Option<Self> {
+        let source = CatalogSourceRevision::from_metadata(metadata)?;
+        // A short, truncated or lossy prefix cannot distinguish same-second
+        // rewrites. Such a source obtains its digest from the full read.
+        let complete_digest = if !source.has_subsecond_change_time()
+            && !prefix.truncated
+            && prefix.content.len() <= crate::jsonl::LITE_READ_BUF_SIZE
+            && prefix.content.len() as u64 == source.len
+            && !prefix.content.contains('\u{fffd}')
+        {
+            Some(Self::digest(&prefix.content))
+        } else {
+            None
+        };
+        Some(Self {
+            source,
+            complete_digest,
+        })
+    }
+
+    fn matches_full_read(&self, read: &FileContent) -> bool {
+        !read.truncated
+            && read.content.len() as u64 == self.source.len
+            && self
+                .complete_digest
+                .is_none_or(|expected| Self::digest(&read.content) == expected)
+    }
+
+    fn needs_full_digest(&self) -> bool {
+        !self.source.has_subsecond_change_time() && self.complete_digest.is_none()
+    }
+
+    fn digest(text: &str) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(text.as_bytes()).into()
+    }
+
+    async fn still_current(&self, key: &CatalogCacheKey, fs: &Arc<dyn FileSystem>) -> bool {
+        CatalogSourceRevision::read(&key.path).await.as_ref() == Some(&self.source)
+            && fs.cache_identity().as_ref() == Some(&key.fs_identity)
+    }
+
+    async fn cached_row(
+        &self,
+        key: &CatalogCacheKey,
+        fs: &Arc<dyn FileSystem>,
+    ) -> Option<Option<SessionMetadata>> {
+        let row = catalog_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lookup(key, self)?;
+        // The source may have been replaced between the directory stat and read.
+        self.still_current(key, fs).await.then_some(row)
     }
 }
 
@@ -1310,12 +1387,9 @@ struct CatalogCacheKey {
 }
 
 struct CatalogCacheEntry {
-    file_len: u64,
-    file_modified: SystemTime,
-    file_created: SystemTime,
+    revision: CatalogCacheRevision,
     scoped_cwd: Option<String>,
     row: Option<SessionMetadata>,
-    skipped: bool,
     last_access: u64,
     retained_bytes: usize,
 }
@@ -1331,6 +1405,29 @@ struct CatalogCache {
 }
 
 impl CatalogCache {
+    /// The outer option distinguishes a miss from a cached, filtered-out row.
+    fn lookup(
+        &mut self,
+        key: &CatalogCacheKey,
+        revision: &CatalogCacheRevision,
+    ) -> Option<Option<SessionMetadata>> {
+        let entry = self
+            .entries
+            .get(key)
+            .filter(|entry| &entry.revision == revision)?;
+        // Directory existence or a local link target can change independently
+        // of the transcript. Reparse filtered rows if they may now belong.
+        if !transcript_matches_target_dirs(entry.scoped_cwd.as_deref(), &key.target_cwds) {
+            return Some(None);
+        }
+        if !key.target_cwds.is_empty() && entry.row.is_none() && entry.scoped_cwd.is_some() {
+            return None;
+        }
+        let row = entry.row.clone();
+        self.touch(key);
+        Some(row)
+    }
+
     fn next_access(&mut self) -> u64 {
         self.clock = self.clock.wrapping_add(1);
         if self.clock == 0 {
@@ -1411,8 +1508,9 @@ fn catalog_cache() -> &'static Mutex<CatalogCache> {
 
 async fn collect_dir(
     dir: &Path,
-    _target_cwds: &[String],
+    only_session: Option<Uuid>,
     fs: &Arc<dyn FileSystem>,
+    cache_enabled: bool,
     candidates: &mut Vec<CatalogCandidate>,
     skipped_files: &mut usize,
 ) -> Result<bool, LoaderError> {
@@ -1480,16 +1578,18 @@ async fn collect_dir(
         let Ok(uuid) = Uuid::parse_str(stem) else {
             continue;
         };
+        if only_session.is_some_and(|wanted| wanted != uuid) {
+            continue;
+        }
         let stem = stem.to_string();
 
         // Cheap first-line hide: sidechain / daemon / SDK sessions can be
         // skipped without parsing the rest of the JSONL. Survivors still take
         // the full `read_routed` path (custom titles live at file tail).
         let path_str = path.to_str().unwrap_or("");
-        let mut current_read_validated = false;
+        let mut cache_revision = None;
         if !path_str.is_empty() {
             if let Ok(prefix) = read_catalog_prefix(fs, path_str).await {
-                current_read_validated = true;
                 let content = prefix
                     .content
                     .strip_prefix('\u{FEFF}')
@@ -1498,16 +1598,18 @@ async fn collect_dir(
                 if first_line_hides_session(line1, current_is_sdk_entrypoint) {
                     continue;
                 }
+                if cache_enabled {
+                    cache_revision = CatalogCacheRevision::from_probe(&metadata, &prefix);
+                }
             }
         }
         candidates.push(CatalogCandidate {
             uuid,
             path,
             stem,
-            file_len: metadata.len(),
             file_modified,
             file_created,
-            current_read_validated,
+            cache_revision,
             alias_capture: None,
         });
     }
@@ -1653,7 +1755,7 @@ async fn prepare_cwd_alias_candidate(
         return None;
     }
     let metadata = tokio::fs::metadata(&path).await.ok()?;
-    let revision = AliasSourceRevision::from_metadata(&metadata)?;
+    let revision = CatalogSourceRevision::from_metadata(&metadata)?;
     let backend = fs.cache_identity();
     #[cfg(test)]
     optimization_tests::record_catalog_read(&path);
@@ -1683,7 +1785,7 @@ async fn prepare_cwd_alias_candidate(
     let alias_index = cwds
         .iter()
         .find_map(|(index, cwd)| (workspace == normalized_directory_path(cwd)).then_some(*index))?;
-    if AliasSourceRevision::read(&path).await.as_ref() != Some(&revision)
+    if CatalogSourceRevision::read(&path).await.as_ref() != Some(&revision)
         || fs.cache_identity() != backend
     {
         return None;
@@ -1693,10 +1795,9 @@ async fn prepare_cwd_alias_candidate(
         uuid,
         path,
         stem,
-        file_len: metadata.len(),
         file_modified,
         file_created: metadata.created().unwrap_or(file_modified),
-        current_read_validated: true,
+        cache_revision: None,
         alias_capture: None,
     };
     let mut skipped_files = 0;
@@ -1738,11 +1839,10 @@ async fn enrich_candidates(
     current_is_sdk_entrypoint: bool,
     target_cwds: &[String],
     unfiltered_dirs: &[PathBuf],
-    uncached_paths: &[PathBuf],
+    cache_identity: Option<&FileSystemCacheIdentity>,
     skipped_files: &mut usize,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let parallelism = catalog_parallelism();
-    let cache_identity = fs.cache_identity();
     let total = candidates.len();
     let mut pending = candidates.into_iter().enumerate();
     let mut jobs = tokio::task::JoinSet::new();
@@ -1753,12 +1853,11 @@ async fn enrich_candidates(
                 break;
             };
             let fs = Arc::clone(fs);
-            let cache_identity =
-                if !candidate.current_read_validated || uncached_paths.contains(&candidate.path) {
-                    None
-                } else {
-                    cache_identity.clone()
-                };
+            let cache_identity = candidate
+                .cache_revision
+                .as_ref()
+                .and(cache_identity)
+                .cloned();
             let target_cwds =
                 if candidate.path.parent().is_some_and(|parent| {
                     unfiltered_dirs.iter().any(|directory| directory == parent)
@@ -1772,7 +1871,7 @@ async fn enrich_candidates(
                 let row = enrich_candidate(
                     candidate,
                     &fs,
-                    cache_identity.as_ref(),
+                    cache_identity,
                     current_is_sdk_entrypoint,
                     &target_cwds,
                     &mut skipped,
@@ -1807,9 +1906,9 @@ async fn enrich_candidates(
 }
 
 async fn enrich_candidate(
-    candidate: CatalogCandidate,
+    mut candidate: CatalogCandidate,
     fs: &Arc<dyn FileSystem>,
-    cache_identity: Option<&FileSystemCacheIdentity>,
+    cache_identity: Option<FileSystemCacheIdentity>,
     current_is_sdk_entrypoint: bool,
     target_cwds: &[String],
     skipped_files: &mut usize,
@@ -1818,16 +1917,19 @@ async fn enrich_candidate(
         // Reuse only a backend that promises its generation covers changes
         // invisible to OS metadata. Probe access again, bracketed by the
         // captured inode/revision, so a replacement, late /cd or permission
-        // change cannot inherit the earlier admission. Other platforms without
-        // this inode/ctime revision conservatively take the full-read path.
-        if cfg!(unix)
+        // change cannot inherit the earlier admission. On filesystems such as
+        // HFS+, a same-length rewrite with restored mtime can share the same
+        // whole-second ctime. Reread when the revision has no subsecond ctime.
+        if capture.revision.has_subsecond_change_time()
             && capture.backend.is_some()
             && fs.cache_identity() == capture.backend
-            && AliasSourceRevision::read(&candidate.path).await.as_ref() == Some(&capture.revision)
+            && CatalogSourceRevision::read(&candidate.path).await.as_ref()
+                == Some(&capture.revision)
             && read_catalog_prefix(fs, candidate.path.to_str().expect("UTF-8 path"))
                 .await
                 .is_ok()
-            && AliasSourceRevision::read(&candidate.path).await.as_ref() == Some(&capture.revision)
+            && CatalogSourceRevision::read(&candidate.path).await.as_ref()
+                == Some(&capture.revision)
             && fs.cache_identity() == capture.backend
         {
             *skipped_files += capture.skipped_files;
@@ -1843,104 +1945,31 @@ async fn enrich_candidate(
             }
             return Ok(capture.row.clone());
         }
-        let mut scoped_cwd = None;
-        return enrich_candidate_uncached(
-            candidate,
-            fs,
-            current_is_sdk_entrypoint,
-            target_cwds,
-            &mut scoped_cwd,
-            skipped_files,
-        )
-        .await;
     }
-    let Some(cache_identity) = cache_identity else {
-        let mut scoped_cwd = None;
-        return enrich_candidate_uncached(
-            candidate,
-            fs,
-            current_is_sdk_entrypoint,
-            target_cwds,
-            &mut scoped_cwd,
-            skipped_files,
-        )
-        .await;
-    };
-    let cache = catalog_cache();
-    let key = CatalogCacheKey {
-        fs_identity: cache_identity.clone(),
-        path: candidate.path.clone(),
-        current_is_sdk_entrypoint,
-        target_cwds: target_cwds.to_vec(),
-    };
-    {
-        let mut cache = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(entry) = cache.entries.get(&key).filter(|entry| {
-            entry.file_len == candidate.file_len
-                && entry.file_modified == candidate.file_modified
-                && entry.file_created == candidate.file_created
-        }) {
-            // Directory existence or a local link target can change without
-            // changing the transcript revision. Recheck native m3r for a
-            // cached row; a filtered row must be reparsed if it may now belong.
-            if !transcript_matches_target_dirs(entry.scoped_cwd.as_deref(), target_cwds) {
-                return Ok(None);
-            }
-            if target_cwds.is_empty() || entry.row.is_some() || entry.scoped_cwd.is_none() {
-                if entry.skipped {
-                    *skipped_files += 1;
-                }
-                let row = entry.row.clone();
-                cache.touch(&key);
+    let cache_slot =
+        candidate
+            .cache_revision
+            .take()
+            .zip(cache_identity)
+            .map(|(revision, backend)| {
+                (
+                    CatalogCacheKey {
+                        fs_identity: backend,
+                        path: candidate.path.clone(),
+                        current_is_sdk_entrypoint,
+                        target_cwds: target_cwds.to_vec(),
+                    },
+                    revision,
+                )
+            });
+    if let Some((key, revision)) = &cache_slot {
+        if !revision.needs_full_digest() {
+            if let Some(row) = revision.cached_row(key, fs).await {
                 return Ok(row);
             }
         }
     }
 
-    let skipped_before = *skipped_files;
-    let mut scoped_cwd = None;
-    let result = enrich_candidate_uncached(
-        candidate.clone(),
-        fs,
-        current_is_sdk_entrypoint,
-        target_cwds,
-        &mut scoped_cwd,
-        skipped_files,
-    )
-    .await?;
-    let skipped = *skipped_files > skipped_before;
-    if skipped {
-        return Ok(result);
-    }
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.insert(
-        key,
-        CatalogCacheEntry {
-            file_len: candidate.file_len,
-            file_modified: candidate.file_modified,
-            file_created: candidate.file_created,
-            scoped_cwd,
-            row: result.clone(),
-            skipped,
-            last_access: 0,
-            retained_bytes: 0,
-        },
-    );
-    Ok(result)
-}
-
-async fn enrich_candidate_uncached(
-    candidate: CatalogCandidate,
-    fs: &Arc<dyn FileSystem>,
-    current_is_sdk_entrypoint: bool,
-    target_cwds: &[String],
-    scoped_cwd: &mut Option<String>,
-    skipped_files: &mut usize,
-) -> Result<Option<SessionMetadata>, LoaderError> {
     // Route the file TOLERANTLY ([`read_routed`]) rather than `read_all`:
     // besides the chain participants (`messages_in_order`, identical to what
     // `read_all` returned) it yields the Tier-1 metadata side-maps the picker
@@ -1954,11 +1983,11 @@ async fn enrich_candidate_uncached(
         *skipped_files += 1;
         return Ok(None);
     }
-    let content = match fs
+    let mut read = match fs
         .read_file(candidate.path.to_str().expect("UTF-8 path"), None, None)
         .await
     {
-        Ok(read) => read.content,
+        Ok(read) => read,
         Err(_) => {
             *skipped_files += 1;
             return Ok(None);
@@ -1966,7 +1995,7 @@ async fn enrich_candidate_uncached(
     };
     if candidate.alias_capture.is_some()
         && first_line_hides_session(
-            strip_transcript_bom(&content)
+            strip_transcript_bom(&read.content)
                 .split('\n')
                 .next()
                 .unwrap_or(""),
@@ -1975,15 +2004,61 @@ async fn enrich_candidate_uncached(
     {
         return Ok(None);
     }
-    enrich_candidate_from_content(
+    let mut cache_slot = cache_slot.filter(|(_, revision)| revision.matches_full_read(&read));
+    if let Some((key, revision)) = &mut cache_slot {
+        if revision.needs_full_digest() {
+            // Without a fine change time or a complete prefix, hash the full
+            // current view on a blocking worker before paying to route it.
+            let hashed = tokio::task::spawn_blocking(move || {
+                let digest = CatalogCacheRevision::digest(&read.content);
+                (read, digest)
+            })
+            .await;
+            match hashed {
+                Ok((source, digest)) => {
+                    read = source;
+                    revision.complete_digest = Some(digest);
+                }
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(_) => {
+                    *skipped_files += 1;
+                    return Ok(None);
+                }
+            }
+            if let Some(row) = revision.cached_row(key, fs).await {
+                return Ok(row);
+            }
+        }
+    }
+    let mut scoped_cwd = None;
+    let skipped_before = *skipped_files;
+    let result = enrich_candidate_from_content(
         candidate,
-        content,
+        read.content,
         current_is_sdk_entrypoint,
         target_cwds,
-        scoped_cwd,
+        &mut scoped_cwd,
         skipped_files,
     )
-    .await
+    .await?;
+    if let Some((key, revision)) = cache_slot {
+        if *skipped_files == skipped_before && revision.still_current(&key, fs).await {
+            catalog_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    key,
+                    CatalogCacheEntry {
+                        revision,
+                        scoped_cwd,
+                        row: result.clone(),
+                        last_access: 0,
+                        retained_bytes: 0,
+                    },
+                );
+        }
+    }
+    Ok(result)
 }
 
 async fn enrich_candidate_from_content(
@@ -2581,7 +2656,7 @@ pub async fn list_recent_sessions_in_scope_with_diagnostics(
     fs: Arc<dyn FileSystem>,
 ) -> Result<SessionCatalog, LoaderError> {
     let worktree_paths = if scope == SessionDiscoveryScope::Repository {
-        git_worktree_paths(cwd)
+        git_worktree_paths(cwd).await
     } else {
         Vec::new()
     };
@@ -2630,7 +2705,7 @@ pub async fn list_recent_sessions_in_scope_with_mode(
     mode: Option<SessionMode>,
 ) -> Result<SessionCatalog, LoaderError> {
     let worktrees = if scope == SessionDiscoveryScope::Repository {
-        git_worktree_paths(cwd)
+        git_worktree_paths(cwd).await
     } else {
         Vec::new()
     };
@@ -2720,7 +2795,7 @@ pub async fn find_session_in_scope_with_diagnostics(
     fs: Arc<dyn FileSystem>,
 ) -> Result<SessionCatalog, LoaderError> {
     let worktree_paths = if scope == SessionDiscoveryScope::Repository {
-        git_worktree_paths(cwd)
+        git_worktree_paths(cwd).await
     } else {
         Vec::new()
     };
@@ -2803,7 +2878,7 @@ async fn describe_session_source_inner<F: FnOnce()>(
     }
 
     let worktrees = if scope == SessionDiscoveryScope::Repository {
-        git_worktree_paths(cwd)
+        git_worktree_paths(cwd).await
     } else {
         Vec::new()
     };
@@ -2867,7 +2942,8 @@ async fn describe_session_source_inner<F: FnOnce()>(
             .metadata()
             .map_err(|error| io_error(error.to_string()))?;
         let content = String::from_utf8(bytes).map_err(|error| io_error(error.to_string()))?;
-        let loaded = route_captured_session_source(source, session_id, &content)?;
+        let loaded = route_lines(&content);
+        let mode = validated_captured_session_mode(source, session_id, &content, &loaded)?;
         if loaded.malformed_line_count != 0 {
             return Err(io_error("session source contains malformed rows".into()));
         }
@@ -2876,10 +2952,14 @@ async fn describe_session_source_inner<F: FnOnce()>(
             && (unfiltered
                 || scope == SessionDiscoveryScope::All
                 || transcript_matches_target_dirs(workspace.as_deref(), &dirs.target_cwds));
-        let in_alias_scope = aliases
-            .iter()
-            .any(|alias_cwd| cwd_alias_matches_source(source, alias_cwd, &content));
-        if !in_ordinary_scope && !in_alias_scope {
+        if !in_ordinary_scope
+            && !workspace.as_deref().is_some_and(|recorded| {
+                let recorded = normalized_directory_path(Path::new(recorded));
+                aliases
+                    .iter()
+                    .any(|alias_cwd| normalized_directory_path(alias_cwd) == recorded)
+            })
+        {
             return Err(missing());
         }
         let empty_session = loaded.messages_in_order.is_empty()
@@ -2900,10 +2980,9 @@ async fn describe_session_source_inner<F: FnOnce()>(
                 .and_then(|s| s.to_str())
                 .ok_or_else(missing)?
                 .to_string(),
-            file_len: metadata.len(),
             file_modified: modified,
             file_created: metadata.created().unwrap_or(modified),
-            current_read_validated: true,
+            cache_revision: None,
             alias_capture: None,
         };
         let current_is_sdk_entrypoint = matches!(
@@ -2911,15 +2990,16 @@ async fn describe_session_source_inner<F: FnOnce()>(
             Ok("sdk-cli" | "sdk-ts" | "sdk-py")
         );
         let mut skipped = 0;
-        let row = enrich_candidate_from_content(
+        let mut scoped_cwd = scoped_cwd_from_source(&content);
+        let row = enrich_candidate_from_loaded(
             candidate,
-            content.clone(),
+            mode,
+            loaded,
             current_is_sdk_entrypoint,
             &[],
-            &mut None,
+            &mut scoped_cwd,
             &mut skipped,
-        )
-        .await?
+        )?
         .ok_or(LoaderError::EmptyDirectory)?;
         let current = authority
             .read_checked()
@@ -2972,10 +3052,9 @@ pub async fn find_session_exact_raw_with_diagnostics(
         uuid: session_id,
         stem: raw_session_id.to_string(),
         path: path.clone(),
-        file_len: metadata.len(),
         file_modified: modified,
         file_created: metadata.created().unwrap_or(modified),
-        current_read_validated: false,
+        cache_revision: None,
         alias_capture: None,
     };
     let current_is_sdk_entrypoint = matches!(
@@ -2989,7 +3068,7 @@ pub async fn find_session_exact_raw_with_diagnostics(
         current_is_sdk_entrypoint,
         &[],
         &[],
-        &[],
+        None,
         &mut skipped_files,
     )
     .await?;
@@ -3090,11 +3169,13 @@ async fn list_recent_sessions_inner_with_diagnostics(
         limited_dirs,
         has_aliases,
     } = discover_session_directories(lingxi_home, cwd, scope, worktree_paths, limit).await?;
+    let cache_identity = fs.cache_identity();
     for project_dir in project_dirs {
         let collected = collect_dir(
             &project_dir,
-            &target_cwds,
+            only_session,
             fs,
+            cache_identity.is_some(),
             &mut candidates,
             &mut skipped_files,
         )
@@ -3114,10 +3195,6 @@ async fn list_recent_sessions_inner_with_diagnostics(
         .map(|candidate| candidate.path.clone())
         .collect();
     collect_cwd_aliases(&cwd_aliases, fs, &mut candidates, only_session).await;
-
-    if let Some(session_id) = only_session {
-        candidates.retain(|candidate| candidate.uuid == session_id);
-    }
     let candidates = if mode.is_some() {
         // Read each source before choosing a same-UUID winner: a newer Chat
         // copy must not hide an older Code copy (or vice versa).
@@ -3135,18 +3212,13 @@ async fn list_recent_sessions_inner_with_diagnostics(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
         Ok("sdk-cli" | "sdk-ts" | "sdk-py")
     );
-    let uncached_paths: Vec<PathBuf> = cwd_aliases
-        .iter()
-        .filter(|(path, _)| !ordinary_paths.contains(path))
-        .map(|(path, _)| path.clone())
-        .collect();
     let mut rows = enrich_candidates(
         candidates,
         fs,
         current_is_sdk_entrypoint,
         &target_cwds,
         &unfiltered_dirs,
-        &uncached_paths,
+        cache_identity.as_ref(),
         &mut skipped_files,
     )
     .await?;
@@ -3163,25 +3235,6 @@ async fn list_recent_sessions_inner_with_diagnostics(
                 .is_some_and(|stem| stems.insert(stem.to_os_string()))
         });
     }
-    // Native Repository keeps the current/worktree buckets unbounded. Its
-    // count applies separately to direct aliases and retained worktree
-    // buckets; Current performs its final slice only after a linked merge.
-    if scope == SessionDiscoveryScope::Repository && limit > 0 {
-        let mut kept = Vec::with_capacity(rows.len());
-        for directory in limited_dirs {
-            let mut bucket = rows
-                .iter()
-                .filter(|row| row.path.parent() == Some(directory.as_path()))
-                .cloned()
-                .collect::<Vec<_>>();
-            bucket.sort();
-            kept.extend(bucket.into_iter().take(limit).map(|row| row.path));
-            rows.retain(|row| {
-                row.path.parent() != Some(directory.as_path()) || kept.contains(&row.path)
-            });
-        }
-    }
-
     if rows.is_empty() {
         if mode.is_some() && had_rows {
             return Ok(SessionCatalog {
@@ -3202,6 +3255,22 @@ async fn list_recent_sessions_inner_with_diagnostics(
     }
 
     rows.sort();
+    // The stable catalog order also ranks rows within each limited bucket.
+    // Other repository buckets, including the current checkout, stay unbounded.
+    if scope == SessionDiscoveryScope::Repository && limit > 0 && !limited_dirs.is_empty() {
+        let mut remaining: HashMap<_, _> =
+            limited_dirs.into_iter().map(|dir| (dir, limit)).collect();
+        rows.retain(|row| {
+            let Some(quota) = row.path.parent().and_then(|dir| remaining.get_mut(dir)) else {
+                return true;
+            };
+            if *quota == 0 {
+                return false;
+            }
+            *quota -= 1;
+            true
+        });
+    }
     if scope == SessionDiscoveryScope::All
         || (scope == SessionDiscoveryScope::Current && (limit > 0 || has_aliases))
     {
@@ -3419,10 +3488,15 @@ pub async fn load_routed_session_with_source(
     fs: Arc<dyn FileSystem>,
 ) -> Result<(PathBuf, String, LoadedTranscript), LoaderError> {
     let raw_id = session_id.to_string();
-    let roots = git_worktree_paths(cwd);
-    resolve_cli_transcript_source(lingxi_home, cwd, &raw_id, Some(&fs), &roots)
-        .await?
-        .ok_or(LoaderError::SessionNotFound { arg: raw_id })
+    resolve_cli_transcript_source(
+        lingxi_home,
+        cwd,
+        &raw_id,
+        Some(&fs),
+        git_worktree_paths(cwd),
+    )
+    .await?
+    .ok_or(LoaderError::SessionNotFound { arg: raw_id })
 }
 
 /// Open the source selected by a picker without resolving its UUID again.
@@ -3467,6 +3541,15 @@ pub fn validate_captured_session_source(
     content: &str,
     loaded: &LoadedTranscript,
 ) -> Result<(), LoaderError> {
+    validated_captured_session_mode(path, expected_id, content, loaded).map(|_| ())
+}
+
+fn validated_captured_session_mode(
+    path: &Path,
+    expected_id: Uuid,
+    content: &str,
+    loaded: &LoadedTranscript,
+) -> Result<SessionMode, LoaderError> {
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -3478,8 +3561,9 @@ pub fn validate_captured_session_source(
             arg: expected_id.to_string(),
         });
     }
-    validate_fixed_session_mode(content, &expected_id.to_string(), path)?;
-    if !native_exact_preserved_valid_for(loaded, &expected_id.to_string()) {
+    let session_id = expected_id.to_string();
+    let mode = validate_fixed_session_mode(content, &session_id, path)?;
+    if !native_exact_preserved_valid_for(loaded, &session_id) {
         return Err(LoaderError::Io {
             arg: path.display().to_string(),
             source: std::io::Error::new(
@@ -3488,27 +3572,23 @@ pub fn validate_captured_session_source(
             ),
         });
     }
-    if loaded.messages_in_order.is_empty()
-        && !loaded
-            .mobile_empty_sessions
-            .contains(&expected_id.to_string())
-    {
+    if loaded.messages_in_order.is_empty() && !loaded.mobile_empty_sessions.contains(&session_id) {
         return Err(LoaderError::EmptyDirectory);
     }
-    Ok(())
+    Ok(mode)
 }
 
 fn validate_fixed_session_mode(
     content: &str,
     session_id: &str,
     path: &Path,
-) -> Result<(), LoaderError> {
-    crate::jsonl::JsonlWriter::fixed_session_mode_from_source(content, session_id)
-        .map(|_| ())
-        .map_err(|error| LoaderError::Io {
+) -> Result<SessionMode, LoaderError> {
+    crate::jsonl::JsonlWriter::fixed_session_mode_from_source(content, session_id).map_err(
+        |error| LoaderError::Io {
             arg: path.display().to_string(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-        })
+        },
+    )
 }
 
 /// Resolve CLI `--resume UUID` through native FIe: current full transcript,
@@ -3529,8 +3609,7 @@ pub async fn resolve_session_path_raw(
     cwd: &str,
     session_id: &str,
 ) -> Result<PathBuf, LoaderError> {
-    let roots = git_worktree_paths(cwd);
-    resolve_cli_transcript_source(lingxi_home, cwd, session_id, None, &roots)
+    resolve_cli_transcript_source(lingxi_home, cwd, session_id, None, git_worktree_paths(cwd))
         .await?
         .map(|(path, _, _)| path)
         .ok_or_else(|| LoaderError::SessionNotFound {
@@ -3645,7 +3724,8 @@ async fn read_cli_transcript_source(
     };
     validate_fixed_session_mode(&content, session_id, &path)?;
     let loaded = route_lines(&content);
-    if !native_exact_preserved_valid_for(&loaded, session_id) {
+    let preserved = preserved_tail_state(&loaded, Some(session_id));
+    if !preserved.valid_for(session_id) {
         return Err(LoaderError::Io {
             arg: path.display().to_string(),
             source: std::io::Error::new(
@@ -3658,7 +3738,8 @@ async fn read_cli_transcript_source(
     // can then represent an empty continuation. Local selection uses the full
     // parser, so spaces around a JSON type colon remain valid here.
     if loaded.messages_in_order.is_empty()
-        || (!loaded.cleared_to_empty && find_tip(&loaded, session_id).is_none())
+        || (!loaded.cleared_to_empty
+            && find_tip_with_state(&loaded, session_id, &preserved).is_none())
     {
         return Ok(None);
     }
@@ -3670,7 +3751,7 @@ async fn resolve_cli_transcript_source(
     cwd: &str,
     session_id: &str,
     fs: Option<&Arc<dyn FileSystem>>,
-    worktree_paths: &[String],
+    worktree_paths: impl Future<Output = Vec<String>>,
 ) -> Result<Option<CapturedCliTranscript>, LoaderError> {
     if !crate::jsonl::validate_uuid(session_id) {
         return Ok(None);
@@ -3692,7 +3773,7 @@ async fn resolve_cli_transcript_source(
     // Gfe puts the first containing registered root first, with all remaining
     // roots sorted by the native localeCompare collation profile. iQo includes
     // the current root again and full-loads each rRe directory in that order.
-    for root in cli_worktree_order(cwd, worktree_paths) {
+    for root in cli_worktree_order(cwd, &worktree_paths.await) {
         for directory in project_directories_for_cwd(lingxi_home, &root).await {
             if let Some(captured) =
                 read_cli_transcript_source(directory.join(&filename), session_id, fs).await?
@@ -3727,35 +3808,80 @@ async fn resolve_cli_transcript_source(
     Ok(None)
 }
 
-async fn message_presence(path: &Path) -> MessagePresence {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) if !metadata.is_file() => return MessagePresence::None,
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return MessagePresence::None,
-        Err(_) => return MessagePresence::Unknown,
-    }
-    let Ok(file) = tokio::fs::File::open(path).await else {
-        return MessagePresence::Unknown;
-    };
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
+const USER_MESSAGE_MARKER: &[u8] = br#""type":"user""#;
+const ASSISTANT_MESSAGE_MARKER: &[u8] = br#""type":"assistant""#;
+
+fn has_message_marker(bytes: &[u8]) -> bool {
+    memchr::memmem::find(bytes, USER_MESSAGE_MARKER).is_some()
+        || memchr::memmem::find(bytes, ASSISTANT_MESSAGE_MARKER).is_some()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MessageProbeEnd {
+    MatchingLine,
+    EndOfFile,
+}
+
+/// CLI and job probes accept a complete matching line. Global lookup also
+/// requires the rest of the file to be readable. Neither needs to buffer a line.
+fn scan_message_marker(
+    mut reader: impl std::io::Read,
+    until: MessageProbeEnd,
+) -> std::io::Result<bool> {
+    let mut buffer = [0; crate::jsonl::LITE_READ_BUF_SIZE];
+    let mut overlap = 0;
+    let mut found = false;
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) => return MessagePresence::None,
+        let read = match reader.read(&mut buffer[overlap..]) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if read == 0 {
+            return Ok(found);
+        }
+        let end = overlap + read;
+        let mut pending = &buffer[..end];
+        if until == MessageProbeEnd::MatchingLine {
+            if let Some(newline) = memchr::memrchr(b'\n', pending) {
+                let (complete, tail) = pending.split_at(newline + 1);
+                if found || has_message_marker(complete) {
+                    return Ok(true);
+                }
+                pending = tail;
+            }
+        }
+        found = found || has_message_marker(pending);
+        // Carry just enough of the unfinished bytes for a split marker.
+        overlap = if found {
+            0
+        } else {
+            pending.len().min(ASSISTANT_MESSAGE_MARKER.len() - 1)
+        };
+        buffer.copy_within(end - overlap..end, 0);
+    }
+}
+
+async fn message_presence(path: &Path) -> MessagePresence {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() => return MessagePresence::None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return MessagePresence::None;
+            }
             Err(_) => return MessagePresence::Unknown,
             Ok(_) => {}
         }
-        if [
-            b"\"type\":\"user\"".as_slice(),
-            b"\"type\":\"assistant\"".as_slice(),
-        ]
-        .iter()
-        .any(|marker| line.windows(marker.len()).any(|window| window == *marker))
+        match std::fs::File::open(path)
+            .and_then(|file| scan_message_marker(file, MessageProbeEnd::MatchingLine))
         {
-            return MessagePresence::Has;
+            Ok(true) => MessagePresence::Has,
+            Ok(false) => MessagePresence::None,
+            Err(_) => MessagePresence::Unknown,
         }
-    }
+    })
+    .await
+    .unwrap_or(MessagePresence::Unknown)
 }
 
 /// Resolve a raw UUID without lowercasing its filename. The returned false
@@ -3770,7 +3896,7 @@ pub async fn resolve_job_transcript_raw(
 ) -> Result<ResolvedJobTranscriptPath, LoaderError> {
     let canonical_cwd = canonicalized_path_string(cwd);
     let worktrees = if options.cross_worktree {
-        git_worktree_paths(&canonical_cwd)
+        git_worktree_paths(&canonical_cwd).await
     } else {
         Vec::new()
     };
@@ -3905,18 +4031,52 @@ pub async fn resolve_session_path_in_scope(
     session_id: Uuid,
 ) -> Result<PathBuf, LoaderError> {
     let worktree_paths = if scope == SessionDiscoveryScope::Repository {
-        git_worktree_paths(cwd)
+        git_worktree_paths(cwd).await
     } else {
         Vec::new()
     };
     let directories =
         discover_session_directories(lingxi_home, cwd, scope, &worktree_paths, usize::MAX).await?;
-    select_session_path_from_directories(
-        directories,
-        session_id,
-        scope == SessionDiscoveryScope::All,
-    )
-    .await
+    if scope == SessionDiscoveryScope::All {
+        return select_unique_global_session(directories.project_dirs, session_id).await;
+    }
+    select_session_path_from_directories(directories, session_id).await
+}
+
+async fn select_unique_global_session(
+    directories: Vec<PathBuf>,
+    session_id: Uuid,
+) -> Result<PathBuf, LoaderError> {
+    let filename = format!("{session_id}.jsonl");
+    let mut selected = None;
+    for directory in directories {
+        let path = directory.join(&filename);
+        let candidate = tokio::task::spawn_blocking(move || {
+            // Like the scoped lookup, follow a symlink to a regular transcript.
+            if !path.is_file() {
+                return None;
+            }
+            let file = std::fs::File::open(&path).ok()?;
+            scan_message_marker(file, MessageProbeEnd::EndOfFile)
+                .ok()?
+                .then_some(path)
+        })
+        .await
+        .map_err(|source| LoaderError::Io {
+            arg: session_id.to_string(),
+            source: source.into(),
+        })?;
+        if let Some(path) = candidate {
+            if selected.replace(path).is_some() {
+                return Err(LoaderError::AmbiguousSession {
+                    arg: session_id.to_string(),
+                });
+            }
+        }
+    }
+    selected.ok_or_else(|| LoaderError::SessionNotFound {
+        arg: session_id.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -3960,13 +4120,12 @@ async fn select_session_path_across_worktrees(
         usize::MAX,
     )
     .await?;
-    select_session_path_from_directories(directories, session_id, false).await
+    select_session_path_from_directories(directories, session_id).await
 }
 
 async fn select_session_path_from_directories(
     directories: DiscoveryDirectories,
     session_id: Uuid,
-    require_unique_messages: bool,
 ) -> Result<PathBuf, LoaderError> {
     let arg = session_id.to_string();
     let mut selected: Option<(PathBuf, SystemTime)> = None;
@@ -3992,7 +4151,6 @@ async fn select_session_path_from_directories(
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) if alias_cwd.is_some() => continue,
-            Err(_) if require_unique_messages => continue,
             // An inaccessible local candidate has Native's "unknown" presence
             // and must not silently select an unrelated global transcript.
             Err(_) => return Ok(candidate),
@@ -4001,8 +4159,7 @@ async fn select_session_path_from_directories(
             continue;
         }
         // Native M performs a byte-substring probe, without JSON parsing. An
-        // unreadable local candidate is "unknown" and remains selectable;
-        // global fallback accepts only a positive message marker.
+        // unreadable local candidate is "unknown" and remains selectable.
         let content = tokio::fs::read(&candidate).await.ok();
         if let Some(cwd) = &alias_cwd {
             let Some(source) = content
@@ -4015,18 +4172,10 @@ async fn select_session_path_from_directories(
                 continue;
             }
         }
-        let has_messages = content.as_ref().is_some_and(|bytes| {
-            [
-                b"\"type\":\"user\"".as_slice(),
-                b"\"type\":\"assistant\"".as_slice(),
-            ]
-            .iter()
-            .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
-        });
-        if content.is_some() && !has_messages {
-            continue;
-        }
-        if require_unique_messages && !has_messages {
+        if content
+            .as_deref()
+            .is_some_and(|bytes| !has_message_marker(bytes))
+        {
             continue;
         }
         let loaded = content
@@ -4042,9 +4191,6 @@ async fn select_session_path_from_directories(
             && !transcript_matches_target_dirs(transcript_cwd.as_deref(), &directories.target_cwds)
         {
             continue;
-        }
-        if require_unique_messages && selected.is_some() {
-            return Err(LoaderError::AmbiguousSession { arg });
         }
         let file_modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let modified = loaded
@@ -4606,24 +4752,22 @@ impl<'a> TimestampParentIndex<'a> {
 /// without write-order metadata retain newest-leaf selection with stable ties.
 #[must_use]
 pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a JsonlMessage> {
-    let by_uuid = loaded.messages_by_uuid();
-    if by_uuid.is_empty() {
+    if loaded.message_count() == 0 {
         return None;
     }
-
     let preserved = preserved_tail_state(loaded, Some(arg));
-    if preserved.invalid_exact
-        || preserved
-            .exact_owner
-            .as_deref()
-            .is_some_and(|owner| Uuid::parse_str(arg).is_ok() && owner != arg)
-    {
-        return None;
-    }
+    find_tip_with_state(loaded, arg, &preserved)
+}
 
-    if loaded.cleared_to_empty {
+fn find_tip_with_state<'a>(
+    loaded: &'a LoadedTranscript,
+    arg: &str,
+    preserved: &PreservedTailState,
+) -> Option<&'a JsonlMessage> {
+    if loaded.cleared_to_empty || !preserved.valid_for(arg) {
         return None;
     }
+    let by_uuid = loaded.messages_by_uuid();
     let ordered = ordered_messages(loaded, &by_uuid);
     // 2.1.286 jln/yan: an ordinary checkpoint can be a completed sibling
     // tool result. Prefer the durable continuation of that same batch even
@@ -4858,7 +5002,8 @@ pub fn build_conversation_chain(
     }
 
     // Steps (1)–(4): newest non-sidechain user/assistant leaf (the chain tip).
-    let Some(tip) = find_tip(loaded, arg) else {
+    let preserved = preserved_tail_state(loaded, Some(arg));
+    let Some(tip) = find_tip_with_state(loaded, arg, &preserved) else {
         // No resumable leaf — caller surfaces "nothing to resume".
         return (Vec::new(), arg.to_string());
     };
@@ -4871,7 +5016,6 @@ pub fn build_conversation_chain(
     // summary ← preserved tail ← …] — instead of following the tail's on-disk
     // parents back into the FULL pre-compact history. Empty on transcripts
     // without preserved-tail compactions (zero-cost common path).
-    let preserved = preserved_tail_state(loaded, Some(arg));
     let reparent = &preserved.parents;
 
     // (5) Walk tip → root, cycle-guarded. A null parent is a real root and
@@ -4983,12 +5127,6 @@ pub fn build_conversation_chain(
     // A recovery marker can be the final persisted row when the retry was
     // interrupted. find_tip deliberately chooses user/assistant messages, so
     // retain attached thinking markers even without a later assistant leaf.
-    let positions: HashMap<&str, usize> = loaded
-        .messages_in_order
-        .iter()
-        .enumerate()
-        .map(|(index, message)| (message.uuid.as_str(), index))
-        .collect();
     for (position, marker) in loaded.messages_in_order.iter().enumerate() {
         if preserved.pruned.contains(&marker.uuid)
             || !preserved.permits_owner(marker)
@@ -5010,9 +5148,9 @@ pub fn build_conversation_chain(
         let at = chain
             .iter()
             .position(|message| {
-                positions
-                    .get(message.uuid.as_str())
-                    .is_some_and(|index| *index > position)
+                loaded
+                    .message_position(&message.uuid)
+                    .is_some_and(|index| index > position)
             })
             .unwrap_or(chain.len());
         chain.insert(at, marker.clone());
@@ -5060,6 +5198,14 @@ struct PreservedTailState {
 }
 
 impl PreservedTailState {
+    fn valid_for(&self, arg: &str) -> bool {
+        !self.invalid_exact
+            && self
+                .exact_owner
+                .as_deref()
+                .is_none_or(|owner| Uuid::parse_str(arg).is_err() || owner == arg)
+    }
+
     fn permits_owner(&self, row: &JsonlMessage) -> bool {
         self.exact_owner.as_ref().is_none_or(|owner| {
             session_uuid(&row.session_id).is_some_and(|id| id.to_string() == *owner)
@@ -5075,12 +5221,7 @@ fn session_uuid(value: &str) -> Option<Uuid> {
 }
 
 fn native_exact_preserved_valid_for(loaded: &LoadedTranscript, arg: &str) -> bool {
-    let state = preserved_tail_state(loaded, Some(arg));
-    !state.invalid_exact
-        && state
-            .exact_owner
-            .as_deref()
-            .is_none_or(|owner| Uuid::parse_str(arg).is_err() || owner == arg)
+    preserved_tail_state(loaded, Some(arg)).valid_for(arg)
 }
 
 /// An exact native list can be noncontiguous on disk. Validate its complete
@@ -6521,6 +6662,78 @@ mod tests {
         (temp, lingxi_home, cwd, project_subdir)
     }
 
+    #[test]
+    fn message_probes_preserve_read_errors_until_the_matching_line_or_eof() {
+        struct UnreadableTail;
+        impl std::io::Read for UnreadableTail {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("unreadable tail"))
+            }
+        }
+        let probe = |first: &[u8], second: &[u8], until| {
+            let tail = std::io::Read::chain(second, UnreadableTail);
+            scan_message_marker(std::io::Read::chain(first, tail), until)
+        };
+        let marker_on_last_line = b"earlier line\n{\"type\":\"user\"}";
+        let line = MessageProbeEnd::MatchingLine;
+        let eof = MessageProbeEnd::EndOfFile;
+        assert!(probe(marker_on_last_line, b"", line).is_err());
+        assert!(probe(marker_on_last_line, b"\n", line).unwrap());
+        assert!(probe(marker_on_last_line, b"\n", eof).is_err());
+        assert!(probe(b"\"type\":\"assistant\"\n\"type\":\"user\"", b"", line).unwrap());
+        assert!(scan_message_marker(marker_on_last_line.as_slice(), line).unwrap());
+    }
+
+    #[tokio::test]
+    async fn global_uuid_lookup_selects_one_raw_marker_across_chunk_boundaries() {
+        let (_temp, home, cwd, first_dir) = setup();
+        let second_dir = home.join("projects/second");
+        std::fs::create_dir(&second_dir).unwrap();
+        let id = Uuid::new_v4();
+        let filename = format!("{id}.jsonl");
+        let first = first_dir.join(&filename);
+        let second = second_dir.join(filename);
+        let lookup = || resolve_session_path_in_scope(&home, &cwd, SessionDiscoveryScope::All, id);
+        assert_eq!(message_presence(&first).await, MessagePresence::None);
+        std::fs::write(&first, b"{\"type\":\"summary\"}\n{\"type\": \"user\"}").unwrap();
+        assert_eq!(message_presence(&first).await, MessagePresence::None);
+        assert!(matches!(
+            lookup().await,
+            Err(LoaderError::SessionNotFound { .. })
+        ));
+
+        for marker in [USER_MESSAGE_MARKER, ASSISTANT_MESSAGE_MARKER] {
+            let mut bytes = vec![0xff; crate::jsonl::LITE_READ_BUF_SIZE - 1];
+            bytes.extend_from_slice(marker);
+            std::fs::write(&second, bytes).unwrap();
+            assert_eq!(message_presence(&second).await, MessagePresence::Has);
+            assert_eq!(lookup().await.unwrap(), second);
+        }
+        std::fs::write(&first, USER_MESSAGE_MARKER).unwrap();
+        assert!(matches!(
+            lookup().await,
+            Err(LoaderError::AmbiguousSession { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn global_uuid_lookup_follows_a_regular_transcript_symlink() {
+        let (temp, home, cwd, dir) = setup();
+        let id = Uuid::new_v4();
+        let target = temp.path().join("saved-transcript");
+        std::fs::write(&target, ASSISTANT_MESSAGE_MARKER).unwrap();
+        let link = dir.join(format!("{id}.jsonl"));
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        assert_eq!(
+            resolve_session_path_in_scope(&home, &cwd, SessionDiscoveryScope::All, id)
+                .await
+                .unwrap(),
+            link
+        );
+        assert_eq!(message_presence(&link).await, MessagePresence::None);
+    }
+
     /// Write one `<uuid>.jsonl` first-user-message session (the M5-07/M5-08
     /// on-disk shape), optionally tagging it `isSidechain` and/or `teamName`,
     /// then stamp its mtime. `prompt` becomes the row's extracted title.
@@ -6904,7 +7117,11 @@ mod tests {
                         "/native/linked"
                     },
                     "session",
-                    now + Duration::from_secs(index),
+                    if directory == &linked {
+                        now
+                    } else {
+                        now + Duration::from_secs(index)
+                    },
                 );
             }
         }
@@ -6934,11 +7151,27 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            repository.len(),
-            4,
-            "current is unbounded, linked/orphan buckets each contribute one"
-        );
+        let uncapped = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Repository,
+            0,
+            &fs,
+            &[current.to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(uncapped.len(), 6);
+        let mut seen_buckets = HashSet::new();
+        let expected: Vec<_> = uncapped
+            .into_iter()
+            .filter(|row| {
+                let bucket = row.path.parent().unwrap();
+                bucket == current_bucket.as_path() || seen_buckets.insert(bucket.to_owned())
+            })
+            .collect();
+        assert_eq!(expected.len(), 4);
+        assert_eq!(repository, expected);
     }
 
     #[tokio::test]
@@ -7073,12 +7306,11 @@ mod tests {
                         uuid: Uuid::parse_str(stem).unwrap(),
                         path: PathBuf::from(row["tag"].as_str().unwrap_or(stem)),
                         stem: stem.to_string(),
-                        file_len: 0,
                         file_modified: SystemTime::UNIX_EPOCH
                             + Duration::from_millis(row["modified_ms"].as_u64().unwrap()),
                         file_created: SystemTime::UNIX_EPOCH
                             + Duration::from_millis(row["created_ms"].as_u64().unwrap()),
-                        current_read_validated: false,
+                        cache_revision: None,
                         alias_capture: None,
                     })
                 })
@@ -7139,7 +7371,10 @@ mod tests {
             .replace("\"type\":\"user\"", "\"type\": \"user\"");
         std::fs::write(&path, &source).unwrap();
         let roots = [current.to_string(), sibling.to_string()];
-        let selected = resolve_cli_transcript_source(&home, current, &id.to_string(), None, &roots)
+        let selected =
+            resolve_cli_transcript_source(&home, current, &id.to_string(), None, async {
+                panic!("a local session should resolve without discovering Git worktrees")
+            })
             .await
             .unwrap()
             .unwrap();
@@ -7180,10 +7415,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            resolve_cli_transcript_source(&home, current, &id.to_string(), None, &[])
-                .await
-                .unwrap()
-                .is_none()
+            resolve_cli_transcript_source(&home, current, &id.to_string(), None, async {
+                Vec::new()
+            })
+            .await
+            .unwrap()
+            .is_none()
         );
         let rows = list_recent_sessions_inner(
             &home,
@@ -7215,12 +7452,18 @@ mod tests {
         );
         let linked_bucket = project_dir_for_cwd(&home, linked);
         write_session_id(&linked_bucket, id, linked, "linked", SystemTime::now());
-        let roots = [primary.to_string(), linked.to_string()];
+        let roots = vec![primary.to_string(), linked.to_string()];
         assert_eq!(cli_worktree_order(current, &roots), [linked, primary]);
-        let selected = resolve_cli_transcript_source(&home, current, &id.to_string(), None, &roots)
+        let mut discovered = false;
+        let selected =
+            resolve_cli_transcript_source(&home, current, &id.to_string(), None, async {
+                discovered = true;
+                roots
+            })
             .await
             .unwrap()
             .unwrap();
+        assert!(discovered);
         assert_eq!(selected.0, linked_bucket.join(format!("{id}.jsonl")));
     }
 
@@ -7240,13 +7483,9 @@ mod tests {
             "usable",
             SystemTime::now(),
         );
-        let result = resolve_cli_transcript_source(
-            &home,
-            current,
-            &id.to_string(),
-            None,
-            &[current.to_string(), sibling.to_string()],
-        )
+        let result = resolve_cli_transcript_source(&home, current, &id.to_string(), None, async {
+            panic!("a local read error should stop worktree discovery")
+        })
         .await;
         assert!(matches!(result, Err(LoaderError::Io { .. })));
     }
@@ -7485,12 +7724,14 @@ mod tests {
         assert!(!worktree_dir_matches("-y-other", "-x-repo"));
     }
 
-    #[test]
-    fn git_unavailable_returns_no_worktrees() {
+    #[tokio::test]
+    async fn git_unavailable_returns_no_worktrees() {
         // A throwaway dir that is not a git repo → empty (git non-zero / errors
         // out / single worktree all collapse to the same "behave as before").
         let temp = TempDir::new().unwrap();
-        assert!(git_worktree_paths(&temp.path().to_string_lossy()).is_empty());
+        assert!(git_worktree_paths(&temp.path().to_string_lossy())
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -7841,7 +8082,7 @@ mod tests {
             false,
             &[target_b.to_string_lossy().into_owned()],
             &[],
-            &[path],
+            None,
             &mut skipped,
         )
         .await

@@ -406,13 +406,39 @@ pub fn reasoning_for_request(
     model: &str,
     max_tokens: Option<u32>,
 ) -> Option<crate::ReasoningConfig> {
-    if matches!(thinking, ThinkingConfig::Automatic) {
-        return None;
-    }
+    reasoning_for_wire(
+        thinking,
+        model,
+        max_tokens,
+        crate::model::context_window::is_claude_family(model),
+    )
+}
+
+pub(crate) fn reasoning_for_route(
+    thinking: ThinkingConfig,
+    model: &str,
+    max_tokens: Option<u32>,
+    protocol: Option<crate::ProtocolFamily>,
+) -> Option<crate::ReasoningConfig> {
+    reasoning_for_wire(
+        thinking,
+        model,
+        max_tokens,
+        protocol.is_some_and(crate::ProtocolFamily::is_anthropic_family)
+            && crate::model::context_window::is_claude_family(model),
+    )
+}
+
+fn reasoning_for_wire(
+    thinking: ThinkingConfig,
+    model: &str,
+    max_tokens: Option<u32>,
+    claude_thinking: bool,
+) -> Option<crate::ReasoningConfig> {
     if !session_thinking_active(thinking) {
         return None;
     }
-    if crate::model::context_window::is_claude_family(model) {
+    if claude_thinking {
         // Claude path — unchanged from claude-code.
         if !model_supports_thinking(model) {
             return None;

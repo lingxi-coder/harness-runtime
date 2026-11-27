@@ -58,6 +58,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             || !bootstrap.shared_data.is_empty()
             || !bootstrap.local_apps.is_empty()
             || !bootstrap.delegates.is_empty()
+            || bootstrap.visualizations
             || bootstrap.may_decline)
     {
         return Err(TeamProcessError::Protocol);
@@ -192,6 +193,12 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             source: Default::default(),
         })
     });
+    let visualization = bootstrap.visualizations.then(|| {
+        Arc::new(super::visualization::Draft::new(
+            profile.scope_root(),
+            &bootstrap.task_id,
+        ))
+    });
     profile = profile.with_read_tools(Arc::new(super::read_tools::TeamReadTools {
         bridge: bridge.clone(),
         knowledge,
@@ -202,6 +209,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         local_apps: local_apps.clone(),
         delegate: delegate.clone(),
         no_reply: no_reply.clone(),
+        visualization: visualization.clone(),
     }));
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
@@ -217,7 +225,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let task_profile = profile.clone();
     let task_cancel = cancel.child_token();
     let result = runtime.block_on(async {
-        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,local_apps,delegate,no_reply,bootstrap.private_data).await});
+        let mut task=tokio::spawn(async move {run(cfg,&task_profile,batch,bootstrap.task_id,limits.physical_dispatches.get(),task_cancel,bridge,bootstrap.credentials,bootstrap.continuation,ledger,bootstrap.model_protocol,ask,list,data,local_apps,delegate,no_reply,visualization,bootstrap.private_data).await});
         tokio::select! {
             biased;
             _=tokio::time::sleep_until(deadline.instant.into())=>{task.abort();Err(TeamProcessError::Deadline)},
@@ -311,6 +319,7 @@ async fn run(
     local_apps: Option<Arc<super::local_app_tools::TeamLocalAppTools>>,
     delegate: Option<Arc<super::delegate_tool::TeamDelegateTools>>,
     no_reply: Option<Arc<super::decline_tool::NoReply>>,
+    visualization: Option<Arc<super::visualization::Draft>>,
     private_data: bool,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     if continuation.is_some() && !super::checkpoint::route_supports_continuation(protocol) {
@@ -482,10 +491,26 @@ async fn run(
     let prior_dispatches = resumed
         .as_ref()
         .map_or(0, |state| state.checkpoint.dispatches_observed);
-    let input=format!("Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use only published knowledge and Chat history tools. Produce a useful Markdown answer; this result will be saved as the task's document.");
+    let input = format!(
+        "Respond to shared Chat message {current_message_id}. The original messages above include complete author identity and original timestamps. Read older Chat history before asking anyone to repeat missing earlier context. Use the published knowledge, Chat history, and tools authorized for this task. Produce a useful Markdown answer."
+    );
+    let input = if visualization.is_some() {
+        format!(
+            "{input} When an interactive chart or form is helpful, use {} and include a brief Markdown reply.",
+            super::visualization::NAME
+        )
+    } else {
+        input
+    };
     let input = match &no_reply {
-        Some(choice) if choice.addressed() => format!("{input} This message was written to you directly: answer it, unless it plainly needs no answer from you (a thank-you or an acknowledgement); only then call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL),
-        Some(_) => format!("{input} Nobody asked you for this message: if no reply from you is wanted, call {} and end your turn without writing anything.", super::checkpoint::NO_REPLY_TOOL),
+        Some(choice) if choice.addressed() => format!(
+            "{input} This message was written to you directly: answer it, unless it plainly needs no answer from you (a thank-you or an acknowledgement); only then call {} and end your turn without writing anything.",
+            super::checkpoint::NO_REPLY_TOOL
+        ),
+        Some(_) => format!(
+            "{input} Nobody asked you for this message: if no reply from you is wanted, call {} and end your turn without writing anything.",
+            super::checkpoint::NO_REPLY_TOOL
+        ),
         None => input,
     };
     let finish_only = resumed
@@ -550,6 +575,7 @@ async fn run(
                                 outcome: TeamProcessOutcome::Waiting,
                                 text: String::new(),
                                 document: None,
+                                visualization: None,
                                 finished_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map_err(|_| TeamProcessError::Deadline)?
@@ -652,6 +678,11 @@ async fn run(
         } else {
             None
         },
+        visualization: if outcome == TeamProcessOutcome::Completed && !private_data {
+            visualization.as_ref().and_then(|draft| draft.load())
+        } else {
+            None
+        },
         text: if text.len() <= 8192 {
             text
         } else {
@@ -665,6 +696,11 @@ async fn run(
         denied_tools: denied.load(Ordering::Relaxed),
     };
     let saved = super::chat_session::record_result(&rt, &task_id, &result).await;
+    if saved.is_ok() {
+        if let Some(draft) = visualization.as_ref() {
+            draft.remove();
+        }
+    }
     let drain = rt.shutdown().await;
     drop(pump);
     saved?;
@@ -776,8 +812,8 @@ fn verify_continuation(
 }
 
 /// Continue from the durable head. Persisted tool results are already in the
-/// restored history and are never executed again; each unfinished read-only
-/// Team tool runs once now under the current authorization and its result is
+/// restored history and are never executed again. The checkpoint evaluator
+/// admits replayable Team tools under the current authorization. Each result is
 /// persisted before the next model request is built.
 async fn run_continuation(
     rt: &crate::desktop::DesktopRuntime,

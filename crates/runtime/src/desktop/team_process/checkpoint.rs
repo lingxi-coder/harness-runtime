@@ -538,6 +538,7 @@ pub(super) fn evaluate(input: &Inputs<'_>) -> Result<TaskState, TeamProcessError
                         super::data_tools::HANDOFF,
                         super::local_app_tools::CALL,
                         super::delegate_tool::DELEGATE,
+                        super::visualization::NAME,
                     ]
                     .contains(&c.tool_name.as_str())
             }) =>
@@ -798,6 +799,27 @@ mod tests {
         assert!(!c.continuable);
         assert_eq!(c.reason, Some("pending_write_tool"));
         assert!(!c.pending_tool_calls[0].read_only);
+    }
+    #[test]
+    fn unfinished_visualization_can_resume_as_a_draft_only_tool() {
+        let state = eval(
+            &lines(vec![
+                batch_row(),
+                prompt_row(),
+                call_row(
+                    "m1",
+                    &[("viz", super::super::visualization::NAME)],
+                    "tool_use",
+                ),
+            ]),
+            true,
+            CHAT,
+        );
+
+        assert!(state.checkpoint.continuable);
+        assert!(state.checkpoint.wait.is_none());
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].logical_step_id, format!("{TASK}/t0/c0"));
     }
     #[test]
     fn inconsistent_transcripts_are_refused_not_guessed() {

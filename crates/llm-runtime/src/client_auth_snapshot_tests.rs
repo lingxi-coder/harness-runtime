@@ -197,7 +197,7 @@ async fn prompt_cache_subscriber_uses_the_request_credential_snapshot_scopes() {
                 && scope.credential_id.as_deref() == Some("snapshot-key")
             }
         }),
-        pending_overage: Arc::new(Mutex::new(None)),
+        ttl_settings: None,
     });
 
     let prepared = client.prepare(&request).await.unwrap();
@@ -291,7 +291,7 @@ async fn account_change_after_request_build_binds_the_current_credential_generat
                     && scope.credential_id.as_deref() == Some("snapshot-key")
             }
         }),
-        pending_overage: Arc::new(Mutex::new(None)),
+        ttl_settings: None,
     });
 
     // The context is assembled under account A. Model the completed account
@@ -388,7 +388,7 @@ async fn account_change_during_credential_load_keeps_the_request_generation_sepa
                     && scope.credential_id.as_deref() == Some("snapshot-key")
             }
         }),
-        pending_overage: Arc::new(Mutex::new(None)),
+        ttl_settings: None,
     });
 
     // The provider snapshots account A before suspending its load. Advancing
@@ -583,26 +583,32 @@ async fn send_draft(
     observations: &Arc<RaceObservations>,
     expected_authorization: &str,
 ) {
-    let prepared = tokio::time::timeout(WAIT, client.prepare_on(request, transport))
-        .await
-        .unwrap()
-        .unwrap();
+    let prepared = tokio::time::timeout(
+        WAIT,
+        client.prepare_on(request, transport, Default::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         prepared.provider_request.stream_transport,
         ProviderStreamTransport::ResponsesWebSocket
     );
-    let prepared = tokio::time::timeout(WAIT, client.prepare_shared_stream(prepared, session))
-        .await
-        .unwrap()
-        .unwrap();
+    let mut prepared = prepared;
+    let draft = ModelRuntime::shared_stream_draft(&mut prepared).unwrap();
+    let prepared =
+        tokio::time::timeout(WAIT, client.prepare_shared_stream(prepared, draft, session))
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(sealed_auth(&prepared), expected_authorization);
-    let mut mark = || {
+    let mut mark = |_: &PreparedLlmCall| {
         observations.dispatches.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(None)
     };
     let (_, received, _) = tokio::time::timeout(
         WAIT,
-        client.open_shared_stream(prepared, session, &mut mark),
+        client.open_shared_stream(prepared, session, &mut mark, &mut |_, _| {}),
     )
     .await
     .unwrap()
@@ -788,10 +794,13 @@ async fn request_snapshot_signs_final_http_policy_body_and_headers() {
     let transport = Arc::new(SignedHttpCapture::default());
     let mut request = LlmRequest::new("snapshot-model").with_user_text("final signed request");
     request.input.max_tokens = Some(17);
-    let mut prepared = tokio::time::timeout(WAIT, client.prepare_on(&request, transport.clone()))
-        .await
-        .unwrap()
-        .unwrap();
+    let mut prepared = tokio::time::timeout(
+        WAIT,
+        client.prepare_on(&request, transport.clone(), Default::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         store.loads.load(Ordering::SeqCst),
         0,

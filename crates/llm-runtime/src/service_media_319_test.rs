@@ -1,6 +1,11 @@
 use super::*;
+use crate::model::user_agent::UserAgentEnv;
+use crate::{
+    ApiService, LlmError, LlmRequest, ModelRuntime, PromptCacheQuerySource, SubscriberState,
+};
 use lingxi_core::types::{MessageId, ToolUseId};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 fn fixture() -> Value {
     serde_json::from_str(include_str!("../tests/fixtures/media_limits_2_1_319.json")).unwrap()
@@ -118,6 +123,63 @@ fn media_projection_matches_native_319_source_vectors() {
             );
         }
     }
+}
+
+#[test]
+fn trimming_nested_media_preserves_sparse_array_entries_and_properties() {
+    let image = Utf16JsonProjection::parse(
+        r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"dGVzdA=="}}"#,
+    )
+    .unwrap();
+    let content = Utf16JsonProjection::sparse_array_with_properties(
+        4,
+        vec![(0, image), (2, Utf16JsonProjection::from("keep"))],
+        vec![(
+            "note".encode_utf16().collect(),
+            Utf16JsonProjection::from("metadata"),
+        )],
+    )
+    .unwrap();
+    let mut message = ConversationMessage::user(MessageId::new(), String::new());
+    let ConversationMessage::User {
+        content: blocks, ..
+    } = &mut message
+    else {
+        unreachable!()
+    };
+    *blocks = vec![ContentBlock::ProviderContent {
+        protocol: "anthropic_messages".into(),
+        value: Utf16JsonProjection::object(vec![
+            ("type".into(), Utf16JsonProjection::from("tool_result")),
+            ("content".into(), content),
+        ])
+        .unwrap(),
+    }];
+    let projected = strip_native_media_with_sources(
+        ConversationMessagesWithSources::new(vec![message]),
+        NativeMediaLimits {
+            count: 0,
+            count_headroom: 0,
+            bytes: 100,
+            byte_headroom: 0,
+            document_bytes: 0,
+        },
+    );
+    let ConversationMessage::User { content, .. } = &projected.messages[0] else {
+        unreachable!()
+    };
+    let ContentBlock::ProviderContent { value, .. } = &content[0] else {
+        unreachable!()
+    };
+    let array = value.at_pointer("/content").unwrap();
+    assert_eq!(array.array_len(), Some(4));
+    assert_eq!(value.string_at("/content/0/text"), Some(MEDIA_REMOVED));
+    assert!(array.get_index(1).unwrap().is_undefined());
+    assert_eq!(array.get_index(2).unwrap().as_str(), Some("keep"));
+    assert_eq!(
+        array.get_property("note").unwrap().as_str(),
+        Some("metadata")
+    );
 }
 
 #[test]

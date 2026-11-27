@@ -632,8 +632,7 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             session
-                .model_context_history()
-                .iter()
+                .iter_model_context_history()
                 .filter_map(|message| attachments.get(&message.id()))
                 .filter_map(|attachment| {
                     let mut row = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
@@ -696,7 +695,7 @@ impl ConversationOrchestrator {
                 .model_reminder_attachments
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for message in session.model_context_history() {
+            for message in session.iter_model_context_history() {
                 let Some(payload) = attachments.get(&message.id()) else {
                     continue;
                 };

@@ -31,6 +31,7 @@ pub struct ComputerRequestProjection {
     pub context_epoch: u64,
 }
 
+#[derive(Clone)]
 pub struct ComputerReceiptSubmission {
     pub journal: Arc<dyn lingxi_core::host::ToolExecutionJournal>,
     pub receipts: Vec<lingxi_core::host::NativeReceiptRecord>,
@@ -51,8 +52,109 @@ impl PartialEq for ComputerReceiptSubmission {
     }
 }
 
+/// Owns the exact Submitted acknowledgements for a dispatch that has not yet
+/// passed final SDK admission. A duplicate acknowledgement never grants ownership.
+pub(crate) struct PendingComputerSubmission {
+    runtime: tokio::runtime::Handle,
+    journal: Arc<dyn lingxi_core::host::ToolExecutionJournal>,
+    submitted: Vec<lingxi_core::host::NativeReceiptRecord>,
+}
+
+impl PendingComputerSubmission {
+    async fn rollback(
+        journal: &dyn lingxi_core::host::ToolExecutionJournal,
+        submitted: &[lingxi_core::host::NativeReceiptRecord],
+    ) -> Result<(), LlmError> {
+        use lingxi_core::host::NativeReceiptStage;
+        let mut first_error = None;
+        for owned in submitted {
+            let result = async {
+                if journal.receipt(&owned.receipt_id).await?.as_ref() == Some(owned) {
+                    let mut record = owned.clone();
+                    record.stage = NativeReceiptStage::NotSubmitted;
+                    journal.record_receipt(record).await?;
+                }
+                Ok::<_, lingxi_core::host::ToolJournalError>(())
+            }
+            .await;
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), |error| {
+            Err(LlmError::InvalidRequest {
+                message: format!("unsent computer receipt cleanup failed: {error}"),
+            })
+        })
+    }
+
+    /// Called synchronously after the final admission callback succeeds.
+    pub(crate) fn dispatched(&mut self) {
+        self.submitted.clear();
+    }
+
+    /// Await durable cleanup on an ordinary pre-dispatch failure. Drop also
+    /// covers cancellation of this wait. The journal fences stage and attempt.
+    pub(crate) async fn close(&mut self) -> Result<(), LlmError> {
+        Self::rollback(self.journal.as_ref(), &self.submitted).await?;
+        self.submitted.clear();
+        Ok(())
+    }
+}
+
+impl Drop for PendingComputerSubmission {
+    fn drop(&mut self) {
+        if self.submitted.is_empty() {
+            return;
+        }
+        let journal = self.journal.clone();
+        let submitted = std::mem::take(&mut self.submitted);
+        self.runtime.spawn(async move {
+            if let Err(error) = Self::rollback(journal.as_ref(), &submitted).await {
+                tracing::error!(%error, "failed to release unsent computer receipts");
+            }
+        });
+    }
+}
+
 impl ComputerReceiptSubmission {
     pub async fn before_submit(&self) -> Result<(), LlmError> {
+        Arc::new(self.clone())
+            .prepare_dispatch()
+            .await?
+            .dispatched();
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_dispatch(
+        self: &Arc<Self>,
+    ) -> Result<PendingComputerSubmission, LlmError> {
+        // A cancelled caller must not drop a journal write between its commit
+        // and acknowledgement. The owned task finishes it; dropping its result
+        // rolls back only the entries that this caller actually acquired.
+        let submission = self.clone();
+        tokio::spawn(async move {
+            let mut guard = PendingComputerSubmission {
+                runtime: tokio::runtime::Handle::current(),
+                journal: submission.journal.clone(),
+                submitted: Vec::new(),
+            };
+            if let Err(error) = submission.prepare_receipts(&mut guard).await {
+                guard.close().await?;
+                return Err(error);
+            }
+            Ok(guard)
+        })
+        .await
+        .map_err(|error| LlmError::InvalidRequest {
+            message: format!("computer receipt preparation interrupted: {error}"),
+        })?
+    }
+
+    async fn prepare_receipts(
+        &self,
+        guard: &mut PendingComputerSubmission,
+    ) -> Result<(), LlmError> {
         use lingxi_core::host::NativeReceiptStage;
         if self.receipts.is_empty() {
             return Err(LlmError::InvalidRequest {
@@ -90,7 +192,7 @@ impl ComputerReceiptSubmission {
                 })?;
             let ack = self
                 .journal
-                .record_receipt(submitted)
+                .record_receipt(submitted.clone())
                 .await
                 .map_err(|error| LlmError::InvalidRequest {
                     message: format!(
@@ -100,38 +202,7 @@ impl ComputerReceiptSubmission {
             if ack.duplicate {
                 return Err(LlmError::InvalidRequest { message:"computer receipt submission was already admitted; automatic resubmission is forbidden".into() });
             }
-        }
-        Ok(())
-    }
-
-    /// Only call after the final dispatch callback rejected, proving zero sends.
-    pub(crate) async fn not_submitted(&self) -> Result<(), LlmError> {
-        use lingxi_core::host::NativeReceiptStage;
-        for prepared in &self.receipts {
-            let mut record = self
-                .journal
-                .receipt(&prepared.receipt_id)
-                .await
-                .map_err(|e| LlmError::InvalidRequest {
-                    message: e.to_string(),
-                })?
-                .ok_or_else(|| LlmError::InvalidRequest {
-                    message: "submitted receipt disappeared".into(),
-                })?;
-            if record.stage != NativeReceiptStage::Submitted
-                || Some(record.submission_attempt) != prepared.submission_attempt.checked_add(1)
-            {
-                return Err(LlmError::InvalidRequest {
-                    message: "unsent receipt has a different submission attempt".into(),
-                });
-            }
-            record.stage = NativeReceiptStage::NotSubmitted;
-            self.journal
-                .record_receipt(record)
-                .await
-                .map_err(|e| LlmError::InvalidRequest {
-                    message: e.to_string(),
-                })?;
+            guard.submitted.push(submitted);
         }
         Ok(())
     }
@@ -519,6 +590,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_second_receipt_releases_only_this_submissions_acknowledgements() {
+        use lingxi_core::host::NativeReceiptStage;
+        let journal = Arc::new(Journal::default());
+        let mut submission = submission(journal.clone());
+        let mut second = submission.receipts[0].clone();
+        second.receipt_id = "receipt-2".into();
+        Arc::get_mut(&mut submission)
+            .unwrap()
+            .receipts
+            .push(second.clone());
+        second.stage = NativeReceiptStage::Submitted;
+        second.submission_attempt = 1;
+        journal.record_receipt(second.clone()).await.unwrap();
+
+        assert!(submission.prepare_dispatch().await.is_err());
+        let first = journal.receipt("receipt-1").await.unwrap().unwrap();
+        assert_eq!(
+            (first.stage, first.submission_attempt),
+            (NativeReceiptStage::NotSubmitted, 1)
+        );
+        assert_eq!(journal.receipt("receipt-2").await.unwrap(), Some(second));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_dispatch_releases_its_late_journal_ack() {
+        let journal = Arc::new(Journal::default());
+        let submission = submission(journal.clone());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *journal.1.lock().unwrap() = Some((entered.clone(), resume.clone()));
+        let waiter = tokio::spawn(async move { submission.prepare_dispatch().await });
+        entered.notified().await;
+        waiter.abort();
+        assert!(waiter.await.is_err());
+        resume.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if journal
+                    .receipt("receipt-1")
+                    .await
+                    .unwrap()
+                    .is_some_and(|receipt| {
+                        receipt.stage == lingxi_core::host::NativeReceiptStage::NotSubmitted
+                            && receipt.submission_attempt == 1
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("late acknowledgement released");
+    }
+
+    #[tokio::test]
     async fn pure_preparation_never_submits_a_receipt() {
         let config: crate::ClientConfig = serde_json::from_value(json!({"providers":[{
             "provider_id":"anthropic_first_party", "profile_name":"test", "base_url":"https://api.anthropic.com", "protocol":"anthropic_messages", "auth":"none", "credential":{"type":"none"},
@@ -531,10 +658,19 @@ mod tests {
         request.execution.computer_submission = Some(submission(journal.clone()));
         let prepared = client.prepare(&request).await.unwrap();
         assert!(journal.0.lock().unwrap().is_empty());
-        prepared.before_computer_submit().await.unwrap();
+        let mut guard = prepared
+            .prepare_computer_submission()
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(journal.0.lock().unwrap().len(), 1);
         let cloned = client.prepare(&request).await.unwrap();
-        assert!(cloned.before_computer_submit().await.is_err());
+        assert!(cloned.prepare_computer_submission().await.is_err());
+        guard.close().await.unwrap();
+        assert_eq!(
+            journal.receipt("receipt-1").await.unwrap().unwrap().stage,
+            lingxi_core::host::NativeReceiptStage::NotSubmitted
+        );
     }
 
     #[tokio::test]
@@ -646,7 +782,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_execute_budget_rejection_restores_computer_receipt() {
+    async fn direct_execute_exhausted_budget_preserves_prepared_receipt() {
         let config: crate::ClientConfig = serde_json::from_value(json!({"providers":[{
             "provider_id":"anthropic_first_party", "profile_name":"test", "base_url":"https://api.anthropic.com", "protocol":"anthropic_messages", "auth":"none", "credential":{"type":"none"},
             "models":[{"display_model":"model","request_model":"model","billing_model":"model","capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
@@ -656,6 +792,18 @@ mod tests {
         let mut request = crate::LlmRequest::new("model").with_user_text("test");
         request.input.max_tokens = Some(4096);
         request.execution.computer_submission = Some(submission(journal.clone()));
+        journal
+            .record_receipt(
+                request
+                    .execution
+                    .computer_submission
+                    .as_ref()
+                    .unwrap()
+                    .receipts[0]
+                    .clone(),
+            )
+            .await
+            .unwrap();
         request.execution.api_attempts_left = Some(crate::ApiAttemptsLeft::new(0));
         let transport = Arc::new(ReceiptTransport::default());
 
@@ -669,13 +817,13 @@ mod tests {
         let receipt = journal.receipt("receipt-1").await.unwrap().unwrap();
         assert_eq!(
             receipt.stage,
-            lingxi_core::host::NativeReceiptStage::NotSubmitted
+            lingxi_core::host::NativeReceiptStage::Prepared
         );
-        assert_eq!(receipt.submission_attempt, 1);
+        assert_eq!(receipt.submission_attempt, 0);
     }
 
     #[tokio::test]
-    async fn direct_stream_budget_rejection_restores_computer_receipt() {
+    async fn direct_stream_exhausted_budget_preserves_prepared_receipt() {
         let config: crate::ClientConfig = serde_json::from_value(json!({"providers":[{
             "provider_id":"anthropic_first_party", "profile_name":"test", "base_url":"https://api.anthropic.com", "protocol":"anthropic_messages", "auth":"none", "credential":{"type":"none"},
             "models":[{"display_model":"model","request_model":"model","billing_model":"model","capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
@@ -686,6 +834,18 @@ mod tests {
         request.input.max_tokens = Some(4096);
         request.stream = true;
         request.execution.computer_submission = Some(submission(journal.clone()));
+        journal
+            .record_receipt(
+                request
+                    .execution
+                    .computer_submission
+                    .as_ref()
+                    .unwrap()
+                    .receipts[0]
+                    .clone(),
+            )
+            .await
+            .unwrap();
         request.execution.api_attempts_left = Some(crate::ApiAttemptsLeft::new(0));
         let transport = Arc::new(ReceiptTransport::default());
 
@@ -699,9 +859,9 @@ mod tests {
         let receipt = journal.receipt("receipt-1").await.unwrap().unwrap();
         assert_eq!(
             receipt.stage,
-            lingxi_core::host::NativeReceiptStage::NotSubmitted
+            lingxi_core::host::NativeReceiptStage::Prepared
         );
-        assert_eq!(receipt.submission_attempt, 1);
+        assert_eq!(receipt.submission_attempt, 0);
     }
 
     #[tokio::test]
@@ -747,6 +907,39 @@ mod tests {
                 "known unsent receipt must not acquire Submitted"
             );
             request.execution.request_dispatch_admission = None;
+            let quota = Arc::new(crate::ScopeOutputQuota::new(
+                std::num::NonZeroU32::new(4096).unwrap(),
+                std::num::NonZeroU32::new(1).unwrap(),
+            ));
+            quota
+                .set_dispatch_authorization(Arc::new(|| {
+                    Box::pin(async {
+                        tokio::task::yield_now().await;
+                        Err(LlmError::PermissionDenied {
+                            message: "scope denied".into(),
+                        })
+                    })
+                }))
+                .unwrap();
+            let service = service.with_scope_output_quota(Some(quota));
+            let result = if stream {
+                service.stream_request(request.clone()).await.map(|_| ())
+            } else {
+                service
+                    .execute_non_stream_request(
+                        request.clone(),
+                        crate::NonStreamingRequestClass::Main,
+                        Default::default(),
+                    )
+                    .await
+                    .map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(LlmError::PermissionDenied { .. })),
+                "{result:?}"
+            );
+            assert!(journal.0.lock().unwrap().is_empty());
+            assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0);
             client.execute(&request, transport.clone()).await.unwrap();
             assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 1);
             assert_eq!(

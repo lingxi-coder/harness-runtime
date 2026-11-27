@@ -10,6 +10,7 @@ default = []
 test-support = []
 # Independent duplex realtime sessions; Responses WebSockets use the SDK transport.
 realtime-websocket = ["lingxi-llm-client/realtime-websocket"]
+loom-tests = ["dep:loom"]
 
 [dependencies]
 core = { path = "../core" }
@@ -37,10 +38,15 @@ jiff = { workspace = true }
 rand = "0.9"
 urlencoding = "2"
 tracing.workspace = true
+loom = { version = "0.7", optional = true }
 
 [dev-dependencies]
 llm-runtime = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
+
+[[test]]
+name = "refresh_single_flight_test"
+required-features = ["loom-tests"]
 
 [lints]
 workspace = true

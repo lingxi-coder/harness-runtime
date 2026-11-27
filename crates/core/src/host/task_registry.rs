@@ -2321,6 +2321,15 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// registry-less contexts are unaffected.
     fn increment_web_search_calls(&self) {}
 
+    /// Reserve one session WebSearch call, returning the count at the cap.
+    /// Registries that keep a shared count must implement this atomically.
+    fn try_reserve_web_search_call(&self, max: u32) -> Result<(), u32> {
+        if max == 0 {
+            return Err(0);
+        }
+        Ok(())
+    }
+
     /// Reset the session WebSearch counter to zero — 1:1 with
     /// `taskRegistry.resetWebSearchCalls(){n=0}`. Default no-op.
     fn reset_web_search_calls(&self) {}

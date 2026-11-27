@@ -131,7 +131,7 @@ fn request() -> LlmRequest {
         native_bare_mode: false,
         native_unix_socket: false,
         overage_for_scope: Arc::new(|_, _| false),
-        pending_overage: Arc::new(Mutex::new(None)),
+        ttl_settings: None,
     });
     request
 }
@@ -242,7 +242,13 @@ async fn kimi_main_requests_adapt_only_generated_cache_controls_in_both_modes() 
                 req.input.max_tokens = Some(1024);
                 req.execution.enable_prompt_caching = Some(enabled);
                 client
-                    .prepare_internal(&req, std::time::SystemTime::now(), None, false)
+                    .prepare_internal(
+                        &req,
+                        std::time::SystemTime::now(),
+                        None,
+                        false,
+                        Default::default(),
+                    )
                     .await
                     .unwrap_or_else(|error| {
                         panic!("{name} stream={stream} cache={enabled}: {error:?}")
@@ -263,7 +269,13 @@ async fn kimi_main_requests_adapt_only_generated_cache_controls_in_both_modes() 
                 });
             assert!(
                 client
-                    .prepare_internal(&req, std::time::SystemTime::now(), None, false)
+                    .prepare_internal(
+                        &req,
+                        std::time::SystemTime::now(),
+                        None,
+                        false,
+                        Default::default()
+                    )
                     .await
                     .is_err(),
                 "explicit unsupported cache controls must not be silently removed"

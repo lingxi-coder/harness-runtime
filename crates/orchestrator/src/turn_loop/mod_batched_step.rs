@@ -110,10 +110,11 @@ impl PhysicalStepResponse {
         mut prompt_components: ReselectedPromptComponents,
         cache_snapshot: Option<llm_runtime::prompt_cache::RequestSnapshot>,
     ) -> Result<Self, lingxi_core::settings::SettingsError> {
-        let retries = orch.api.last_retry_count();
+        let diagnostics = response.diagnostics();
+        let retries = orch.api.response_retry_count(diagnostics.as_ref());
         let cache_read = response.usage.counts().cache_read_tokens;
         let cache_create = response.usage.counts().cache_write_tokens;
-        let request_id = orch.api.last_request_id();
+        let request_id = orch.api.response_request_id(diagnostics.as_ref());
         // Submit as soon as the physical request succeeds. If a later Mod
         // throws or the cancelable turn drops its future, the cost supervisor
         // still owns this observed charge.

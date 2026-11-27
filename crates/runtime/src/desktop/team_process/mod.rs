@@ -34,6 +34,7 @@ pub(super) mod model;
 pub use accounts::TeamAccountEnvelope;
 pub use model::TeamModelRoute;
 mod protocol;
+mod visualization;
 mod worker;
 
 use super::team_invocation::{TeamInvocationError, TeamInvocationLimits, TeamInvocationProfile};
@@ -138,6 +139,7 @@ pub struct TeamProcessRequest {
     /// Bots. Ignored on routes without continuation support, where an
     /// interrupted delegation could not be finished.
     pub delegates: Vec<TeamDelegateOffer>,
+    pub visualizations: bool,
     /// Nobody asked the Bot for this task: offer it the tool that leaves the
     /// message unanswered. The task then ends as `Declined` and posts nothing.
     pub may_decline: bool,
@@ -314,6 +316,8 @@ pub struct TeamProcessResult {
     pub finished_at: u64,
     pub cursor: BotChatCursor,
     pub document: Option<TeamDocumentResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visualization: Option<visualization::Artifact>,
     pub usage: TeamUsage,
 }
 
@@ -420,6 +424,7 @@ impl TeamProcessStart {
             || !request.shared_data.is_empty()
             || !request.local_apps.is_empty()
             || !request.delegates.is_empty()
+            || request.visualizations
             || request.may_decline
             || !request.knowledge.is_empty()
         {
@@ -564,6 +569,7 @@ impl TeamProcessStart {
                     Vec::new()
                 }
             },
+            visualizations: request.visualizations,
             may_decline: request.may_decline,
             addressed: request.addressed,
         };
@@ -765,7 +771,7 @@ async fn broker_exchange(
                     protocol::WorkerFailure::NotContinuable => TeamProcessError::NotContinuable,
                     protocol::WorkerFailure::RouteUnsupported => TeamProcessError::RouteUnsupported,
                     _ => TeamProcessError::Worker,
-                })
+                });
             }
             WorkerFrame::Authorize { id } => {
                 if !protocol::valid_id(&id) || !seen.insert(id.clone()) {

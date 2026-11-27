@@ -107,18 +107,13 @@ fn compiled_input_schema(
     static CACHE: OnceLock<Mutex<VecDeque<(serde_json::Value, Arc<CompiledInputSchema>)>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
-    // External references and custom metaschemas can change independently of
-    // this root value. Compile them afresh, retaining ordinary local caches.
-    let cacheable = !schema_has_external_dependencies(schema);
-    if cacheable {
-        if let Some((_, compiled)) = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .find(|(key, _)| key == schema)
-        {
-            return Some(Arc::clone(compiled));
-        }
+    if let Some((_, compiled)) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(key, _)| key == schema)
+    {
+        return Some(Arc::clone(compiled));
     }
     let mut schemas = Schemas::new();
     let mut compiler = Compiler::new();
@@ -134,7 +129,8 @@ fn compiled_input_schema(
         }
     };
     let compiled = Arc::new(CompiledInputSchema { schemas, index });
-    if !cacheable {
+    // Only cache schemas whose dependencies are fixed by this exact root value.
+    if schema_has_external_dependencies(schema) {
         return Some(compiled);
     }
     let mut guard = cache

@@ -1,25 +1,73 @@
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 const SYSTEM_REMINDER_PREFIX: &str = "<system-reminder>\n";
 const SYSTEM_REMINDER_SUFFIX: &str = "\n</system-reminder>";
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct DeferredToolsProjectionFacts {
-    /// H's resolved MCTC route, beta-rejection, refusal, and deferral facts
-    /// used for the surface-late request view. Native additionally gates this
-    /// with its feature/profile settings and admits routes H does not expose.
-    pub(crate) surface_late_tool_additions: bool,
+    /// Present when this request's route, beta, refusal and deferral gates allow late additions.
+    tools: Option<Arc<DeferredToolNames>>,
+}
+
+#[derive(Debug)]
+struct DeferredToolNames {
     /// Current by-value tool additions present in H API-system messages.
     /// `None` corresponds to an undefined definition pool for this view;
     /// `Some` permits `replacedNames`. Native's inline-beta feature/profile
     /// gates are not fully represented by this fact.
-    pub(crate) inline_tool_definition_names: Option<Vec<String>>,
+    inline_tool_definition_names: Option<HashSet<String>>,
     /// Exact current ToolSearch wire names, kept separate from the complete
     /// tool pool because Native filters surfaced names against this set when
     /// by-value definitions are absent.
-    pub(crate) deferred_wire_tool_names: Vec<String>,
+    deferred_wire_tool_names: Vec<String>,
+    current_utf16: OnceLock<HashSet<Vec<u16>>>,
+}
+
+impl DeferredToolsProjectionFacts {
+    pub(crate) fn new(
+        surface_late_tool_additions: bool,
+        inline_tool_definition_names: Option<HashSet<String>>,
+        deferred_wire_tool_names: Vec<String>,
+    ) -> Self {
+        Self {
+            tools: surface_late_tool_additions.then(|| {
+                Arc::new(DeferredToolNames {
+                    inline_tool_definition_names,
+                    deferred_wire_tool_names,
+                    current_utf16: OnceLock::new(),
+                })
+            }),
+        }
+    }
+}
+
+impl DeferredToolNames {
+    fn current(&self) -> &HashSet<Vec<u16>> {
+        self.current_utf16.get_or_init(|| {
+            self.deferred_wire_tool_names
+                .iter()
+                .chain(self.inline_tool_definition_names.iter().flatten())
+                .map(|name| name.encode_utf16().collect())
+                .collect()
+        })
+    }
+}
+
+pub(crate) fn deferred_name_only_announcements(payload: &Source) -> impl Iterator<Item = &str> {
+    let entries = if payload.string_at("/type") == Some("deferred_tools_record") {
+        payload
+            .at_pointer("/nameOnlyAnnouncements")
+            .and_then(|value| value.array_entries())
+    } else {
+        None
+    };
+    entries
+        .into_iter()
+        .flat_map(|(_, entries)| entries)
+        .filter_map(|(_, value)| value.as_str())
 }
 
 pub(crate) fn cached_rendered_row_count(message: &ConversationMessage) -> usize {
@@ -44,40 +92,49 @@ pub(crate) fn cached_rendered_row_count(message: &ConversationMessage) -> usize 
 pub(crate) fn render_deferred_tools_delta_for_request(
     id: MessageId,
     source: &Source,
-    cached_message: Option<&ConversationMessage>,
+    cached_message: Option<ConversationMessage>,
     cached_rendered_count: usize,
-    facts: DeferredToolsProjectionFacts,
+    facts: &DeferredToolsProjectionFacts,
     name_only_announcement: bool,
 ) -> Option<ConversationMessage> {
     if source.string_at("/type") != Some("deferred_tools_delta") {
-        return nonempty_cached_message(cached_message);
+        return cached_message.filter(|message| cached_rendered_row_count(message) > 0);
     }
-    let surfaced_gate = facts.surface_late_tool_additions && !name_only_announcement;
-    let surfaced = if surfaced_gate {
-        current_surfaced_tool_names(source, &facts)
-    } else {
-        Vec::new()
-    };
     // qWr/sMn always compares the raw surfaced and replaced arrays. The
-    // optional definition pool gates xr construction above, not this source
-    // equality check.
-    let source_names = source_names(source, "/surfacedNames")
-        .into_iter()
-        .chain(source_names(source, "/replacedNames"))
-        .collect::<Vec<_>>();
-    let qwr_matches = qwr_matches(&source_names, &surfaced);
-    let cached_rows = (cached_rendered_count > 0)
-        .then(|| cached_message.cloned())
-        .flatten();
-
-    if qwr_matches && cached_rows.is_some() {
+    // optional inline pool gates which of those names may surface.
+    let mut names = source_name_units(source, "/surfacedNames").collect::<Vec<_>>();
+    let replaced_start = names.len();
+    names.extend(source_name_units(source, "/replacedNames"));
+    let mut surfaced = Vec::new();
+    if let Some(tools) = facts.tools.as_ref().filter(|_| !name_only_announcement) {
+        let candidates = if tools.inline_tool_definition_names.is_some() {
+            &names[..]
+        } else {
+            &names[..replaced_start]
+        };
+        if !candidates.is_empty() {
+            let current = tools.current();
+            surfaced.extend(
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|name| current.contains(*name)),
+            );
+        }
+    }
+    if cached_rendered_count > 0 && cached_message.is_some() && qwr_matches(&names, &surfaced) {
         // H currently projects each deferred delta to one user message. Native
         // uses cached rows whenever GWr validates the nonempty cache; a row
         // count mismatch falls back to that same cached row set.
-        return cached_rows;
+        return cached_message;
     }
 
-    let rendered = render_nqe(source, &surfaced, cached_message);
+    let rendered = render_nqe(
+        source,
+        &surfaced,
+        &names[replaced_start..],
+        cached_message.as_ref(),
+    );
     rendered.map(|units| {
         ConversationMessage::user_meta_js_utf16(id, String::from_utf16_lossy(&units), units)
     })
@@ -85,88 +142,58 @@ pub(crate) fn render_deferred_tools_delta_for_request(
 
 /// Match qWr/sMn: compare cardinality and one-way membership, preserving the
 /// source's duplicate-sensitive and asymmetric behavior.
-fn qwr_matches(source_names: &[Vec<u16>], current_names: &[Vec<u16>]) -> bool {
-    source_names.len() == current_names.len()
-        && source_names
-            .iter()
-            .all(|name| current_names.iter().any(|current| current == name))
+fn qwr_matches(source_names: &[&[u16]], current_names: &[&[u16]]) -> bool {
+    if source_names.len() != current_names.len() {
+        return false;
+    }
+    if source_names == current_names {
+        return true;
+    }
+    let current = current_names.iter().copied().collect::<HashSet<_>>();
+    source_names.iter().all(|name| current.contains(*name))
+}
+
+fn source_name_units<'a>(source: &'a Source, path: &str) -> impl Iterator<Item = &'a [u16]> {
+    source
+        .at_pointer(path)
+        .and_then(|value| value.array_entries())
+        .into_iter()
+        .flat_map(|(_, entries)| entries)
+        .filter_map(|(_, value)| value.code_units())
 }
 
 fn source_names(source: &Source, path: &str) -> Vec<Vec<u16>> {
-    let Some(length) = source.array_len(path) else {
-        return Vec::new();
-    };
-    (0..length)
-        .filter_map(|index| source.string_units(&format!("{path}/{index}")))
-        .collect()
-}
-
-fn current_surfaced_tool_names(
-    source: &Source,
-    facts: &DeferredToolsProjectionFacts,
-) -> Vec<Vec<u16>> {
-    let mut current = facts
-        .deferred_wire_tool_names
-        .iter()
-        .map(|name| name.encode_utf16().collect::<Vec<_>>())
-        .collect::<HashSet<_>>();
-    let definitions = facts.inline_tool_definition_names.as_ref();
-    if let Some(names) = definitions {
-        current.extend(
-            names
-                .iter()
-                .map(|name| name.encode_utf16().collect::<Vec<_>>()),
-        );
-    }
-    let mut candidates = source_names(source, "/surfacedNames");
-    if definitions.is_some() {
-        candidates.extend(source_names(source, "/replacedNames"));
-    }
-    candidates
-        .into_iter()
-        .filter(|name| current.contains(name))
+    source_name_units(source, path)
+        .map(<[u16]>::to_vec)
         .collect()
 }
 
 fn render_nqe(
     source: &Source,
-    surfaced: &[Vec<u16>],
+    surfaced: &[&[u16]],
+    replaced: &[&[u16]],
     cached_message: Option<&ConversationMessage>,
 ) -> Option<Vec<u16>> {
-    let mut surfaced_seen = HashSet::new();
-    let surfaced = surfaced
+    let mut surfaced_set = HashSet::new();
+    let replaced = replaced.iter().copied().collect::<HashSet<_>>();
+    let (updated, available): (Vec<_>, Vec<_>) = surfaced
         .iter()
-        .filter(|name| surfaced_seen.insert((**name).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let surfaced_set = surfaced_seen;
-    let replaced = source_names(source, "/replacedNames")
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let available = surfaced
-        .iter()
-        .filter(|name| !replaced.contains(*name))
-        .cloned()
-        .collect::<Vec<_>>();
-    let updated = surfaced
-        .iter()
-        .filter(|name| replaced.contains(*name))
-        .cloned()
-        .collect::<Vec<_>>();
-    let added_names = source_names(source, "/addedNames");
-    let added_lines = source_names(source, "/addedLines")
-        .into_iter()
-        .filter(|name| !surfaced_set.contains(name))
+        .copied()
+        .filter(|name| surfaced_set.insert(*name))
+        .partition(|name| replaced.contains(*name));
+    let has_added_names = source_name_units(source, "/addedNames").next().is_some();
+    let added_lines = source_name_units(source, "/addedLines")
+        .filter(|name| !surfaced_set.contains(*name))
         .collect::<Vec<_>>();
     let tool_search_absent = source
         .at_pointer("/toolSearchAbsent")
         .and_then(|value| value.as_bool())
         == Some(true);
-    let readded = source_names(source, "/readdedNames")
-        .into_iter()
-        .filter(|name| !surfaced_set.contains(name))
+    let readded = source_name_units(source, "/readdedNames")
+        .filter(|name| !surfaced_set.contains(*name))
+        .map(<[u16]>::to_vec)
         .collect::<Vec<_>>();
-    let restored = source_names(source, "/restoredNames");
+    let restored = source_name_units(source, "/restoredNames").collect::<Vec<_>>();
 
     let mut parts = Vec::<Vec<u16>>::new();
     if !available.is_empty() {
@@ -181,7 +208,7 @@ fn render_nqe(
             &updated,
         ));
     }
-    if !added_lines.is_empty() && !added_names.is_empty() {
+    if !added_lines.is_empty() && has_added_names {
         let header = if tool_search_absent {
             "The following tools are now available:"
         } else {
@@ -215,7 +242,7 @@ fn render_nqe(
     )
 }
 
-fn section(header: &str, names: &[Vec<u16>]) -> Vec<u16> {
+fn section(header: &str, names: &[impl AsRef<[u16]>]) -> Vec<u16> {
     header
         .encode_utf16()
         .chain(std::iter::once(b'\n' as u16))
@@ -223,13 +250,13 @@ fn section(header: &str, names: &[Vec<u16>]) -> Vec<u16> {
         .collect()
 }
 
-fn join_lines(lines: &[Vec<u16>]) -> Vec<u16> {
+fn join_lines(lines: &[impl AsRef<[u16]>]) -> Vec<u16> {
     let mut result = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
             result.push(b'\n' as u16);
         }
-        result.extend_from_slice(line);
+        result.extend_from_slice(line.as_ref());
     }
     result
 }
@@ -544,12 +571,6 @@ fn message_text_units(message: &ConversationMessage) -> Option<Vec<u16>> {
     texts.next().is_none().then_some(result)
 }
 
-fn nonempty_cached_message(message: Option<&ConversationMessage>) -> Option<ConversationMessage> {
-    message
-        .filter(|message| cached_rendered_row_count(message) > 0)
-        .cloned()
-}
-
 fn strip_wrapper(value: &[u16]) -> Vec<u16> {
     let prefix = SYSTEM_REMINDER_PREFIX.encode_utf16().collect::<Vec<_>>();
     let suffix = SYSTEM_REMINDER_SUFFIX.encode_utf16().collect::<Vec<_>>();
@@ -594,30 +615,28 @@ mod tests {
     use super::*;
 
     fn enabled_facts(deferred_wire_tool_names: &[&str]) -> DeferredToolsProjectionFacts {
-        DeferredToolsProjectionFacts {
-            surface_late_tool_additions: true,
-            inline_tool_definition_names: None,
-            deferred_wire_tool_names: deferred_wire_tool_names
+        DeferredToolsProjectionFacts::new(
+            true,
+            None,
+            deferred_wire_tool_names
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect(),
-        }
+        )
     }
 
     fn with_by_value_definitions(
         definitions: &[&str],
         deferred_wire_tool_names: &[&str],
     ) -> DeferredToolsProjectionFacts {
-        DeferredToolsProjectionFacts {
-            surface_late_tool_additions: true,
-            inline_tool_definition_names: Some(
-                definitions.iter().map(|name| (*name).to_owned()).collect(),
-            ),
-            deferred_wire_tool_names: deferred_wire_tool_names
+        DeferredToolsProjectionFacts::new(
+            true,
+            Some(definitions.iter().map(|name| (*name).to_owned()).collect()),
+            deferred_wire_tool_names
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect(),
-        }
+        )
     }
 
     fn source(raw: &str) -> Source {
@@ -657,9 +676,9 @@ mod tests {
         let same = render_deferred_tools_delta_for_request(
             id,
             &one_surface,
-            Some(&cached),
+            Some(cached.clone()),
             1,
-            enabled_facts(&["Read"]),
+            &enabled_facts(&["Read"]),
             false,
         )
         .expect("matching surface keeps cached row");
@@ -672,9 +691,9 @@ mod tests {
         let dynamic = render_deferred_tools_delta_for_request(
             id,
             &changing,
-            Some(&cached),
+            Some(cached.clone()),
             1,
-            enabled_facts(&["TaskCreate"]),
+            &enabled_facts(&["TaskCreate"]),
             false,
         )
         .expect("changed surface has current view");
@@ -685,9 +704,9 @@ mod tests {
         let empty = render_deferred_tools_delta_for_request(
             id,
             &one_surface,
-            Some(&cached),
+            Some(cached.clone()),
             1,
-            enabled_facts(&[]),
+            &enabled_facts(&[]),
             false,
         );
         assert!(empty.is_none(), "changed surface can render no row");
@@ -698,9 +717,9 @@ mod tests {
         let fallback = render_deferred_tools_delta_for_request(
             id,
             &empty_source,
-            Some(&cached),
+            Some(cached.clone()),
             1,
-            enabled_facts(&[]),
+            &enabled_facts(&[]),
             false,
         )
         .expect("matching empty NQe count falls back to the cached row");
@@ -711,7 +730,7 @@ mod tests {
             &one_surface,
             None,
             0,
-            enabled_facts(&["Read"]),
+            &enabled_facts(&["Read"]),
             false,
         )
         .expect("empty rendered cache falls through to NQe");
@@ -721,7 +740,7 @@ mod tests {
             &changing,
             None,
             0,
-            enabled_facts(&["TaskCreate"]),
+            &enabled_facts(&["TaskCreate"]),
             false,
         )
         .expect("qWr miss uses the current NQe projection even without a cache");
@@ -742,9 +761,9 @@ mod tests {
         let name_only = render_deferred_tools_delta_for_request(
             id,
             &source,
-            Some(&cached),
+            Some(cached.clone()),
             1,
-            enabled_facts(&["Read"]),
+            &enabled_facts(&["Read"]),
             true,
         );
         assert!(
@@ -752,10 +771,14 @@ mod tests {
             "name-only UUIDs cannot surface stale by-value names"
         );
 
-        let mut disabled = enabled_facts(&["Read"]);
-        disabled.surface_late_tool_additions = false;
-        let disabled =
-            render_deferred_tools_delta_for_request(id, &source, Some(&cached), 1, disabled, false);
+        let disabled = render_deferred_tools_delta_for_request(
+            id,
+            &source,
+            Some(cached),
+            1,
+            &DeferredToolsProjectionFacts::default(),
+            false,
+        );
         assert!(
             disabled.is_none(),
             "disabled late-surface gate clears only the stale surface section"
@@ -773,7 +796,7 @@ mod tests {
             &source,
             None,
             0,
-            DeferredToolsProjectionFacts::default(),
+            &DeferredToolsProjectionFacts::default(),
             false,
         )
         .expect("retractions are independent of the surfaced-name gates");
@@ -794,9 +817,9 @@ mod tests {
         let absent_definitions = render_deferred_tools_delta_for_request(
             id,
             &source,
-            Some(&cached),
+            Some(cached),
             1,
-            enabled_facts(&[]),
+            &enabled_facts(&[]),
             false,
         );
         assert!(
@@ -809,12 +832,45 @@ mod tests {
             &source,
             None,
             0,
-            with_by_value_definitions(&["TaskCreate"], &[]),
+            &with_by_value_definitions(&["TaskCreate"], &[]),
             false,
         )
         .expect("defined inline pool surfaces a replaced name");
         assert!(body(&by_value).contains("updated definitions"));
         assert!(body(&by_value).contains("TaskCreate"));
+    }
+
+    #[test]
+    fn tool_index_is_lazy_and_shared_only_within_its_request() {
+        let facts = with_by_value_definitions(&[], &["Read", "\u{fffd}"]);
+        let pool = facts.tools.as_ref().unwrap();
+        let id = MessageId::new();
+        let empty = source(r#"{"type":"deferred_tools_delta"}"#);
+        let delta = source(
+            r#"{"type":"deferred_tools_delta","surfacedNames":["\ud800"],"replacedNames":["Read"]}"#,
+        );
+        assert!(
+            render_deferred_tools_delta_for_request(id, &empty, None, 0, &facts, false).is_none()
+        );
+        assert!(
+            render_deferred_tools_delta_for_request(id, &delta, None, 0, &facts, true).is_none()
+        );
+        assert!(pool.current_utf16.get().is_none());
+
+        let reattached = facts.clone();
+        let row = render_deferred_tools_delta_for_request(id, &delta, None, 0, &reattached, false)
+            .expect("a defined empty inline pool allows the deferred replaced name");
+        assert!(body(&row).contains("Read"));
+        assert!(!body(&row).contains('\u{fffd}'));
+        assert!(std::ptr::eq(
+            pool.current_utf16.get().unwrap(),
+            reattached.tools.as_ref().unwrap().current(),
+        ));
+
+        let next = enabled_facts(&["Read", "\u{fffd}"]);
+        assert!(
+            render_deferred_tools_delta_for_request(id, &delta, None, 0, &next, false).is_none()
+        );
     }
 
     #[test]
@@ -828,9 +884,9 @@ mod tests {
         let retained = render_deferred_tools_delta_for_request(
             id,
             &empty_source,
-            Some(&valid_empty_text),
+            Some(valid_empty_text),
             1,
-            DeferredToolsProjectionFacts::default(),
+            &DeferredToolsProjectionFacts::default(),
             false,
         )
         .expect("one rendered empty-text item is still a valid cache row");
@@ -840,7 +896,8 @@ mod tests {
         if let ConversationMessage::User { content, .. } = &mut raw_empty_placeholder {
             content.clear();
         }
-        assert_eq!(cached_rendered_row_count(&raw_empty_placeholder), 0);
+        let rendered_count = cached_rendered_row_count(&raw_empty_placeholder);
+        assert_eq!(rendered_count, 0);
 
         let retracted = source(
             r#"{"type":"deferred_tools_delta","retractedTools":[{"name":"mcp__srv__tool","cause":"denied"}]}"#,
@@ -848,9 +905,9 @@ mod tests {
         let projected = render_deferred_tools_delta_for_request(
             id,
             &retracted,
-            Some(&raw_empty_placeholder),
-            cached_rendered_row_count(&raw_empty_placeholder),
-            DeferredToolsProjectionFacts::default(),
+            Some(raw_empty_placeholder),
+            rendered_count,
+            &DeferredToolsProjectionFacts::default(),
             false,
         )
         .expect("an empty-content placeholder is not a valid GWr cache");
@@ -863,14 +920,8 @@ mod tests {
     fn qwr_preserves_one_way_duplicate_membership() {
         let read = "Read".encode_utf16().collect::<Vec<_>>();
         let other = "Other".encode_utf16().collect::<Vec<_>>();
-        assert!(qwr_matches(
-            &[read.clone(), read.clone()],
-            &[read.clone(), other.clone()]
-        ));
-        assert!(!qwr_matches(
-            &[read, other.clone()],
-            &[other.clone(), other]
-        ));
+        assert!(qwr_matches(&[&read, &read], &[&read, &other]));
+        assert!(!qwr_matches(&[&read, &other], &[&other, &other]));
     }
 
     #[test]
@@ -882,9 +933,9 @@ mod tests {
         let message = render_deferred_tools_delta_for_request(
             cached.id(),
             &raw,
-            Some(&cached),
+            Some(cached),
             1,
-            enabled_facts(&["Read", "TaskCreate"]),
+            &enabled_facts(&["Read", "TaskCreate"]),
             false,
         )
         .expect("non-string entries do not change the source name array");
@@ -904,9 +955,9 @@ mod tests {
         let projected = render_deferred_tools_delta_for_request(
             id,
             &source,
-            Some(&cached),
+            Some(cached),
             1,
-            enabled_facts(&["TaskCreate"]),
+            &enabled_facts(&["TaskCreate"]),
             false,
         )
         .expect("changed pool renders current readded name");
@@ -945,9 +996,9 @@ mod tests {
         let projected = render_deferred_tools_delta_for_request(
             id,
             &raw,
-            Some(&cached),
+            Some(cached),
             1,
-            enabled_facts(&["TaskCreate"]),
+            &enabled_facts(&["TaskCreate"]),
             false,
         )
         .expect("changed request view has a rendered row");

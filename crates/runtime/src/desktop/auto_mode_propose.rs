@@ -9,11 +9,8 @@
 //! outside world: the recon GATHER (filesystem) and the model QUERY (network).
 //! This module supplies both.
 //!
-//! The query side is deliberately split in two: [`collect_propose_reply`] is a
-//! pure function over the event stream, and the live call that produces those
-//! events is the caller's business. That way the part with the interesting
-//! behaviour — accumulating text and mapping the stop reason — is tested
-//! without a network, and the part that needs credentials stays at the edge.
+//! The live query waits for a complete response using the selected route's
+//! transport and classifies its stop reason before exposing any proposal text.
 
 use llm_runtime::{HistoryContentDelta, HistoryEvent, LlmError};
 use permission::auto_mode_pregather::{build_recon_block, GatherOptions};
@@ -59,7 +56,11 @@ pub fn collect_propose_reply(events: Vec<Result<HistoryEvent, LlmError>>) -> Que
         }
     }
 
-    match stop_reason.as_deref() {
+    propose_outcome(text, stop_reason.as_deref())
+}
+
+fn propose_outcome(text: String, stop_reason: Option<&str>) -> QueryOutcome {
+    match stop_reason {
         Some(OK_STOP_REASON) => QueryOutcome::Text(text),
         Some(r) if TRUNCATING_STOP_REASONS.contains(&r) => QueryOutcome::Truncated,
         Some(REFUSAL_STOP_REASON) => QueryOutcome::Refused,
@@ -215,27 +216,17 @@ impl permission::auto_mode_propose::ProposeQuery for ApiProposeQuery {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => QueryOutcome::Aborted,
-                result = async move {
-            let stream = match service
-                .stream_json_schema(
-                    &model,
-                    profile.as_deref(),
-                    Some(&system),
-                    msgs,
-                    schema,
-                    Some(max_tokens),
-                    None,
-                )
-                .await
-            {
-                Ok(s) => s,
-                // A request that never opened carries the provider's reason —
-                // auth, an unroutable model, a rejected body. Keep it: it is the
-                // only diagnostic the debug log will get.
-                Err(e) => return QueryOutcome::Failed(e.to_string()),
-            };
-            collect_propose_reply(futures::StreamExt::collect::<Vec<_>>(stream).await)
-                } => result,
+                response = service.complete_json_schema(
+                    &model, profile.as_deref(), Some(&system), msgs, schema, Some(max_tokens), None,
+                ) => match response {
+                    Ok(response) => {
+                        let text = response.content.iter()
+                            .filter_map(llm_runtime::ContentBlock::visible_text)
+                            .collect();
+                        propose_outcome(text, response.stop_reason.as_deref())
+                    }
+                    Err(error) => QueryOutcome::Failed(error.to_string()),
+                },
             }
         })
     }
@@ -493,7 +484,13 @@ mod tests {
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_stop_cancels_a_scan_while_provider_stream_is_establishing() {
+    async fn task_stop_cancels_a_scan_while_the_selected_transport_is_establishing() {
+        for streaming in [true, false] {
+            assert_scan_transport_cancelled(streaming).await;
+        }
+    }
+
+    async fn assert_scan_transport_cancelled(streaming: bool) {
         use llm_runtime::{
             AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, ModelRuntime,
             PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
@@ -504,6 +501,7 @@ mod tests {
             Arc,
         };
         struct Establishing {
+            streaming: bool,
             entered: tokio::sync::Notify,
             dropped: Arc<AtomicBool>,
         }
@@ -513,28 +511,34 @@ mod tests {
                 self.0.store(true, Ordering::SeqCst);
             }
         }
+        impl Establishing {
+            async fn pending<T>(&self) -> T {
+                let _request = InFlight(self.dropped.clone());
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+        }
         impl llm_runtime::test_support::FixtureTransport for Establishing {
             fn execute<'a>(
                 &'a self,
                 _: &'a llm_runtime::ProviderRequest,
             ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::ProviderResponse, LlmError>>
             {
-                unreachable!("scan must stream")
+                assert!(!self.streaming);
+                Box::pin(self.pending())
             }
             fn open_stream<'a>(
                 &'a self,
                 _: &'a llm_runtime::ProviderRequest,
             ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::StreamingResponse, LlmError>>
             {
-                Box::pin(async move {
-                    let _request = InFlight(self.dropped.clone());
-                    self.entered.notify_one();
-                    std::future::pending().await
-                })
+                assert!(self.streaming);
+                Box::pin(self.pending())
             }
         }
         llm_runtime::impl_fixture_transport!(Establishing);
         let transport = Arc::new(Establishing {
+            streaming,
             entered: tokio::sync::Notify::new(),
             dropped: Arc::new(AtomicBool::new(false)),
         });
@@ -556,13 +560,8 @@ mod tests {
                         aliases: vec![],
                         description: None,
                         metadata: Default::default(),
-                        // `stream_json_schema` sets `response_format`, which the
-                        // client refuses with `unsupported capability:
-                        // structured_output` unless the profile declares it —
-                        // before ever calling the transport, so the fixture
-                        // below would never see its stream open.
                         capabilities: Capabilities {
-                            streaming: true,
+                            streaming,
                             structured_output: true,
                             ..Default::default()
                         },

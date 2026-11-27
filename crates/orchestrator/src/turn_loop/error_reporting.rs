@@ -584,12 +584,9 @@ pub(crate) async fn surface_terminal_api_error(
     stop_reason: &str,
     stop_details: Option<&llm_runtime::HistoryStopDetails>,
     response_message_id: Option<&str>,
+    request_id: Option<String>,
 ) -> Option<MessageId> {
     let interactive = orch.prompt_is_interactive();
-    // The just-completed call's Anthropic `request-id` — for the refusal
-    // message's `\nRequest ID: …` suffix (recorded by the adapter from the
-    // response headers; same slot the JSONL `requestId` reads from).
-    let request_id = orch.api.last_request_id();
     let text = terminal_api_error_text(
         request_model,
         interactive,
@@ -1298,13 +1295,21 @@ mod api_error_publication_tests {
             "refusal",
             Some(&details),
             Some("msg_publication_319"),
+            orch.api.response_request_id(None),
         )
         .await
         .unwrap();
         for stop in ["max_tokens", "model_context_window_exceeded"] {
-            surface_terminal_api_error(orch, "claude-sonnet-4-5", stop, None, None)
-                .await
-                .unwrap();
+            surface_terminal_api_error(
+                orch,
+                "claude-sonnet-4-5",
+                stop,
+                None,
+                None,
+                orch.api.response_request_id(None),
+            )
+            .await
+            .unwrap();
         }
         surface_model_error(
             orch,
@@ -1331,6 +1336,7 @@ mod api_error_publication_tests {
             "claude-sonnet-4-5",
             Some(&details),
             Some("msg_staged_319"),
+            orch.api.response_request_id(None),
         )
         .await
         .unwrap();

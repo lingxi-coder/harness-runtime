@@ -84,6 +84,7 @@ impl CaptureTransport {
 #[async_trait::async_trait]
 impl sdk::Transport for CaptureTransport {
     async fn send(&self, request: sdk::HttpRequest) -> Result<sdk::StreamResponse, wire::LlmError> {
+        crate::execution::authorize_preparation_io(&request.method).await?;
         let capture = PHYSICAL_ATTEMPT.try_with(Clone::clone).ok().flatten();
         let response = self.inner.send(request).await?;
         Ok(observe_response(response, capture))
@@ -93,6 +94,7 @@ impl sdk::Transport for CaptureTransport {
         &self,
         request: sdk::HttpRequest,
     ) -> Result<sdk::transport::NativeProxyResponse, wire::LlmError> {
+        crate::execution::authorize_preparation_io(&request.method).await?;
         let capture = PHYSICAL_ATTEMPT.try_with(Clone::clone).ok().flatten();
         let mut response = self.inner.send_native_proxy_request(request).await?;
         response.response = observe_response(response.response, capture);
@@ -103,6 +105,7 @@ impl sdk::Transport for CaptureTransport {
         &self,
         request: sdk::HttpStreamRequest,
     ) -> Result<sdk::StreamResponse, wire::LlmError> {
+        crate::execution::authorize_preparation_io(&request.method).await?;
         self.inner.send_stream(request).await
     }
 
@@ -110,6 +113,7 @@ impl sdk::Transport for CaptureTransport {
         &self,
         request: sdk::HttpRequest,
     ) -> Result<Box<dyn sdk::transport::WebSocketConnection>, wire::LlmError> {
+        crate::execution::authorize_preparation_io(&request.method).await?;
         self.inner.connect_websocket(request).await
     }
 }

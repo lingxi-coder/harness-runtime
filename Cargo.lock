@@ -1916,6 +1916,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3b854b0e584ead1a33f18b2fcad7cf7be18b3875c78816b753639aa501513ae"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link",
+ "windows-result 0.4.1",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3040,12 +3055,12 @@ dependencies = [
 [[package]]
 name = "lingxi-exact-text"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=65c6c25f8e7d99e40cb32f3fd0414367837d05ac#65c6c25f8e7d99e40cb32f3fd0414367837d05ac"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ad1d8375640129acb7f4e03207170e5159732af0#ad1d8375640129acb7f4e03207170e5159732af0"
 
 [[package]]
 name = "lingxi-hyper"
 version = "1.9.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=65c6c25f8e7d99e40cb32f3fd0414367837d05ac#65c6c25f8e7d99e40cb32f3fd0414367837d05ac"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ad1d8375640129acb7f4e03207170e5159732af0#ad1d8375640129acb7f4e03207170e5159732af0"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3064,7 +3079,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-rustls"
 version = "0.27.5"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=65c6c25f8e7d99e40cb32f3fd0414367837d05ac#65c6c25f8e7d99e40cb32f3fd0414367837d05ac"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ad1d8375640129acb7f4e03207170e5159732af0#ad1d8375640129acb7f4e03207170e5159732af0"
 dependencies = [
  "futures-util",
  "http",
@@ -3081,7 +3096,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-util"
 version = "0.1.21"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=65c6c25f8e7d99e40cb32f3fd0414367837d05ac#65c6c25f8e7d99e40cb32f3fd0414367837d05ac"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ad1d8375640129acb7f4e03207170e5159732af0#ad1d8375640129acb7f4e03207170e5159732af0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3103,7 +3118,7 @@ dependencies = [
 [[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=65c6c25f8e7d99e40cb32f3fd0414367837d05ac#65c6c25f8e7d99e40cb32f3fd0414367837d05ac"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ad1d8375640129acb7f4e03207170e5159732af0#ad1d8375640129acb7f4e03207170e5159732af0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3131,7 +3146,7 @@ dependencies = [
 [[package]]
 name = "lingxi-reqwest"
 version = "0.12.29"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=65c6c25f8e7d99e40cb32f3fd0414367837d05ac#65c6c25f8e7d99e40cb32f3fd0414367837d05ac"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=ad1d8375640129acb7f4e03207170e5159732af0#ad1d8375640129acb7f4e03207170e5159732af0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3201,6 +3216,7 @@ dependencies = [
  "jiff",
  "lingxi-llm-client",
  "llm-runtime",
+ "loom",
  "rand 0.9.4",
  "regex",
  "secret",
@@ -3254,6 +3270,19 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "lopdf"
@@ -5800,6 +5829,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "scoped-tls"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8085,7 +8120,7 @@ checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
 dependencies = [
  "windows-implement",
  "windows-interface",
- "windows-result",
+ "windows-result 0.2.0",
  "windows-strings",
  "windows-targets 0.52.6",
 ]
@@ -8128,12 +8163,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-result"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
 name = "windows-strings"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cd9b125c486025df0eabcb585e62173c6c9eddcec5d117d3b6e8c30e2ee4d10"
 dependencies = [
- "windows-result",
+ "windows-result 0.2.0",
  "windows-targets 0.52.6",
 ]
 

@@ -31,7 +31,7 @@ pub struct AccountUnavailable {
     pub retryable: bool,
     pub recovery_at_ms: Option<u64>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccountResourceScope {
     pub store_scope: String,
     pub account_id: String,
@@ -53,6 +53,10 @@ pub struct HealthRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HealthDocument {
     pub revision: u64,
+    /// Authority high-water mark permits collection of deleted identities
+    /// without admitting a late operation from an older directory.
+    #[serde(default)]
+    pub directory_revision: Option<u64>,
     pub identities: BTreeMap<String, (u64, u64)>,
     pub records: BTreeMap<String, HealthRecord>,
     /// Completion tombstones retain probe fencing after a successful recovery
@@ -67,6 +71,15 @@ pub struct HealthDocument {
 }
 #[derive(Debug, Clone)]
 pub enum PoolOperation {
+    ProbeLease {
+        account: AccountMetadata,
+        model: String,
+        endpoint: String,
+        owner: String,
+        claimed_revision: u64,
+        /// Renew to this time, or release without a provider outcome.
+        until_ms: Option<u64>,
+    },
     Claim {
         account: AccountMetadata,
         model: String,
@@ -80,11 +93,13 @@ pub enum PoolOperation {
         endpoint: String,
         owner: String,
         claimed_revision: u64,
+        was_probe: bool,
         credential_revision: Option<u64>,
         outcome: Option<AccountFailure>,
         now_ms: u64,
     },
 }
+const PROBE_LEASE_MS: u64 = 30_000;
 #[derive(Debug, Clone)]
 pub struct AccountFailure {
     pub status: HealthStatus,
@@ -94,7 +109,7 @@ pub struct AccountFailure {
 }
 #[derive(Debug, Clone)]
 pub enum PoolResult {
-    Claimed { revision: u64 },
+    Claimed { revision: u64, probing: bool },
     Unavailable(AccountUnavailable),
     Recorded { recovery_at_ms: Option<u64> },
     Stale,
@@ -134,12 +149,46 @@ fn scopes(model: &str, endpoint: &str) -> [FailureScope; 3] {
     ]
 }
 impl HealthDocument {
+    /// Called under the directory and health transaction locks. Fences of
+    /// current identities survive all compaction.
+    pub fn reconcile_directory(
+        &mut self,
+        snapshot: &AccountSnapshot,
+    ) -> Result<bool, &'static str> {
+        if self
+            .directory_revision
+            .is_some_and(|revision| revision > snapshot.config_revision)
+        {
+            return Err("stale account health directory");
+        }
+        if self.directory_revision == Some(snapshot.config_revision) {
+            return Ok(false);
+        }
+        let identities: BTreeMap<_, _> = snapshot
+            .accounts
+            .iter()
+            .map(|account| (account_key(account), account.identity_generation))
+            .collect();
+        self.identities
+            .retain(|key, state| identities.get(key) == Some(&state.0));
+        let current = |key: &str| {
+            serde_json::from_str::<(String, u64, FailureScope)>(key).is_ok_and(
+                |(identity, generation, _)| identities.get(&identity) == Some(&generation),
+            )
+        };
+        self.records.retain(|key, _| current(key));
+        self.fences.retain(|key, _| current(key));
+        self.model_entitlements.retain(|key, _| current(key));
+        self.directory_revision = Some(snapshot.config_revision);
+        Ok(true)
+    }
+
     /// Authentication health is meaningful only for the exact rejected grant.
     pub fn invalidate_auth_for_credential(
         &mut self,
         account: &AccountMetadata,
         current_revision: Option<u64>,
-    ) {
+    ) -> bool {
         let key = record_key(account, &FailureScope::Account);
         if self.records.get(&key).is_some_and(|row| {
             (row.status == HealthStatus::NeedsAuth || row.reason == "derived_token_rejected")
@@ -148,7 +197,9 @@ impl HealthDocument {
             self.records.remove(&key);
             self.revision = self.revision.saturating_add(1);
             self.fences.insert(key, self.revision);
+            return true;
         }
+        false
     }
     pub fn model_entitlements(
         &self,
@@ -206,8 +257,16 @@ impl HealthDocument {
             .collect()
     }
     pub fn apply(&mut self, op: PoolOperation) -> PoolResult {
+        self.apply_tracking_changes(op, &mut false)
+    }
+
+    /// Mark whether the operation changed the persisted document. Existing
+    /// changes from credential invalidation remain marked.
+    pub fn apply_tracking_changes(&mut self, op: PoolOperation, changed: &mut bool) -> PoolResult {
         let account = match &op {
-            PoolOperation::Claim { account, .. } | PoolOperation::Finish { account, .. } => account,
+            PoolOperation::Claim { account, .. }
+            | PoolOperation::Finish { account, .. }
+            | PoolOperation::ProbeLease { account, .. } => account,
         };
         let identity_key = account_key(account);
         let incoming = (account.identity_generation, account.config_revision);
@@ -217,22 +276,64 @@ impl HealthDocument {
                 // A credential/config replacement fences every late completion.
                 let old_generation = self.identities.get(&identity_key).map(|old| old.0);
                 self.identities.insert(identity_key, incoming);
+                *changed = true;
                 // A priority/name edit changes configuration revision without
                 // changing credential identity. Preserve its cooldown.
                 if old_generation.is_some_and(|old| old != incoming.0) {
                     let prefix = serde_json::to_string(&account_key(account)).expect("string");
-                    self.records
-                        .retain(|key, _| !key.starts_with(&format!("[{prefix},")));
+                    let prefix = format!("[{prefix},");
+                    self.records.retain(|key, _| !key.starts_with(&prefix));
                     self.model_entitlements
-                        .retain(|key, _| !key.starts_with(&format!("[{prefix},")));
+                        .retain(|key, _| !key.starts_with(&prefix));
+                    self.fences.retain(|key, _| !key.starts_with(&prefix));
                 }
             }
             None => {
                 self.identities.insert(identity_key, incoming);
+                *changed = true;
             }
             _ => {}
         }
         match op {
+            PoolOperation::ProbeLease {
+                account,
+                model,
+                endpoint,
+                owner,
+                claimed_revision,
+                until_ms,
+            } => {
+                let keys = scopes(&model, &endpoint).map(|scope| record_key(&account, &scope));
+                let mut owned = Vec::new();
+                for key in &keys {
+                    if self.fences.get(key) == Some(&claimed_revision) {
+                        if let Some(row) = self
+                            .records
+                            .get_mut(key)
+                            .filter(|row| row.probe_owner.as_ref() == Some(&owner))
+                        {
+                            owned.push(key);
+                            row.probe_until_ms = until_ms;
+                            if until_ms.is_none() {
+                                row.probe_owner = None;
+                            }
+                        }
+                    }
+                }
+                if owned.is_empty() {
+                    return PoolResult::Stale;
+                }
+                *changed = true;
+                if until_ms.is_none() {
+                    self.revision = self.revision.saturating_add(1);
+                    for key in owned {
+                        self.fences.insert(key.clone(), self.revision);
+                    }
+                }
+                PoolResult::Recorded {
+                    recovery_at_ms: None,
+                }
+            }
             PoolOperation::Claim {
                 account,
                 model,
@@ -278,17 +379,19 @@ impl HealthDocument {
                     .any(|scope| self.records.contains_key(&record_key(&account, scope)));
                 if probing {
                     self.revision = self.revision.saturating_add(1);
+                    *changed = true;
                 }
                 for scope in scopes(&model, &endpoint) {
                     if let Some(row) = self.records.get_mut(&record_key(&account, &scope)) {
                         row.probe_owner = Some(owner.clone());
-                        row.probe_until_ms = Some(now_ms.saturating_add(30_000));
+                        row.probe_until_ms = Some(now_ms.saturating_add(PROBE_LEASE_MS));
                         self.fences
                             .insert(record_key(&account, &scope), self.revision);
                     }
                 }
                 PoolResult::Claimed {
                     revision: self.revision,
+                    probing,
                 }
             }
             PoolOperation::Finish {
@@ -297,50 +400,52 @@ impl HealthDocument {
                 endpoint,
                 owner,
                 claimed_revision,
+                was_probe,
                 credential_revision,
                 outcome,
                 now_ms,
             } => {
-                let finishing_scopes = outcome.as_ref().map_or_else(
-                    || scopes(&model, &endpoint).to_vec(),
-                    |failure| vec![failure.scope.clone()],
-                );
-                if finishing_scopes.iter().any(|scope| {
-                    self.fences
+                let call_scopes = scopes(&model, &endpoint);
+                let written_scopes = outcome.as_ref().map_or(call_scopes.as_slice(), |failure| {
+                    std::slice::from_ref(&failure.scope)
+                });
+                // Ordinary failures write only their classified scope. A probe
+                // also owns leases across its claim and must still hold them.
+                let checked_scopes = if was_probe {
+                    &call_scopes[..]
+                } else {
+                    written_scopes
+                };
+                let owns_lease = |scope: &FailureScope| {
+                    self.records
                         .get(&record_key(&account, scope))
+                        .is_some_and(|row| row.probe_owner.as_ref() == Some(&owner))
+                };
+                if was_probe && !call_scopes.iter().any(owns_lease) {
+                    return PoolResult::Stale;
+                }
+                if checked_scopes.iter().any(|scope| {
+                    let key = record_key(&account, scope);
+                    self.fences
+                        .get(&key)
                         .is_some_and(|revision| *revision > claimed_revision)
+                        || self.records.get(&key).is_some_and(|row| {
+                            row.revision > claimed_revision
+                                || row
+                                    .probe_owner
+                                    .as_ref()
+                                    .is_some_and(|current| current != &owner)
+                        })
                 }) {
                     return PoolResult::Stale;
                 }
-                // Only the lease owner may finish an expired/reclaimed probe.
-                for scope in scopes(&model, &endpoint) {
-                    if self
-                        .records
-                        .get(&record_key(&account, &scope))
-                        .is_some_and(|row| {
-                            row.probe_owner
-                                .as_ref()
-                                .is_some_and(|current| current != &owner)
-                        })
-                    {
-                        return PoolResult::Stale;
-                    }
-                }
-                // A success that started before a newer failure cannot erase
-                // that failure. Probe owners still require the lease token.
-                if outcome.is_none()
-                    && scopes(&model, &endpoint).iter().any(|scope| {
-                        self.records
-                            .get(&record_key(&account, scope))
-                            .is_some_and(|row| row.revision > claimed_revision)
-                    })
-                {
-                    return PoolResult::Stale;
-                }
                 self.revision = self.revision.saturating_add(1);
-                for scope in finishing_scopes {
-                    self.fences
-                        .insert(record_key(&account, &scope), self.revision);
+                *changed = true;
+                for scope in written_scopes {
+                    let key = record_key(&account, scope);
+                    if outcome.is_some() || self.records.contains_key(&key) {
+                        self.fences.insert(key, self.revision);
+                    }
                 }
                 let mut recorded_recovery = None;
                 if let Some(failure) = outcome {
@@ -400,6 +505,8 @@ impl HealthDocument {
                             if row.probe_owner.as_deref() == Some(&owner) {
                                 row.probe_owner = None;
                                 row.probe_until_ms = None;
+                                self.fences
+                                    .insert(record_key(&account, &scope), self.revision);
                             }
                         }
                     }
@@ -454,10 +561,14 @@ impl AccountPool {
             .await
             .map_err(|_| LlmError::AccountStorageUnavailable)?
         {
-            let current = self.snapshot();
+            // A second store read or explicit refresh may finish while this
+            // one is pending. Compare and publish in one critical section.
+            let mut current = self.directory.write().unwrap_or_else(|e| e.into_inner());
+            if snapshot.store_scope != current.store_scope {
+                return Err(LlmError::AccountStorageUnavailable);
+            }
             if snapshot.config_revision > current.config_revision {
-                self.refresh(snapshot)
-                    .map_err(|_| LlmError::AccountStorageUnavailable)?;
+                *current = snapshot;
             }
         }
         Ok(())
@@ -532,6 +643,8 @@ impl AccountPool {
         let mut candidates = vec![ConnectionHop {
             profile_name: route.profile_name.clone(),
             request_model: route.request_model.clone(),
+            display_model: Some(route.display_model.clone()),
+            selected_key: None,
         }];
         candidates.extend(route.connection_chain.clone());
         self.coordinator_from_candidates(&route.display_model, candidates, endpoints)
@@ -570,9 +683,11 @@ impl AccountPool {
             accounts,
             candidates,
             endpoints: endpoints.clone(),
+            health_model_prefix: "",
             model: model.to_owned(),
             visited: HashSet::new(),
             active: None,
+            probe: None,
             active_model: model.to_owned(),
             rejected_credential_revision: None,
             unavailable: Vec::new(),
@@ -586,21 +701,92 @@ pub struct AttemptCoordinator {
     accounts: BTreeMap<String, AccountMetadata>,
     candidates: Vec<ConnectionHop>,
     endpoints: BTreeMap<String, String>,
+    health_model_prefix: &'static str,
     model: String,
     visited: HashSet<String>,
     active: Option<(AccountMetadata, String, String, u64)>,
+    probe: Option<ProbeLease>,
     active_model: String,
     rejected_credential_revision: Option<u64>,
     unavailable: Vec<AccountUnavailable>,
     last_failed: Option<String>,
 }
+/// The worker lives until the coordinator settles or drops its sender. It
+/// renews during long provider requests and releases on future cancellation.
+#[derive(Debug)]
+struct ProbeLease {
+    settled: tokio::sync::oneshot::Sender<()>,
+    worker: tokio::task::JoinHandle<()>,
+}
+impl ProbeLease {
+    fn start(
+        pool: Arc<AccountPool>,
+        account: AccountMetadata,
+        model: String,
+        endpoint: String,
+        owner: String,
+        claimed_revision: u64,
+    ) -> Self {
+        let (settled, mut lifetime) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            loop {
+                let until_ms = tokio::select! {
+                    biased;
+                    result = &mut lifetime => {
+                        if result.is_ok() { return; }
+                        None
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(PROBE_LEASE_MS / 3)) => {
+                        Some(pool.clock.now_ms().saturating_add(PROBE_LEASE_MS))
+                    }
+                };
+                let result = pool
+                    .store
+                    .transact(PoolOperation::ProbeLease {
+                        account: account.clone(),
+                        model: model.clone(),
+                        endpoint: endpoint.clone(),
+                        owner: owner.clone(),
+                        claimed_revision,
+                        until_ms,
+                    })
+                    .await;
+                if until_ms.is_none() || matches!(result, Ok(PoolResult::Stale)) {
+                    return;
+                }
+            }
+        });
+        Self { settled, worker }
+    }
+    fn finish(self, result: &Result<PoolResult, String>) {
+        if matches!(result, Ok(PoolResult::Recorded { .. })) {
+            let _ = self.settled.send(());
+        }
+    }
+}
 impl AttemptCoordinator {
+    /// Relinquish a selection without asserting anything about provider health.
+    pub(crate) async fn release(&mut self) {
+        self.active = None;
+        if let Some(lease) = self.probe.take() {
+            drop(lease.settled);
+            let _ = lease.worker.await;
+        }
+    }
     pub(crate) fn set_rejected_credential_revision(&mut self, revision: Option<u64>) {
         self.rejected_credential_revision = revision;
     }
     pub(crate) fn map_candidate_models(&mut self, mut model: impl FnMut(&str) -> String) {
         for candidate in &mut self.candidates {
             candidate.request_model = model(&candidate.profile_name);
+        }
+    }
+    /// Keep generation entitlements and endpoint health separate from the
+    /// count endpoint. Authentication and account quotas share account scope.
+    pub(crate) fn scope_to_token_count(&mut self) {
+        self.health_model_prefix = "tokens/count/";
+        for endpoint in self.endpoints.values_mut() {
+            *endpoint = format!("tokens/count/{endpoint}");
         }
     }
     pub(crate) fn candidate_profiles(&self) -> Vec<String> {
@@ -671,6 +857,10 @@ impl AttemptCoordinator {
             lingxi_core::host::provider_accounts::AccountUsageAttribution::from_account(account)
         })
     }
+    pub(crate) fn active_is_recovery_probe(&self) -> bool {
+        self.probe.is_some()
+    }
+
     pub fn active_scope(&self) -> Option<AccountResourceScope> {
         self.active
             .as_ref()
@@ -693,13 +883,17 @@ impl AttemptCoordinator {
                 scope
                     .account_failed(&record_key(
                         account,
-                        &FailureScope::Model(hop.request_model.clone()),
+                        &FailureScope::Model(format!(
+                            "{}{}",
+                            self.health_model_prefix, hop.request_model
+                        )),
                     ))
                     .then(|| account.account_id.clone())
             }));
         self.select().await
     }
     pub async fn select(&mut self) -> Result<ConnectionHop, LlmError> {
+        self.release().await;
         for hop in &self.candidates {
             let account = self
                 .accounts
@@ -718,20 +912,45 @@ impl AttemptCoordinator {
                 .get(&hop.profile_name)
                 .cloned()
                 .unwrap_or_default();
-            let result = self
-                .pool
-                .store
-                .transact(PoolOperation::Claim {
-                    account: account.clone(),
-                    model: hop.request_model.clone(),
-                    endpoint: endpoint.clone(),
-                    now_ms: self.pool.clock.now_ms(),
-                    owner: owner.clone(),
-                })
-                .await;
+            // A file transaction may complete on a blocking worker even if the
+            // caller cancels select. Keep the lease guard with its result.
+            let pool = self.pool.clone();
+            let health_model = format!("{}{}", self.health_model_prefix, hop.request_model);
+            let model = health_model.clone();
+            let claim = tokio::spawn(async move {
+                let result = pool
+                    .store
+                    .transact(PoolOperation::Claim {
+                        account: account.clone(),
+                        model: model.clone(),
+                        endpoint: endpoint.clone(),
+                        now_ms: pool.clock.now_ms(),
+                        owner: owner.clone(),
+                    })
+                    .await;
+                let lease = match &result {
+                    Ok(PoolResult::Claimed {
+                        revision,
+                        probing: true,
+                    }) => Some(ProbeLease::start(
+                        pool,
+                        account.clone(),
+                        model,
+                        endpoint.clone(),
+                        owner.clone(),
+                        *revision,
+                    )),
+                    _ => None,
+                };
+                (result, lease, account, endpoint, owner)
+            });
+            let (result, lease, account, endpoint, owner) = claim
+                .await
+                .map_err(|_| LlmError::AccountStorageUnavailable)?;
             match result {
-                Ok(PoolResult::Claimed { revision }) => {
-                    self.active_model = hop.request_model.clone();
+                Ok(PoolResult::Claimed { revision, .. }) => {
+                    self.probe = lease;
+                    self.active_model = health_model;
                     self.active = Some((account, endpoint, owner, revision));
                     return Ok(hop.clone());
                 }
@@ -819,7 +1038,7 @@ impl AttemptCoordinator {
         .await
     }
     async fn record_failure(&mut self, failure: AccountFailure) -> bool {
-        let Some((account, endpoint, owner, claimed_revision)) = self.active.clone() else {
+        let Some((account, endpoint, owner, claimed_revision)) = self.active.take() else {
             return false;
         };
         self.last_failed = Some(record_key(
@@ -834,6 +1053,7 @@ impl AttemptCoordinator {
                 || failure.status == HealthStatus::CoolingDown,
             recovery_at_ms: failure.recovery_at_ms,
         });
+        let probe = self.probe.take();
         let recorded = self
             .pool
             .store
@@ -843,23 +1063,27 @@ impl AttemptCoordinator {
                 endpoint,
                 owner,
                 claimed_revision,
+                was_probe: probe.is_some(),
                 credential_revision: self.rejected_credential_revision,
                 outcome: Some(failure),
                 now_ms: self.pool.clock.now_ms(),
             })
             .await;
+        if let Some(probe) = probe {
+            probe.finish(&recorded);
+        }
         let stale = matches!(&recorded, Ok(PoolResult::Stale));
         if let Ok(PoolResult::Recorded { recovery_at_ms }) = recorded {
             if let Some(reason) = self.unavailable.last_mut() {
                 reason.recovery_at_ms = recovery_at_ms;
             }
         }
-        self.active = None;
         !stale
     }
     pub async fn succeeded(&mut self) {
         if let Some((account, endpoint, owner, claimed_revision)) = self.active.take() {
-            let _ = self
+            let probe = self.probe.take();
+            let result = self
                 .pool
                 .store
                 .transact(PoolOperation::Finish {
@@ -868,11 +1092,15 @@ impl AttemptCoordinator {
                     endpoint,
                     owner,
                     claimed_revision,
+                    was_probe: probe.is_some(),
                     credential_revision: None,
                     outcome: None,
                     now_ms: self.pool.clock.now_ms(),
                 })
                 .await;
+            if let Some(probe) = probe {
+                probe.finish(&result);
+            }
         }
     }
 }
@@ -959,6 +1187,7 @@ mod tests {
                 secret_ref: "acct.a".into(),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 1,
             identity_generation: 1,
@@ -972,6 +1201,8 @@ mod tests {
         let candidates = vec![ConnectionHop {
             profile_name: "account.a".into(),
             request_model: "wire-model".into(),
+            display_model: None,
+            selected_key: None,
         }];
         let mut coordinator = pool
             .coordinator_from_candidates("Friendly display", candidates.clone(), &BTreeMap::new())
@@ -1008,10 +1239,10 @@ mod tests {
             AccountModelEntitlementStatus::Unverified
         );
         let revision = match doc.apply(claim(&a, 300_000, "probe")) {
-            PoolResult::Claimed { revision } => revision,
+            PoolResult::Claimed { revision, .. } => revision,
             _ => panic!("expired model denial must permit one real probe"),
         };
-        doc.apply(finish(&a, "probe", revision, None));
+        doc.apply(finish_probe(&a, "probe", revision, None));
         assert_eq!(
             doc.model_entitlements(&a, 300_001)[0].status,
             AccountModelEntitlementStatus::Confirmed
@@ -1041,11 +1272,123 @@ mod tests {
             endpoint: "endpoint".into(),
             owner: owner.into(),
             claimed_revision: revision,
+            was_probe: false,
             credential_revision: None,
             outcome: failure,
             now_ms: 0,
         }
     }
+    fn finish_probe(
+        account: &AccountMetadata,
+        owner: &str,
+        revision: u64,
+        failure: Option<AccountFailure>,
+    ) -> PoolOperation {
+        let mut operation = finish(account, owner, revision, failure);
+        if let PoolOperation::Finish { was_probe, .. } = &mut operation {
+            *was_probe = true;
+        }
+        operation
+    }
+    #[test]
+    fn known_healthy_claim_leaves_health_document_unchanged() {
+        let account = account();
+        let mut document = HealthDocument::default();
+        let mut changed = false;
+        assert!(matches!(
+            document.apply_tracking_changes(claim(&account, 0, "first"), &mut changed),
+            PoolResult::Claimed { .. }
+        ));
+        assert!(changed);
+        changed = false;
+        assert!(matches!(
+            document.apply_tracking_changes(claim(&account, 1, "second"), &mut changed),
+            PoolResult::Claimed { .. }
+        ));
+        assert!(!changed);
+    }
+
+    #[test]
+    fn healthy_success_does_not_discard_a_concurrent_rate_limit() {
+        let account = account();
+        let mut doc = HealthDocument::default();
+        let PoolResult::Claimed {
+            revision: first, ..
+        } = doc.apply(claim(&account, 0, "first"))
+        else {
+            panic!("initial healthy claim");
+        };
+        let PoolResult::Claimed {
+            revision: second, ..
+        } = doc.apply(claim(&account, 1, "second"))
+        else {
+            panic!("concurrent healthy claim");
+        };
+        assert_eq!(first, second);
+        assert!(matches!(
+            doc.apply(finish(&account, "first", first, None)),
+            PoolResult::Recorded { .. }
+        ));
+        let failure = classify(
+            &LlmError::RateLimited {
+                retry_after: Some(std::time::Duration::from_secs(30)),
+                scope: None,
+            },
+            "m",
+            "endpoint",
+            0,
+        );
+        assert!(matches!(
+            doc.apply(finish(&account, "second", second, failure)),
+            PoolResult::Recorded { .. }
+        ));
+        assert!(matches!(
+            doc.apply(claim(&account, 2, "third")),
+            PoolResult::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn concurrent_model_and_account_failures_are_recorded_in_both_orders() {
+        for auth_first in [false, true] {
+            let account = account();
+            let mut doc = HealthDocument::default();
+            let errors = if auth_first {
+                [LlmError::OAuthRefreshDead, LlmError::ModelUnavailable]
+            } else {
+                [LlmError::ModelUnavailable, LlmError::OAuthRefreshDead]
+            };
+            for owner in ["one", "two"] {
+                assert!(matches!(
+                    doc.apply(claim(&account, 0, owner)),
+                    PoolResult::Claimed {
+                        revision: 0,
+                        probing: false
+                    }
+                ));
+            }
+            for (owner, error) in ["one", "two"].into_iter().zip(errors) {
+                assert!(matches!(
+                    doc.apply(finish(
+                        &account,
+                        owner,
+                        0,
+                        classify(&error, "m", "endpoint", 0)
+                    )),
+                    PoolResult::Recorded { .. }
+                ));
+            }
+            assert_eq!(
+                doc.account_records(&account)[0].status,
+                HealthStatus::NeedsAuth
+            );
+            assert_eq!(
+                doc.model_entitlements(&account, 1)[0].status,
+                lingxi_core::host::provider_accounts::AccountModelEntitlementStatus::Forbidden
+            );
+        }
+    }
+
     #[test]
     fn cooling_probe_lease_reclaims_and_rejects_old_owner() {
         let a = account();
@@ -1070,7 +1413,7 @@ mod tests {
             PoolResult::Unavailable(_)
         ));
         let revision = match doc.apply(claim(&a, 30_000, "probe")) {
-            PoolResult::Claimed { revision } => revision,
+            PoolResult::Claimed { revision, .. } => revision,
             _ => panic!("probe"),
         };
         assert!(matches!(
@@ -1078,20 +1421,20 @@ mod tests {
             PoolResult::Unavailable(_)
         ));
         let new_revision = match doc.apply(claim(&a, 60_001, "new")) {
-            PoolResult::Claimed { revision } => revision,
+            PoolResult::Claimed { revision, .. } => revision,
             _ => panic!("reclaimed probe"),
         };
         assert!(matches!(
-            doc.apply(finish(&a, "probe", revision, None)),
+            doc.apply(finish_probe(&a, "probe", revision, None)),
             PoolResult::Stale
         ));
         assert!(matches!(
-            doc.apply(finish(&a, "new", new_revision, None)),
+            doc.apply(finish_probe(&a, "new", new_revision, None)),
             PoolResult::Recorded { .. }
         ));
         assert!(
             matches!(
-                doc.apply(finish(
+                doc.apply(finish_probe(
                     &a,
                     "probe",
                     revision,
@@ -1113,6 +1456,115 @@ mod tests {
             PoolResult::Claimed { .. }
         ));
     }
+    #[tokio::test]
+    async fn store_refresh_ignores_a_superseded_read_and_rejects_another_scope() {
+        #[derive(Debug)]
+        struct SnapshotStore(AccountSnapshot);
+        #[async_trait::async_trait]
+        impl AccountPoolStore for SnapshotStore {
+            async fn latest_snapshot(&self) -> Result<Option<AccountSnapshot>, String> {
+                Ok(Some(self.0.clone()))
+            }
+            async fn transact(&self, _: PoolOperation) -> Result<PoolResult, String> {
+                unreachable!()
+            }
+        }
+        let old = AccountPool::new(vec![account()], Arc::new(MemoryAccountPoolStore::default()))
+            .snapshot();
+        let mut current = old.clone();
+        current.config_revision += 1;
+        let directory = Arc::new(std::sync::RwLock::new(current.clone()));
+        let pool =
+            AccountPool::from_directory(directory.clone(), Arc::new(SnapshotStore(old.clone())));
+        pool.refresh_from_store().await.unwrap();
+        assert_eq!(pool.snapshot(), current);
+        assert!(pool.refresh(old.clone()).is_err());
+        let mut other = old;
+        other.store_scope = "other".into();
+        let pool = AccountPool::from_directory(directory, Arc::new(SnapshotStore(other)));
+        assert!(matches!(
+            pool.refresh_from_store().await,
+            Err(LlmError::AccountStorageUnavailable)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_recovery_probe_renews_and_neutral_release_preserves_the_fault() {
+        #[derive(Debug)]
+        struct Clock(tokio::time::Instant);
+        impl AccountClock for Clock {
+            fn now_ms(&self) -> u64 {
+                self.0.elapsed().as_millis() as u64
+            }
+        }
+        let store = Arc::new(MemoryAccountPoolStore::default());
+        let account = account();
+        let clock = Arc::new(Clock(tokio::time::Instant::now()));
+        let pool = Arc::new(
+            AccountPool::new(vec![account.clone()], store.clone()).with_clock(clock.clone()),
+        );
+        store.transact(claim(&account, 0, "first")).await.unwrap();
+        store
+            .transact(finish(
+                &account,
+                "first",
+                0,
+                classify(
+                    &LlmError::RateLimited {
+                        retry_after: Some(std::time::Duration::ZERO),
+                        scope: None,
+                    },
+                    "m",
+                    "endpoint",
+                    0,
+                ),
+            ))
+            .await
+            .unwrap();
+        let candidates = vec![ConnectionHop {
+            profile_name: "account.a".into(),
+            request_model: "m".into(),
+            display_model: None,
+            selected_key: None,
+        }];
+        let endpoints = BTreeMap::from([("account.a".into(), "endpoint".into())]);
+        let mut coordinator = pool
+            .coordinator_from_candidates("m", candidates, &endpoints)
+            .unwrap();
+        coordinator.select().await.unwrap();
+        for _ in 0..4 {
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            store
+                .transact(claim(&account, clock.now_ms(), "concurrent"))
+                .await
+                .unwrap(),
+            PoolResult::Unavailable(_)
+        ));
+        let (owner, claimed_revision) = {
+            let (_, _, owner, revision) = coordinator.active.as_ref().unwrap();
+            (owner.clone(), *revision)
+        };
+        coordinator.release().await;
+        assert!(store.0.lock().unwrap().model_entitlements.is_empty());
+        assert!(matches!(
+            store
+                .transact(finish_probe(&account, &owner, claimed_revision, None))
+                .await
+                .unwrap(),
+            PoolResult::Stale
+        ));
+        assert!(matches!(
+            store
+                .transact(claim(&account, clock.now_ms(), "next"))
+                .await
+                .unwrap(),
+            PoolResult::Claimed { probing: true, .. }
+        ));
+    }
+
     #[tokio::test]
     async fn fifty_concurrent_requests_have_exactly_one_recovery_probe() {
         let store = Arc::new(MemoryAccountPoolStore::default());

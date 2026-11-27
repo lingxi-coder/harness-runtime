@@ -400,6 +400,8 @@ pub struct ExecutionContext {
     /// Explicit Anthropic overrides captured once before request awaits.
     /// Counting, generation and usage identity share this host-only snapshot.
     pub anthropic_extra_body: Option<crate::CapturedAnthropicExtraBody>,
+    /// Opaque host metadata for Messages-family routes.
+    pub(crate) anthropic_user_id: Option<String>,
     /// Selected build-time route for pure prompt projection outside generation.
     pub prompt_projection_profile: Option<lingxi_llm_client::protocol::ProviderProfile>,
     /// Selected resource identity; token rotation keeps this identity stable.
@@ -413,6 +415,8 @@ pub struct ExecutionContext {
     pub request_session_id: Option<String>,
     /// Logical request credential capture reused across retry drafts only.
     pub request_credentials: Option<RequestCredentials>,
+    /// A child notice was scoped to the exact request-local credential snapshot.
+    pub(crate) wrap_up_credential_bound: bool,
     /// Session authority captured before execution; never resolved from provider input.
     pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     /// Native prompt source and typed cache inputs, projected after the
@@ -541,6 +545,8 @@ pub struct ExecutionContext {
     pub(crate) source_thinking_messages: Vec<crate::prefix_lock_recovery::SourceThinkingMessage>,
     /// Query ownership for retries and lazy streams; never provider wire.
     pub thinking_recovery_scope: Option<crate::thinking_scope::ThinkingRecoveryScope>,
+    pub(crate) native_tbc_routes:
+        Option<crate::thinking_scope::NativeThinkingBindingControlsRoutes>,
     /// Trusted account identity for provider continuations and hosted resources.
     pub account_scope: Option<String>,
     /// Capture live request credentials for host-selected native computer state.
@@ -555,6 +561,8 @@ pub struct ExecutionContext {
     pub file_account_scope: Option<String>,
     /// Whether the host response should include per-call retry accounting.
     pub capture_retry_count: bool,
+    /// Optional caller ceiling for a session side query's ordinary retries.
+    pub side_query_max_retries: Option<u32>,
     /// Independent utility/fork ownership. Unlike a query-source label or wire
     /// policy this never grants access to the parent conversation's state.
     pub isolated_query: bool,
@@ -586,6 +594,21 @@ impl ExecutionContext {
         self.request_dispatch_admission = admission.and_then(|admission| {
             admission.retaining_message_sources(&self.request_message_source_ids)
         });
+    }
+
+    pub(crate) fn check_dispatch_admission(
+        &self,
+        prior_dispatch: bool,
+    ) -> Result<(), crate::LlmError> {
+        if self
+            .request_dispatch_admission
+            .as_ref()
+            .is_none_or(RequestDispatchAdmission::is_admitted)
+        {
+            Ok(())
+        } else {
+            Err(crate::LlmError::RequestDispatchRejected { prior_dispatch })
+        }
     }
 }
 
@@ -751,6 +774,15 @@ mod tests {
     }
 }
 
+/// Request-local source of merged Anthropic cache retention settings.
+pub type PromptCacheSettingsLoader = Arc<
+    dyn Fn() -> Result<
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheTtlSettings,
+            crate::LlmError,
+        > + Send
+        + Sync,
+>;
+
 /// Host-only inputs needed to project a Native system prompt at provider
 /// egress. The service supplies a live account-generation getter and a
 /// scope-keyed overage lookup; `ModelRuntime` fences that generation around the
@@ -779,8 +811,8 @@ pub struct PromptCacheRequestContext {
     /// generation captured by the request.
     pub overage_for_scope:
         std::sync::Arc<dyn Fn(&crate::CredentialScope, u64) -> bool + Send + Sync>,
-    /// Per-logical-request 429 observation; retried attempts share the slot.
-    pub pending_overage: std::sync::Arc<std::sync::Mutex<Option<PendingPromptCacheObservation>>>,
+    /// Loads the host settings once, when an Anthropic-family attempt first needs them.
+    pub ttl_settings: Option<PromptCacheSettingsLoader>,
 }
 
 /// Decoded Anthropic 429 quota state waiting for the retry driver to decide
@@ -796,7 +828,7 @@ pub struct PendingPromptCacheObservation {
     /// `Iet` overage boolean decoded by the SDK from the 429 headers.
     pub is_using_overage: bool,
     /// Host response observation order, used to discard stale concurrent data.
-    pub observed_at_ms: u128,
+    pub header_order: u64,
 }
 
 impl std::fmt::Debug for PromptCacheRequestContext {
@@ -813,7 +845,7 @@ impl std::fmt::Debug for PromptCacheRequestContext {
             .field("native_bare_mode", &self.native_bare_mode)
             .field("native_unix_socket", &self.native_unix_socket)
             .field("overage_for_scope", &"<host state lookup>")
-            .field("pending_overage", &"<request-local state>")
+            .field("ttl_settings", &self.ttl_settings.is_some())
             .finish()
     }
 }

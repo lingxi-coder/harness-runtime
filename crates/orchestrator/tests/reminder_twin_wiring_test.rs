@@ -146,7 +146,7 @@ const TWIN_REMINDERS: &[(&str, usize)] = &[
     // The typed deferred-tools row is produced earlier in `prepare_turn_step`;
     // this API-system projection is the per-step row still produced here.
     ("native_tool_change_api_system_message", 1),
-    ("date_change_reminder_message", 1),
+    ("prepare_inline_date_context", 1),
 ];
 
 /// Count method and qualified-function CALL sites of `name`.
@@ -199,7 +199,8 @@ fn twin_reminder_list_covers_every_producer_in_shared_preparation() {
         + COLLECTOR.matches("_messages_in_turn(").count()
         + COLLECTOR.matches("_reminders_for_delivery(").count()
         + COLLECTOR.matches("_reminder_messages_for_step(").count()
-        + call_sites(COLLECTOR, "mcp_instructions_prompt_ingress_attachment");
+        + call_sites(COLLECTOR, "mcp_instructions_prompt_ingress_attachment")
+        + call_sites(COLLECTOR, "prepare_inline_date_context");
     // These calls only render previously-created model-history rows; they do
     // not produce a per-turn reminder. Their suffix matches the producer
     // naming convention, so exclude the explicit formatting call site.
@@ -230,6 +231,9 @@ fn shared_preparation_invokes_every_per_turn_reminder() {
              from BOTH paths."
         );
     }
+    // The shared date step commits the rendered row before exposing it to either driver.
+    let date_context = include_str!("../src/conversation/date_context.rs");
+    assert_eq!(call_sites(date_context, "date_change_reminder_message"), 1);
 }
 
 #[test]
@@ -315,9 +319,8 @@ fn staged_prompt_ingress_is_consumed_without_duplicate_producer_calls() {
         reminder_collector
             .matches("::staged_prompt_ingress_attachments(")
             .count(),
-        2,
-        "the bare path checks whether rows are staged before persisting task \
-         notifications; the non-bare path snapshots them for consumption"
+        1,
+        "only the path that consumes the staged rows should snapshot them"
     );
     let bare_path = source_between(
         reminder_collector,
@@ -326,11 +329,12 @@ fn staged_prompt_ingress_is_consumed_without_duplicate_producer_calls() {
     );
     assert_eq!(
         bare_path
-            .matches("::staged_prompt_ingress_attachments(")
+            .matches("::has_staged_prompt_ingress_attachments(")
             .count(),
         1,
         "bare mode performs a non-consuming presence check before it exits"
     );
+    assert!(!bare_path.contains("::staged_prompt_ingress_attachments("));
     let full_path = &reminder_collector[reminder_collector
         .find("let mut transient = Vec::new();")
         .expect("the non-bare collector path starts with its transient list")..];
@@ -429,6 +433,11 @@ fn neither_driver_reaches_a_reminder_behind_the_collector() {
             call_sites(source, "collect_turn_reminders_for_prompt_ingress"),
             0,
             "{file} bypasses prepare_turn_step to drain the production reminder collector"
+        );
+        assert_eq!(
+            call_sites(source, "date_change_reminder_message"),
+            0,
+            "{file} renders the date reminder outside the durable date step"
         );
     }
 

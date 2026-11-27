@@ -1664,34 +1664,13 @@ pub async fn build_with_credential_stack(
     } = resolve_llm_stack_with_credentials(&cfg, shared, proxy_auth_helper_transport.clone())
         .await?;
 
-    // Phase 2a CHAINS BRIDGE: translate the assembled `ChainConfig` into main's
-    // richer adapter's `fallback_overrides` shape. `assemble` keys each chain by
-    // the request/display model id and carries an ordered list of `ChainEntry`;
-    // main's adapter routes by model-id through the multi-provider registry, so the
-    // `ChainEntry.provider_id` is informational and is dropped here — the per-entry
-    // `model` ids are the fallback chain. Cross-provider routing still works
-    // because every provider's models are registered in the assembled
-    // `ClientConfig`, so a fallback target on another provider resolves by id.
-    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = chains
-        .chains
-        .iter()
-        .map(|(key, entries)| {
-            (
-                key.clone(),
-                entries.iter().map(|e| e.model.clone()).collect(),
-            )
-        })
-        .collect();
     // Retry override → main's scalar settings_max_retries / settings_backoff_ms.
-    let settings_max_retries = chains.retry.as_ref().map(|r| r.max_attempts);
+    let settings_max_retries = chains.retry.as_ref().map(|r| r.max_retries());
     let settings_backoff_ms = chains.retry.as_ref().map(|r| r.backoff_ms);
 
     // Build the CONCRETE adapter so it can be coerced to BOTH the orchestrator
     // seam (`OrchestratorApiClient`) and the agent seam (`agent::SubagentApiClient`).
-    // `ProviderApiAdapter` impls both. The adapter's own `alias_to_display` map is
-    // rebuilt from the client's `available_models()` (whose aliases `assemble`
-    // already populated from `chains.aliases`), so the alias map needs no separate
-    // pass here.
+    // `ProviderApiAdapter` impls both.
     //
     // Batch-5 Task 3: attach the live subscription slot (filled by the background
     // profile/roles fetch) so the drive loops read subscriber/enterprise state at
@@ -1765,10 +1744,11 @@ pub async fn build_with_credential_stack(
         Some(analytics_bus.clone()),
         cfg.fallback_model.clone(),
         Some(cost_estimator),
-        fallback_overrides,
+        Default::default(),
         settings_max_retries,
         settings_backoff_ms,
     )
+    .with_configured_fallbacks(chains.fallback_overrides())
     .with_fast_policy_source({
         let fast_cfg = cfg.clone_for_runtime_controls();
         Arc::new(move || {

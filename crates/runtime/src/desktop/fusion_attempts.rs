@@ -136,6 +136,7 @@ impl DesktopFusionAttempts {
             .find(|listing| {
                 (listing.profile_name == actual.profile_name
                     || listing.profile_name == account.execution_binding_id)
+                    && listing.display_model == actual.display_model
                     && listing.request_model == actual.request_model
             })
             .ok_or_else(|| unavailable("selected account model metadata unavailable"))?;
@@ -156,12 +157,8 @@ impl DesktopFusionAttempts {
                 Ok(prices) => prices,
                 Err(_) => {
                     let binding = service
-                        .resolve_media_route(
-                            &actual.request_model,
-                            Some(&account.execution_binding_id),
-                        )
-                        .map_err(unavailable)?
-                        .main;
+                        .resolve_account_model_row(&account.execution_binding_id, actual)
+                        .map_err(unavailable)?;
                     let (mut price, mut fast) = pricing::captured_prices(
                         &self.prices,
                         &pricing::model_ref(&binding.pricing_model),

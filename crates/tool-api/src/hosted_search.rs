@@ -93,6 +93,15 @@ pub trait HostedWebSearchClient: Send + Sync {
             timeout: false,
         })
     }
+    /// Fetch with optional reuse of a page bound to the selected account.
+    /// A cache hit returns its original fetch time in Unix milliseconds.
+    async fn fetch_with_cache(
+        &self,
+        request: HostedFetchRequest,
+        _use_cache: bool,
+    ) -> Result<(HostedFetchOutput, Option<u64>), HostedSearchError> {
+        self.fetch(request).await.map(|output| (output, None))
+    }
     /// Execute the search and forward progress signals.
     async fn search(
         &self,

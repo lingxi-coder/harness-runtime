@@ -75,7 +75,8 @@ fn complete_response_error(error: &LlmError, turn: &PumpedTurn) -> bool {
     matches!(
         error.classification_source(),
         LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
-    ) || llm_runtime::model::stream_watchdog::is_stream_idle_timeout(error)
+    ) || error.is_missing_stream_terminal()
+        || llm_runtime::model::stream_watchdog::is_stream_idle_timeout(error)
         || llm_runtime::model::stream_watchdog::is_stream_suspended(error)
         || (matches!(
             error.classification_source(),
@@ -202,6 +203,7 @@ pub(crate) fn native_server_fallback_supersedes_enabled(query_source: &str) -> b
 /// Outcome of consuming one stream.
 #[derive(Debug, Default)]
 pub struct PumpedTurn {
+    pub(crate) diagnostics: Option<llm_runtime::history::ResponseDiagnostics>,
     pub per_turn_effort: Option<Utf16JsonProjection>,
     /// Host-owned sweeps of exact live executor ids. These are runtime control
     /// facts and never become provider events or synthetic tool-result rows.
@@ -666,14 +668,14 @@ fn supersedes_ids_for_retained_rows(rows: &[CompletedAssistantRow]) -> Vec<Messa
 }
 
 fn replace_stream_blocks_for_row(
-    turn: &mut PumpedTurn,
+    blocks: &mut Vec<ContentBlock>,
     assistant_block_indices: &mut Vec<(u32, bool)>,
     assistant_block_row_ids: &mut Vec<MessageId>,
     row_id: MessageId,
     content: &[ContentBlock],
 ) {
     update_accepted_stream_blocks_for_row(
-        turn,
+        blocks,
         assistant_block_indices,
         assistant_block_row_ids,
         row_id,
@@ -683,48 +685,51 @@ fn replace_stream_blocks_for_row(
 }
 
 fn update_accepted_stream_blocks_for_row(
-    turn: &mut PumpedTurn,
+    blocks: &mut Vec<ContentBlock>,
     assistant_block_indices: &mut Vec<(u32, bool)>,
     assistant_block_row_ids: &mut Vec<MessageId>,
     row_id: MessageId,
     content: &[ContentBlock],
     new_row_order: Option<(u32, bool)>,
 ) {
-    let mut blocks = Vec::new();
-    let mut indices = Vec::new();
-    let mut row_ids = Vec::new();
-    let mut source_order = None;
-    for ((block, index), current_row_id) in std::mem::take(&mut turn.assistant_blocks)
-        .into_iter()
-        .zip(std::mem::take(assistant_block_indices))
-        .zip(std::mem::take(assistant_block_row_ids))
-    {
-        if current_row_id == row_id {
-            source_order.get_or_insert(index);
-        } else {
-            blocks.push(block);
-            indices.push(index);
-            row_ids.push(current_row_id);
-        }
-    }
-    if let Some(index) = source_order.or(new_row_order) {
-        let position = indices.partition_point(|existing| existing <= &index);
-        // ToolUse blocks remain in the canonical row and the source dispatch
-        // index. This list tracks the non-tool blocks, including Text added by
-        // session.append to an originally tool-only row.
-        for (offset, block) in content
+    let Some(order) = new_row_order.or_else(|| {
+        assistant_block_row_ids
             .iter()
-            .filter(|block| !matches!(block, ContentBlock::ToolUse { .. }))
-            .enumerate()
-        {
-            blocks.insert(position + offset, block.clone());
-            indices.insert(position + offset, index);
-            row_ids.insert(position + offset, row_id);
-        }
+            .position(|id| *id == row_id)
+            .map(|pos| assistant_block_indices[pos])
+    }) else {
+        return;
+    };
+    let end = assistant_block_indices.partition_point(|key| key <= &order);
+    let start = assistant_block_indices[..end].partition_point(|key| key < &order);
+    let mut replace = end..end;
+    if let Some(offset) = assistant_block_row_ids[start..end]
+        .iter()
+        .position(|id| *id == row_id)
+    {
+        let first = start + offset;
+        let count = assistant_block_row_ids[first..end]
+            .iter()
+            .take_while(|id| **id == row_id)
+            .count();
+        // A row's blocks are contiguous. Its replacement follows any other
+        // rows sharing its source order, just as a newly accepted row does.
+        blocks[first..end].rotate_left(count);
+        assistant_block_row_ids[first..end].rotate_left(count);
+        replace.start = end - count;
     }
-    turn.assistant_blocks = blocks;
-    *assistant_block_indices = indices;
-    *assistant_block_row_ids = row_ids;
+
+    // ToolUse stays in the canonical row and dispatch index. Accepted text
+    // added by session.append, including on a tool-only row, belongs here.
+    let projected = content
+        .iter()
+        .filter(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+    let new_len = projected.clone().count();
+    blocks.splice(replace.clone(), projected.cloned());
+    if replace.len() != new_len {
+        assistant_block_indices.splice(replace.clone(), std::iter::repeat_n(order, new_len));
+        assistant_block_row_ids.splice(replace, std::iter::repeat_n(row_id, new_len));
+    }
 }
 
 /// Apply native J as soon as the next eligible completed assistant text row is
@@ -796,13 +801,12 @@ async fn finish_pending_server_stitch(
             candidate.supersedes_row_ids = supersedes_row_ids;
         }
     }
-    let candidate_content = turn.assistant_rows[candidate_position].content.clone();
     replace_stream_blocks_for_row(
-        turn,
+        &mut turn.assistant_blocks,
         assistant_block_indices,
         assistant_block_row_ids,
         candidate_id,
-        &candidate_content,
+        &turn.assistant_rows[candidate_position].content,
     );
 
     let retained_ids: HashSet<MessageId> = stitch.retained_row_ids.iter().copied().collect();
@@ -897,7 +901,6 @@ async fn sync_message_delta_to_rows(
     persist_unlinked_rows: bool,
 ) {
     let mut tool_parents = Vec::new();
-    let mut rewritten_rows = Vec::new();
     for row in &mut turn.assistant_rows {
         row.stop_reason.clone_from(&turn.stop_reason);
         if update_stop_details {
@@ -929,15 +932,12 @@ async fn sync_message_delta_to_rows(
             row.persisted_link = Some(link);
         }
         row.session_append_dispatched = true;
-        rewritten_rows.push((row.row_id, row.content.clone()));
-    }
-    for (row_id, content) in rewritten_rows {
         replace_stream_blocks_for_row(
-            turn,
+            &mut turn.assistant_blocks,
             assistant_block_indices,
             assistant_block_row_ids,
-            row_id,
-            &content,
+            row.row_id,
+            &row.content,
         );
     }
     turn.assistant_tool_parent_uuids.extend(tool_parents);
@@ -1428,6 +1428,9 @@ pub(crate) fn partial_finalize_cause(error: &OrchestratorError) -> Option<Partia
         }
         // A stream that closed before `message_stop` is a mid-response connection
         // close — cc's `network_down` bucket.
+        OrchestratorError::Streaming(error) if error.is_missing_stream_terminal() => {
+            Some(PartialFinalizeCause::NetworkDown)
+        }
         OrchestratorError::StreamEndedWithoutStop => Some(PartialFinalizeCause::NetworkDown),
         _ => None,
     }
@@ -1476,6 +1479,9 @@ pub(crate) fn stream_failure_cause(
         {
             Some(Cause::ConnectionLost)
         }
+        OrchestratorError::Streaming(error) if error.is_missing_stream_terminal() => {
+            Some(Cause::Truncated)
+        }
         OrchestratorError::Streaming(e) => match e.classification_source() {
             LlmError::Overloaded { .. } => Some(Cause::Overloaded),
             LlmError::ProviderTimeout { .. } => Some(Cause::TimedOut),
@@ -1515,10 +1521,13 @@ fn build_failure(
     // its stable interruption notice. Provider errors (not transport closes)
     // retain their existing retry/fallback semantics for incomplete blocks.
     let is_transport_close = match &error {
-        OrchestratorError::Streaming(error) => matches!(
-            error.classification_source(),
-            LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
-        ),
+        OrchestratorError::Streaming(error) => {
+            error.is_missing_stream_terminal()
+                || matches!(
+                    error.classification_source(),
+                    LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
+                )
+        }
         OrchestratorError::StreamEndedWithoutStop => true,
         _ => false,
     };
@@ -1984,6 +1993,9 @@ async fn pump_stream_inner(
         any_event = true;
         if let HistoryEvent::Completed { response } = &event {
             completed_reconciled = true;
+            if let Some(diagnostics) = response.diagnostics() {
+                turn.diagnostics = Some(diagnostics);
+            }
             // Completed is an authoritative response, including for clients
             // that do not emit any incremental callbacks. Only missing/open
             // source blocks enter the admission path; accepted rows and tool
@@ -2465,6 +2477,9 @@ async fn pump_stream_inner(
             turn.server_fallback_events.push(observation);
         }
         if let HistoryEvent::MessageStart { response } = &event {
+            if let Some(diagnostics) = response.diagnostics() {
+                turn.diagnostics = Some(diagnostics);
+            }
             if let Some(capture) = &timing_capture {
                 capture.observe_first_stream_start_at(event_received_at);
             }
@@ -2654,9 +2669,9 @@ async fn pump_stream_inner(
                     stop_details: None,
                     resumable: None,
                     usage: None,
-                    request_id: pump
-                        .as_ref()
-                        .and_then(|pump| pump.executor.last_request_id()),
+                    request_id: pump.as_ref().and_then(|pump| {
+                        pump.executor.response_request_id(turn.diagnostics.as_ref())
+                    }),
                     timestamp: assistant_row_timestamp(),
                     persisted_link: None,
                     content: vec![block],
@@ -2692,41 +2707,36 @@ async fn pump_stream_inner(
                         suppress_live_text = false;
                     }
                 }
+                let row_index = turn
+                    .assistant_rows
+                    .iter()
+                    .rposition(|row| row.row_id == row_id);
                 if let Some(p) = pump.as_mut() {
-                    let accepted_content = if let Some(row) = turn
-                        .assistant_rows
-                        .iter_mut()
-                        .find(|row| row.row_id == row_id)
-                    {
+                    if let Some(index) = row_index {
+                        let row = &mut turn.assistant_rows[index];
                         p.executor.append_assistant_row(row).await;
-                        Some((row.session_append_dispatched, row.content.clone()))
-                    } else {
-                        None
-                    };
-                    if let Some((accepted, content)) = accepted_content {
-                        if accepted {
+                        if row.session_append_dispatched {
                             turn.note_accepted_assistant_row();
                         }
                         update_accepted_stream_blocks_for_row(
-                            &mut turn,
+                            &mut turn.assistant_blocks,
                             &mut assistant_block_indices,
                             &mut assistant_block_row_ids,
                             row_id,
-                            &content,
+                            &turn.assistant_rows[index].content,
                             Some(key),
                         );
                     }
                     if let Some(settlement) = p.settlement.as_deref_mut() {
-                        if let Some(row) =
-                            turn.assistant_rows.iter().find(|row| row.row_id == row_id)
-                        {
-                            settlement.record_assistant_response(row);
+                        if let Some(index) = row_index {
+                            settlement.record_assistant_response(&turn.assistant_rows[index]);
                         } else {
                             settlement.record_assistant_row(row_id);
                         }
                     }
                 }
-                if let Some(row) = turn.assistant_rows.iter().find(|row| row.row_id == row_id) {
+                if let Some(index) = row_index {
+                    let row = &turn.assistant_rows[index];
                     output
                         .emit_accepted_assistant_row(
                             &row.row_id,
@@ -2768,9 +2778,9 @@ async fn pump_stream_inner(
                     stop_details: None,
                     resumable: None,
                     usage: None,
-                    request_id: pump
-                        .as_ref()
-                        .and_then(|pump| pump.executor.last_request_id()),
+                    request_id: pump.as_ref().and_then(|pump| {
+                        pump.executor.response_request_id(turn.diagnostics.as_ref())
+                    }),
                     timestamp: assistant_row_timestamp(),
                     persisted_link: None,
                     content: vec![block],
@@ -2785,14 +2795,20 @@ async fn pump_stream_inner(
                     if row.session_append_dispatched {
                         turn.note_accepted_assistant_row();
                     }
-                    update_accepted_stream_blocks_for_row(
-                        &mut turn,
-                        &mut assistant_block_indices,
-                        &mut assistant_block_row_ids,
-                        row_id,
-                        &row.content,
-                        Some(llm_runtime::stream_content_order(api_block_index)),
-                    );
+                    if row
+                        .content
+                        .iter()
+                        .any(|block| !matches!(block, ContentBlock::ToolUse { .. }))
+                    {
+                        update_accepted_stream_blocks_for_row(
+                            &mut turn.assistant_blocks,
+                            &mut assistant_block_indices,
+                            &mut assistant_block_row_ids,
+                            row_id,
+                            &row.content,
+                            Some(llm_runtime::stream_content_order(api_block_index)),
+                        );
+                    }
                     if let Some(settlement) = p.settlement.as_deref_mut() {
                         settlement.record_assistant_response(&row);
                     }
@@ -3123,6 +3139,74 @@ mod tests {
 
     fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    #[test]
+    fn accepted_block_replacement_preserves_equal_order_siblings_and_companions() {
+        let text = |s: &str| ContentBlock::Text {
+            text: s.to_owned(),
+            citations: None,
+        };
+        let tool = ContentBlock::ToolUse {
+            id: ToolUseId::from("tool"),
+            name: "Read".into(),
+            input: Utf16JsonProjection::parse("{}").unwrap(),
+            provider_id: None,
+        };
+        let prefix = MessageId::new();
+        let row = MessageId::new();
+        let sibling = MessageId::new();
+        let companion = MessageId::new();
+        let key = (1, false);
+        let mut blocks = vec![text("prefix"), text("old"), text("peer"), text("companion")];
+        let mut ids = vec![prefix, row, sibling, companion];
+        let mut orders = vec![(0, false), key, key, (1, true)];
+
+        update_accepted_stream_blocks_for_row(
+            &mut blocks,
+            &mut orders,
+            &mut ids,
+            row,
+            &[text("first"), tool.clone(), text("second")],
+            Some(key),
+        );
+        assert_eq!(
+            blocks,
+            [
+                text("prefix"),
+                text("peer"),
+                text("first"),
+                text("second"),
+                text("companion")
+            ]
+        );
+        assert_eq!(ids, [prefix, sibling, row, row, companion]);
+        assert_eq!(orders, [(0, false), key, key, key, (1, true)]);
+
+        replace_stream_blocks_for_row(&mut blocks, &mut orders, &mut ids, row, &[tool]);
+        assert_eq!(blocks, [text("prefix"), text("peer"), text("companion")]);
+        assert_eq!(ids, [prefix, sibling, companion]);
+        assert_eq!(orders, [(0, false), key, (1, true)]);
+
+        update_accepted_stream_blocks_for_row(
+            &mut blocks,
+            &mut orders,
+            &mut ids,
+            row,
+            &[text("hook-added")],
+            Some(key),
+        );
+        assert_eq!(
+            blocks,
+            [
+                text("prefix"),
+                text("peer"),
+                text("hook-added"),
+                text("companion")
+            ]
+        );
+        assert_eq!(ids, [prefix, sibling, row, companion]);
+        assert_eq!(orders, [(0, false), key, key, (1, true)]);
     }
 
     fn final_response(
@@ -4254,6 +4338,41 @@ mod tests {
             Some("foo.rs")
         );
         assert_eq!(turn.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[tokio::test]
+    async fn sdk_missing_terminal_keeps_unclosed_text_and_route_replay_veto() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let mut events: Vec<_> = [
+            message_start("m1", "model"),
+            content_block_start_text(0),
+            text_delta(0, "already visible"),
+        ]
+        .into_iter()
+        .map(Ok)
+        .collect();
+        events.push(Err(LlmError::ResponseDiagnostics {
+            source: Box::new(LlmError::StreamInterrupted {
+                message: "provider stream ended before a terminal event".into(),
+            }),
+            request_id: Some("request-id".into()),
+            rate_limit_message: None,
+            route_replay_forbidden: true,
+        }));
+        let failure = pump_stream_inner(stream::iter(events).boxed(), &out, None, None)
+            .await
+            .err()
+            .expect("incomplete turn");
+        assert!(
+            matches!(failure.partial.assistant_blocks.as_slice(), [ContentBlock::Text { text, .. }] if text == "already visible")
+        );
+        assert!(
+            matches!(&failure.error, OrchestratorError::Streaming(error) if !error.allows_automatic_replay())
+        );
+        assert!(matches!(
+            partial_finalize_cause(&failure.error),
+            Some(PartialFinalizeCause::NetworkDown)
+        ));
     }
 
     #[tokio::test]

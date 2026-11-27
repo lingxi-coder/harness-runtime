@@ -381,7 +381,7 @@ impl RolloutRecorder {
             let mut v: Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(e) => {
-                    warn!("failed to parse line as JSON: {line:?}, error: {e}");
+                    warn!(line_bytes = line.len(), error = %e, "failed to parse rollout JSON");
                     parse_errors = parse_errors.saturating_add(1);
                     continue;
                 }
@@ -391,7 +391,7 @@ impl RolloutRecorder {
                 continue;
             }
 
-            match serde_json::from_value::<RolloutLine>(v.clone()) {
+            match serde_json::from_value::<RolloutLine>(v) {
                 Ok(rollout_line) => {
                     let item = rollout_line.item;
                     if thread_id.is_none() {

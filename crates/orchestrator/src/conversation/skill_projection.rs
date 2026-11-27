@@ -387,7 +387,7 @@ impl ConversationOrchestrator {
                     )
                     .expect("transcript extra metadata is an object");
             }
-            if let Err(error) = self.append_transcript_row(writer, &row).await {
+            if let Err(error) = self.append_transcript_row(writer, row).await {
                 self.record_transcript_append_failure(&target_bare, "skill_projection", &error)
                     .await;
                 return Err(OrchestratorError::Internal(format!(

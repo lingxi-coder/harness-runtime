@@ -158,9 +158,9 @@ impl ConversationOrchestrator {
     /// This is the host-side source for the main-loop `session.measure` event;
     /// breakdown-only context estimates are deliberately not computed here.
     pub(crate) async fn mod_session_measure_snapshot(&self) -> ModSessionMeasureSnapshot {
-        let (model, profile) = {
+        let (session_id, model, profile) = {
             let s = self.session.lock().await;
-            (s.model.clone(), s.model_profile.clone())
+            (s.session_id, s.model.clone(), s.model_profile.clone())
         };
         let window = self
             .api
@@ -196,11 +196,7 @@ impl ConversationOrchestrator {
                 }
                 limits
             });
-        let cost_usd = if self.model_runtime.cost_tracker.is_some() {
-            Some(self.snapshot_cost_real().await.total_usd)
-        } else {
-            None
-        };
+        let cost_usd = self.session_cost_usd(session_id).await;
         let limit_status = self
             .api
             .last_rate_limit_full()
@@ -254,9 +250,9 @@ impl ConversationOrchestrator {
             .map(|started_at| format!("{started_at:.3}"))
             .unwrap_or_default();
 
-        let (model, profile) = {
+        let (session_id, model, profile) = {
             let s = self.session.lock().await;
-            (s.model.clone(), s.model_profile.clone())
+            (s.session_id, s.model.clone(), s.model_profile.clone())
         };
         let window = self
             .api
@@ -281,7 +277,7 @@ impl ConversationOrchestrator {
         }
 
         let rate_limits = session_usage_rate_limits(self.api.last_raw_utilization());
-        let cost_usd = self.snapshot_cost_real().await.total_usd;
+        let cost_usd = self.session_cost_usd(session_id).await.unwrap_or(0.0);
         Ok(serde_json::json!({
             "startedAt":started_at,
             "context":context,
@@ -606,6 +602,50 @@ mod tests {
             ),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn scalar_cost_reads_keep_session_scope_without_requesting_loop_rows() {
+        struct UnexpectedLoopUsage;
+        #[async_trait]
+        impl lingxi_core::host::LoopUsageProvider for UnexpectedLoopUsage {
+            async fn usage_rows(&self) -> Vec<lingxi_core::host::LoopUsageRow> {
+                panic!("scalar cost requested a full usage report")
+            }
+        }
+
+        let mut orch = orch(vec![]).with_loop_usage(Arc::new(UnexpectedLoopUsage));
+        orch.config.max_budget_nano_usd = Some(2_500_000_000);
+        let measure = orch.mod_session_measure_snapshot().await;
+        assert!(measure.input.get("cost").is_none());
+        let usage = orch.mod_session_usage_snapshot(None, None).await.unwrap();
+        assert_eq!(usage["cost"]["usd"].as_f64(), Some(0.0));
+        assert!(!orch.over_budget().await);
+
+        let session = orch.session.lock().await.session_id;
+        let (updates, _receiver) = tokio::sync::mpsc::channel(4);
+        let tracker = Arc::new(cost::CostTracker::new(
+            session,
+            Arc::new(cost::PricingCatalog::builtin_reference()),
+            updates,
+        ));
+        let orch = orch.with_cost_tracker(tracker.clone());
+        tracker
+            .restore_total_for_session(session, 1_250_000_000)
+            .await;
+        assert!(!orch.over_budget().await);
+
+        // Model facts still belong to the captured session after the active
+        // tracker switches. The budget gate follows the active tracker.
+        let next = SessionId::new();
+        tracker.switch_session(next).await.unwrap();
+        tracker.restore_total_for_session(next, 2_500_000_000).await;
+        let measure = orch.mod_session_measure_snapshot().await;
+        let usage = orch.mod_session_usage_snapshot(None, None).await.unwrap();
+        assert_eq!(measure.cost_usd, Some(1.25));
+        assert_eq!(measure.input["cost"]["usd"], usage["cost"]["usd"]);
+        assert_eq!(usage["cost"]["usd"].as_f64(), Some(1.25));
+        assert!(orch.over_budget().await);
     }
 
     /// P0-4: a failed output write is a fact about that turn, not a verdict on

@@ -9,61 +9,103 @@ fn object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
     Utf16JsonProjection::object(fields).expect("background input has distinct static field names")
 }
 
-fn native_content(block: &ContentBlock) -> Option<Utf16JsonProjection> {
-    let text = match block {
-        ContentBlock::Text { text, .. } => Utf16JsonProjection::from(text.clone()),
-        ContentBlock::TextJsUtf16 {
-            utf16_code_units, ..
-        } => Utf16JsonProjection::root_string(
-            String::from_utf16_lossy(utf16_code_units),
-            utf16_code_units.clone(),
-        )
-        .expect("assistant text is a source string"),
-        ContentBlock::ProviderContent { protocol, value }
-            if protocol == "anthropic_messages"
-                && matches!(value.string_at("/type"), Some("text" | "tool_use")) =>
-        {
-            return Some(value.clone());
-        }
-        ContentBlock::ToolUse { name, .. } => {
-            return Some(object(vec![
-                ("type".into(), "tool_use".into()),
-                ("name".into(), name.clone().into()),
-            ]));
-        }
-        _ => return None,
-    };
-    Some(object(vec![
-        ("type".into(), "text".into()),
-        ("text".into(), text),
-    ]))
+pub(super) enum ClassifierContent {
+    Text(String),
+    TextUtf16(Vec<u16>),
+    Provider(Utf16JsonProjection),
+    Tool(String),
 }
 
-/// Project history to the native classifier's message shape, preserving source
-/// strings instead of serializing the host's internal content-block tags.
+impl ClassifierContent {
+    fn capture(block: &ContentBlock) -> Option<Self> {
+        match block {
+            ContentBlock::Text { text, .. } => Some(Self::Text(text.clone())),
+            ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } => Some(Self::TextUtf16(utf16_code_units.clone())),
+            ContentBlock::ProviderContent { protocol, value }
+                if protocol == "anthropic_messages"
+                    && matches!(value.string_at("/type"), Some("text" | "tool_use")) =>
+            {
+                Some(Self::Provider(value.clone()))
+            }
+            ContentBlock::ToolUse { name, .. } => Some(Self::Tool(name.clone())),
+            _ => None,
+        }
+    }
+
+    fn into_native(self) -> Utf16JsonProjection {
+        let text = match self {
+            Self::Text(text) => text.into(),
+            Self::TextUtf16(units) => {
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                    .expect("assistant text is a source string")
+            }
+            Self::Provider(value) => return value,
+            Self::Tool(name) => {
+                return object(vec![
+                    ("type".into(), "tool_use".into()),
+                    ("name".into(), name.into()),
+                ])
+            }
+        };
+        object(vec![("type".into(), "text".into()), ("text".into(), text)])
+    }
+}
+
+/// Capture only the fields the classifier reads while the transcript is locked.
+pub(super) fn capture_assistant(
+    message: &ConversationMessage,
+) -> Option<(MessageId, Vec<ClassifierContent>)> {
+    let ConversationMessage::Assistant { id, content, .. } = message else {
+        return None;
+    };
+    Some((
+        *id,
+        content
+            .iter()
+            .filter_map(ClassifierContent::capture)
+            .collect(),
+    ))
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // Also included directly by the integration fixtures.
 pub(super) fn assemble_history(
     history: &[ConversationMessage],
     last_count: usize,
     is_api_error: impl Fn(&MessageId) -> bool,
 ) -> Result<Utf16JsonProjection, hooks::function_hook::FunctionHookError> {
-    let messages = history
+    let assistants = history
         .iter()
-        .filter_map(|message| {
-            let ConversationMessage::Assistant { id, content, .. } = message else {
-                return None;
-            };
-            let content =
-                Utf16JsonProjection::array(content.iter().filter_map(native_content).collect())
-                    .expect("native classifier content is an array");
-            Some(object(vec![
+        .filter_map(capture_assistant)
+        .map(|(id, content)| (is_api_error(&id), content));
+    assemble_assistants(assistants, last_count)
+}
+
+pub(super) fn assemble_assistants(
+    assistants: impl IntoIterator<Item = (bool, Vec<ClassifierContent>)>,
+    last_count: usize,
+) -> Result<Utf16JsonProjection, hooks::function_hook::FunctionHookError> {
+    let messages = assistants
+        .into_iter()
+        .map(|(is_api_error, content)| {
+            let content = Utf16JsonProjection::array(
+                content
+                    .into_iter()
+                    .map(ClassifierContent::into_native)
+                    .collect(),
+            )
+            .expect("native classifier content is an array");
+            object(vec![
                 ("type".into(), "assistant".into()),
                 ("message".into(), object(vec![("content".into(), content)])),
                 (
                     "isApiErrorMessage".into(),
-                    Utf16JsonProjection::from_serde_value(&json!(is_api_error(id)))
+                    Utf16JsonProjection::from_serde_value(&json!(is_api_error))
                         .expect("API error flag is a JSON boolean"),
                 ),
-            ]))
+            ])
         })
         .collect();
     evaluate_projection_result(
@@ -157,17 +199,19 @@ pub(super) fn evaluate_result(
 fn evaluate_projection(
     input: &Utf16JsonProjection,
 ) -> Result<Utf16JsonProjection, hooks::function_hook::FunctionHookError> {
-    static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        format!(
-        "{}\nconst classifier = (() => {{\n{}\n{}\nreturn {{wZr,Oxn,Hxn,vZr,brs,wrs}};\n}})();\n{}\n{}\n{}",
+    const SOURCE: &str = concat!(
         include_str!("prompt_suggestion_redactor_native.js"),
+        "\nconst classifier = (() => {\n",
         include_str!("prompt_suggestion_classifier_adapter.js"),
+        "\n",
         include_str!("prompt_suggestion_classifier_native.js"),
+        "\nreturn {wZr,Oxn,Hxn,vZr,brs,wrs};\n})();\n",
         include_str!("prompt_suggestion_background_tail_native.js"),
+        "\n",
         include_str!("prompt_suggestion_background_input_native.js"),
+        "\n",
         include_str!("prompt_suggestion_background_adapter.js"),
-    )
-    });
-    let result = hooks::function_hook::Sandbox::default().eval_abandonable(&SOURCE, input)?;
+    );
+    let result = hooks::function_hook::Sandbox::default().eval_abandonable(SOURCE, input)?;
     Ok(result)
 }

@@ -59,6 +59,19 @@ fn snapshot_must_match_the_fixed_instruction_epoch() {
 }
 
 #[test]
+fn captured_replay_rejects_a_second_mode_record_after_the_prompt_snapshot() {
+    let id = uuid::Uuid::new_v4();
+    let source = mode_source(id, "current");
+    let source = format!("{source}{}\n", source.lines().next().unwrap());
+    let loaded = session::jsonl::route_lines(&source);
+    let result = crate::resume::replay_captured_session("test.jsonl".into(), source, loaded, id);
+    assert!(matches!(
+        result,
+        Err(crate::resume::ResumeError::Profile(_))
+    ));
+}
+
+#[test]
 fn forked_prompt_snapshot_is_history_not_current_instruction_state() {
     let id = uuid::Uuid::new_v4();
     let source = mode_source(id, "current");

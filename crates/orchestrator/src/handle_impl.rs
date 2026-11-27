@@ -25,6 +25,7 @@ use crate::ConversationOrchestrator;
 use async_trait::async_trait;
 use futures::StreamExt;
 use hooks::mods::ModSessionContext;
+use lingxi_core::host::orchestrator::ResumableSessionSearch;
 use lingxi_core::host::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
     HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, ModelRouteAnchor,
@@ -4543,6 +4544,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
+        self.list_resumable_sessions_matching(Default::default())
+            .await
+    }
+
+    async fn list_resumable_sessions_matching(
+        &self,
+        search: ResumableSessionSearch,
+    ) -> Vec<(String, String)> {
         // Enumerate the on-disk JSONL session store the resume path reads
         // from: `<config-home>/projects/<project_dir_name(cwd)>/<uuid>.jsonl`.
         // `config-home` is `$LINGXI_CONFIG_DIR` (else `~/.claude`) — the SAME
@@ -4571,9 +4580,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                     .join(session::project_dir_name(&cwd))
             });
         let mode = self.conversation_profile().await.mode;
-        // Directory reads and transcript scans are blocking. Keep them off the
-        // runtime worker; the mode check still reads each file.
-        tokio::task::spawn_blocking(move || list_resumable_session_ids(project_dir, mode))
+        tokio::task::spawn_blocking(move || list_resumable_session_ids(project_dir, mode, search))
             .await
             .unwrap_or_default()
     }
@@ -4582,6 +4589,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 fn list_resumable_session_ids(
     project_dir: std::path::PathBuf,
     mode: lingxi_core::host::session_context::ConversationMode,
+    search: ResumableSessionSearch,
 ) -> Vec<(String, String)> {
     let Ok(entries) = std::fs::read_dir(&project_dir) else {
         return Vec::new();
@@ -4595,7 +4603,9 @@ fn list_resumable_session_ids(
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if uuid::Uuid::parse_str(stem).is_err()
+        // This store displays the filename stem as both the ID and the label.
+        if !search.matches(stem, stem)
+            || uuid::Uuid::parse_str(stem).is_err()
             || !entry.file_type().is_ok_and(|kind| kind.is_file())
         {
             continue;
@@ -4603,11 +4613,12 @@ fn list_resumable_session_ids(
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
-        if !session::JsonlWriter::fixed_session_profile_from_reader(
+        if !session::JsonlWriter::reader_matches_fixed_session_mode(
             std::io::BufReader::new(file),
             stem,
+            mode,
         )
-        .is_ok_and(|profile| profile.mode == mode)
+        .unwrap_or(false)
         {
             continue;
         }
@@ -4910,6 +4921,45 @@ mod tests {
     use std::sync::Arc;
 
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn resumable_session_search_preserves_mode_and_newest_first_order() {
+        use lingxi_core::host::session_context::ConversationMode;
+
+        let project = tempfile::tempdir().unwrap();
+        let older = "aaaaaaaa-0000-4000-8000-000000000001";
+        let newer = "bbbbbbbb-0000-4000-8000-000000000002";
+        let foreign = "aaaaaaaa-0000-4000-8000-000000000003";
+        for (id, mode, modified) in [(older, "code", 1), (newer, "code", 2), (foreign, "chat", 3)] {
+            let path = project.path().join(format!("{id}.jsonl"));
+            let header = format!(
+                r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"{mode}","instructionEpoch":0}}"#
+            );
+            std::fs::write(&path, header).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(modified))
+                .unwrap();
+        }
+        let list = |query: &str| {
+            list_resumable_session_ids(
+                project.path().to_path_buf(),
+                ConversationMode::Code,
+                ResumableSessionSearch::new(query),
+            )
+            .into_iter()
+            .map(|(id, label)| {
+                assert_eq!(id, label);
+                id
+            })
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(list(""), [newer, older]);
+        assert_eq!(list("AaAa"), [older]);
+        assert!(list("missing").is_empty());
+    }
 
     #[derive(Debug)]
     struct ListingSnapshotSource {

@@ -1066,6 +1066,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         retries: u32,
                         request_id: Option<&'a str>,
                     }
+                    let diagnostics = response.diagnostics();
                     let metered_calls: Vec<_> = if physical_responses.is_empty() {
                         requested_model
                             .then(|| MeteredCall {
@@ -1073,7 +1074,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                                 model: &model,
                                 profile: model_profile.as_deref(),
                                 duration: api_call_started.elapsed(),
-                                retries: orch.api.last_retry_count(),
+                                retries: orch.api.response_retry_count(diagnostics.as_ref()),
                                 request_id: None,
                             })
                             .into_iter()
@@ -1271,7 +1272,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                                     provider: crate::cost_wiring::provider_tag(&model_ref.provider),
                                     stop_reason: call.response.stop_reason.clone(),
                                     request_id: if physical_responses.is_empty() {
-                                        orch.api.last_request_id()
+                                        orch.api.response_request_id(diagnostics.as_ref())
                                     } else {
                                         call.request_id.map(str::to_owned)
                                     },

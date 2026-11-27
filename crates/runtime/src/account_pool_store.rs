@@ -5,6 +5,62 @@ use llm_runtime::accounts::{AccountPoolStore, HealthDocument, PoolOperation, Poo
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+pub(crate) const HEALTH_DOCUMENT_LIMIT: u64 = 4 * 1024 * 1024;
+
+pub(crate) fn write_health(
+    root: &Path,
+    path: &Path,
+    document: &mut HealthDocument,
+) -> Result<(), &'static str> {
+    let bytes = encode_health(document, HEALTH_DOCUMENT_LIMIT as usize)?;
+    rooted_fs::atomic_write(root, path, &bytes, Default::default())
+        .map_err(|_| "account health persistence failed")
+}
+
+fn encode_health(document: &mut HealthDocument, limit: usize) -> Result<Vec<u8>, &'static str> {
+    let mut bytes = serde_json::to_vec(&document).map_err(|_| "account health encoding failed")?;
+    if bytes.len() > limit {
+        // Discoveries and confirmed observations are hints. Drop the oldest
+        // hints first, retaining active denials, cooldowns and completion fences.
+        use lingxi_core::host::provider_accounts::AccountModelEntitlementStatus;
+        let mut optional: Vec<_> = document
+            .model_entitlements
+            .iter()
+            .filter(|(_, entry)| entry.status != AccountModelEntitlementStatus::Forbidden)
+            .map(|(key, entry)| {
+                (
+                    entry.status == AccountModelEntitlementStatus::Confirmed,
+                    entry.observed_at_ms,
+                    key.clone(),
+                )
+            })
+            .collect();
+        optional.sort_unstable();
+        let mut estimate = bytes.len();
+        for (_, _, key) in optional {
+            let entry = document
+                .model_entitlements
+                .remove(&key)
+                .expect("existing observation");
+            // A JSON map entry contains the encoded key, colon and value.
+            // Ignore its separating comma for a conservative size estimate.
+            let entry_size = serde_json::to_vec(&(&key, &entry))
+                .map_err(|_| "account health encoding failed")?
+                .len()
+                - 2;
+            estimate -= entry_size;
+            if estimate <= limit {
+                break;
+            }
+        }
+        bytes = serde_json::to_vec(&document).map_err(|_| "account health encoding failed")?;
+    }
+    if bytes.len() > limit {
+        return Err("account health document exceeds storage limit");
+    }
+    Ok(bytes)
+}
+
 #[derive(Debug, Clone)]
 pub struct FileAccountPoolStore {
     data_root: PathBuf,
@@ -30,7 +86,9 @@ impl FileAccountPoolStore {
         operation: PoolOperation,
     ) -> Result<PoolResult, String> {
         let account = match &operation {
-            PoolOperation::Claim { account, .. } | PoolOperation::Finish { account, .. } => account,
+            PoolOperation::Claim { account, .. }
+            | PoolOperation::Finish { account, .. }
+            | PoolOperation::ProbeLease { account, .. } => account,
         };
         let directory_lock = PathBuf::from(format!(
             "provider-accounts/{}.lock",
@@ -40,7 +98,7 @@ impl FileAccountPoolStore {
         // injected Broker snapshot is an authority only for its captured scope.
         let _directory_lock = rooted_fs::lock_exclusive(root, &directory_lock, 0o700, 0o600)
             .map_err(|_| "account directory lock unavailable")?;
-        let persisted = crate::provider_accounts::load_account_snapshot(
+        let persisted = crate::provider_accounts::load_account_directory(
             root,
             &account.credential_ref.store_scope,
         )?;
@@ -60,10 +118,11 @@ impl FileAccountPoolStore {
             ));
         }
         let snapshot = authority
-            .map(|directory| directory.read().unwrap_or_else(|e| e.into_inner()).clone())
-            .filter(|snapshot| {
-                snapshot.store_scope == account.credential_ref.store_scope
-                    && snapshot.config_revision >= persisted.config_revision
+            .and_then(|directory| {
+                let current = directory.read().unwrap_or_else(|e| e.into_inner());
+                (current.store_scope == account.credential_ref.store_scope
+                    && current.config_revision >= persisted.config_revision)
+                    .then(|| crate::provider_accounts::account_directory_metadata(&current))
             })
             .unwrap_or(persisted);
         // Re-read authority every transaction. Old pools cannot restore deleted
@@ -85,7 +144,7 @@ impl FileAccountPoolStore {
         let _lock = rooted_fs::lock_exclusive(root, &lock_path, 0o700, 0o600)
             .map_err(|_| "account health lock unavailable")?;
         let mut document =
-            match rooted_fs::read_to_string_limited(root, &state_path, 4 * 1024 * 1024) {
+            match rooted_fs::read_to_string_limited(root, &state_path, HEALTH_DOCUMENT_LIMIT) {
                 Ok(text) => serde_json::from_str::<HealthDocument>(&text)
                     .map_err(|_| "account health state is invalid")?,
                 Err(rooted_fs::FsError::NotFound(_)) => HealthDocument::default(),
@@ -93,7 +152,11 @@ impl FileAccountPoolStore {
             };
         let current_credential_revision =
             provider_config::read_account_credential_version(root, account)?;
-        document.invalidate_auth_for_credential(account, current_credential_revision);
+        let mut changed = match document.reconcile_directory(&snapshot) {
+            Ok(changed) => changed,
+            Err(_) => return Ok(PoolResult::Stale),
+        };
+        changed |= document.invalidate_auth_for_credential(account, current_credential_revision);
         if let PoolOperation::Finish {
             credential_revision,
             outcome: Some(failure),
@@ -107,17 +170,9 @@ impl FileAccountPoolStore {
                 return Ok(PoolResult::Stale);
             }
         }
-        let result = document.apply(operation);
-        if !matches!(result, PoolResult::Unavailable(_) | PoolResult::Stale) {
-            let bytes =
-                serde_json::to_vec(&document).map_err(|_| "account health encoding failed")?;
-            rooted_fs::atomic_write(
-                root,
-                &state_path,
-                &bytes,
-                rooted_fs::AtomicWriteOptions::default(),
-            )
-            .map_err(|_| "account health persistence failed")?;
+        let result = document.apply_tracking_changes(operation, &mut changed);
+        if changed {
+            write_health(root, &state_path, &mut document)?;
         }
         Ok(result)
     }
@@ -232,8 +287,11 @@ impl llm_runtime::client::ModelRuntimeSource for AccountRuntimeSource {
         &self,
         captured: &llm_runtime::ModelRuntime,
     ) -> std::sync::Arc<llm_runtime::ModelRuntime> {
-        let mut config = captured.configuration();
         let snapshot = self.pool.snapshot();
+        if captured.matches_account_routing_snapshot(&snapshot) {
+            return std::sync::Arc::new(captured.clone());
+        }
+        let mut config = captured.configuration();
         if provider_config::assemble_account_client_config(&mut config, &snapshot.accounts).is_err()
         {
             config.providers.clear();
@@ -349,7 +407,7 @@ pub async fn read_health(
     tokio::task::spawn_blocking(move || {
         let scope_hash = format!("{:x}", Sha256::digest(store_scope.as_bytes()));
         let path = PathBuf::from(format!("provider-accounts/health/{scope_hash}.json"));
-        match rooted_fs::read_to_string_limited(&data_root, &path, 4 * 1024 * 1024) {
+        match rooted_fs::read_to_string_limited(&data_root, &path, HEALTH_DOCUMENT_LIMIT) {
             Ok(text) => {
                 serde_json::from_str(&text).map_err(|_| "account health state is invalid".into())
             }
@@ -369,6 +427,83 @@ mod tests {
     };
     use llm_runtime::accounts::{classify, FailureScope};
     use std::sync::{Arc, RwLock};
+    #[test]
+    fn health_encoding_preserves_fences_and_prioritizes_business_observations() {
+        use lingxi_core::host::provider_accounts::{
+            AccountModelEntitlement, AccountModelEntitlementStatus,
+        };
+        let mut document = HealthDocument::default();
+        document.fences.insert("live".into(), 7);
+        let essential = serde_json::to_vec(&document).unwrap().len();
+        assert!(encode_health(&mut document, essential - 1).is_err());
+        for (model, status) in [
+            ("confirmed", AccountModelEntitlementStatus::Confirmed),
+            ("discovery", AccountModelEntitlementStatus::Unverified),
+        ] {
+            document.model_entitlements.insert(
+                model.into(),
+                AccountModelEntitlement {
+                    account_id: "a".into(),
+                    identity_generation: 1,
+                    model_id: model.into(),
+                    status,
+                    observed_at_ms: 1,
+                    retry_at_ms: None,
+                    reason: None,
+                },
+            );
+        }
+        let limit = serde_json::to_vec(&document).unwrap().len() - 1;
+        let bytes = encode_health(&mut document, limit).unwrap();
+        let saved: HealthDocument = serde_json::from_slice(&bytes).unwrap();
+        assert!(bytes.len() <= limit);
+        assert_eq!(saved.fences.get("live"), Some(&7));
+        assert!(saved.model_entitlements.contains_key("confirmed"));
+        assert!(!saved.model_entitlements.contains_key("discovery"));
+    }
+
+    #[test]
+    fn directory_compaction_collects_retired_rows_and_fences_old_snapshots() {
+        let (_root, directory, account) = setup();
+        let mut snapshot = directory.read().unwrap().clone();
+        let mut document = HealthDocument::default();
+        assert!(document.reconcile_directory(&snapshot).unwrap());
+        document.apply(claim(account.clone(), "first".into(), 0));
+        document.apply(PoolOperation::Finish {
+            account: account.clone(),
+            model: "m".into(),
+            endpoint: "fingerprint".into(),
+            owner: "first".into(),
+            claimed_revision: 0,
+            was_probe: false,
+            credential_revision: None,
+            outcome: classify(
+                &llm_runtime::LlmError::ModelUnavailable,
+                "m",
+                "fingerprint",
+                0,
+            ),
+            now_ms: 0,
+        });
+        snapshot.config_revision += 1;
+        assert!(document.reconcile_directory(&snapshot).unwrap());
+        assert_eq!(document.records.len(), 1);
+        assert_eq!(document.fences.len(), 1);
+        assert_eq!(document.model_entitlements.len(), 1);
+        snapshot.accounts.clear();
+        snapshot.config_revision += 1;
+        assert!(document.reconcile_directory(&snapshot).unwrap());
+        assert!(
+            document.identities.is_empty()
+                && document.records.is_empty()
+                && document.fences.is_empty()
+                && document.model_entitlements.is_empty()
+        );
+        assert!(document
+            .reconcile_directory(&directory.read().unwrap())
+            .is_err());
+    }
+
     fn setup() -> (
         tempfile::TempDir,
         llm_runtime::accounts::SharedAccountDirectory,
@@ -387,6 +522,7 @@ mod tests {
                 secret_ref: format!("acct.{id}"),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 1,
             identity_generation: 1,
@@ -438,7 +574,7 @@ mod tests {
             .await
             .unwrap()
         {
-            PoolResult::Claimed { revision } => revision,
+            PoolResult::Claimed { revision, .. } => revision,
             _ => panic!("claim"),
         };
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -455,6 +591,7 @@ mod tests {
                         endpoint: "fingerprint".into(),
                         owner: "rev1".into(),
                         claimed_revision: revision,
+                        was_probe: false,
                         credential_revision: Some(1),
                         outcome: classify(
                             &llm_runtime::LlmError::Authentication {
@@ -491,7 +628,7 @@ mod tests {
             .await
             .unwrap()
         {
-            PoolResult::Claimed { revision } => revision,
+            PoolResult::Claimed { revision, .. } => revision,
             _ => panic!("new credential must ignore old auth fault"),
         };
         assert!(matches!(
@@ -502,6 +639,7 @@ mod tests {
                     endpoint: "fingerprint".into(),
                     owner: "rev2".into(),
                     claimed_revision: revision,
+                    was_probe: false,
                     credential_revision: Some(2),
                     outcome: classify(
                         &llm_runtime::LlmError::Authentication {
@@ -517,6 +655,13 @@ mod tests {
                 .unwrap(),
             PoolResult::Recorded { .. }
         ));
+        let metadata =
+            crate::provider_accounts::load_account_directory(root.path(), "test-domain").unwrap();
+        assert!(metadata.health.is_empty());
+        let projected =
+            crate::provider_accounts::load_account_snapshot(root.path(), "test-domain").unwrap();
+        assert!(projected.health.iter().any(|row| row.status
+            == lingxi_core::host::provider_accounts::AccountHealthStatus::NeedsAuth));
         publish_version(root.path(), &account, 3);
         let snapshot =
             crate::provider_accounts::load_account_snapshot(root.path(), "test-domain").unwrap();
@@ -537,6 +682,7 @@ mod tests {
                     endpoint: "fingerprint".into(),
                     owner: "rev2".into(),
                     claimed_revision: revision,
+                    was_probe: false,
                     credential_revision: Some(2),
                     outcome: classify(
                         &llm_runtime::LlmError::Authentication {
@@ -569,6 +715,7 @@ mod tests {
                 endpoint: "fingerprint".into(),
                 owner: "initial".into(),
                 claimed_revision: 0,
+                was_probe: false,
                 credential_revision: None,
                 outcome: classify(
                     &llm_runtime::LlmError::RateLimited {
@@ -713,6 +860,7 @@ mod logical_call_directory_tests {
                         secret_ref: format!("acct.{id}"),
                     },
                     enabled: true,
+                    additional_openai_models: false,
                     user_priority: priority,
                     config_revision: 1,
                     identity_generation: 1,
@@ -815,6 +963,7 @@ mod logical_call_directory_tests {
                         secret_ref: format!("acct.{id}"),
                     },
                     enabled: true,
+                    additional_openai_models: false,
                     user_priority: priority,
                     config_revision: 1,
                     identity_generation: 1,

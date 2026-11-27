@@ -28,7 +28,7 @@ extern crate self as llm_runtime;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub use lingxi_llm_client::protocol::Region;
-pub use lingxi_llm_client::providers::anthropic::system_prompt::{PromptText, SystemPromptInput};
+pub use lingxi_llm_client::protocol::{PromptText, SystemPromptInput};
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{
     FrameStream, RawStreamFrame, ResponsesWebSocketTransportSession, StreamingResponse,
@@ -38,7 +38,6 @@ mod attempt_pricing;
 pub use anthropic_extra_body::CapturedAnthropicExtraBody;
 #[cfg(test)]
 mod codec_tests;
-mod native_request_layout;
 #[cfg(test)]
 mod native_request_layout_319_test;
 pub mod native_stream_capture;
@@ -167,9 +166,9 @@ pub use registry::{ConnectionHop, MediaRoute, ModelListing, ModelRegistry, Resol
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
 pub use service::{
-    with_mod_request_effort, ApiService, FallbackPolicy, MessagesCreateOptions,
-    MessagesCreateRequest, NonStreamingRequestClass, NonStreamingRetryOptions,
-    RequestSessionIdSource, RetryInfo, RetryReporter, SubscriberState,
+    with_mod_request_effort, ApiService, ConfiguredFallbackTarget, FallbackPolicy,
+    MessagesCreateOptions, MessagesCreateRequest, NonStreamingRequestClass,
+    NonStreamingRetryOptions, RequestSessionIdSource, RetryInfo, RetryReporter, SubscriberState,
 };
 pub use services::{ProviderServiceSnapshot, ProviderServices};
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};

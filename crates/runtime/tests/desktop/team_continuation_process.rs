@@ -140,6 +140,7 @@ impl Task {
             shared_data: self.data.clone(),
             local_apps: self.apps.clone(),
             delegates: self.delegates.clone(),
+            visualizations: false,
         }
     }
     fn chat_model(
@@ -298,7 +299,10 @@ impl Server {
                         usage(),
                     ]),
                 };
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });

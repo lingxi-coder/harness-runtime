@@ -60,6 +60,7 @@ pub struct AppAgentHost {
 struct AppAgentState {
     store: Arc<AgentStore>,
     chats: Arc<ChatStore>,
+    web_search_budgets: Mutex<HashMap<String, tool_web::WebSearchBudget>>,
     root: PathBuf,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -335,7 +336,12 @@ impl AppAgentState {
         chats
             .reconcile_startup(&task_states)
             .map_err(|_| "agent_storage_unavailable")?;
-        Ok(Self { store, chats, root })
+        Ok(Self {
+            store,
+            chats,
+            web_search_budgets: Mutex::default(),
+            root,
+        })
     }
 }
 
@@ -1413,6 +1419,11 @@ impl AppAgentHost {
                         .chats
                         .delete(chat_id)
                         .map_err(|_| "chat_storage_unavailable")?;
+                    state
+                        .web_search_budgets
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(chat_id);
                 }
                 Ok(Value::Null)
             }
@@ -2488,9 +2499,18 @@ impl AppAgentHost {
                 None
             };
             let context_control = Arc::downgrade(control);
+            let web_search_budget = self
+                .app_state(&control.owner.app_id)?
+                .web_search_budgets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(chat_id.clone())
+                .or_default()
+                .clone();
             Some(super::AppAgentChatResume {
                 chat_id: chat_id.clone(),
                 session_id: SessionId::from_uuid(session_uuid),
+                web_search_budget,
                 transcript_path,
                 replayed,
                 writer,

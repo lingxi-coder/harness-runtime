@@ -802,53 +802,60 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         match request {
             OrchestratorApiRequest::Main(mut request) => {
                 if let Some(settings) = crate::scheduled_turn::current() {
-                    let llm_runtime::MessagesCreateRequest {
-                        model: _,
-                        profile: _,
-                        system,
-                        messages,
-                        tools,
-                        opts,
-                    } = request;
-                    let mut canonical = self.build_scheduled_request(
-                        settings,
-                        system.as_ref(),
-                        opts.skip_global_cache_for_system_prompt,
-                        messages,
-                        tools,
-                        opts.max_output_tokens,
-                        opts.tool_result_reminder_suffixes,
-                        opts.typed_attachment_ids,
-                        opts.task_deliveries,
-                        opts.model_source,
-                        opts.scalar_user_content_ids,
-                    )?;
-                    canonical.input.controls.anthropic.context_hint =
-                        opts.context_hint.map(|value| {
-                            lingxi_llm_client::protocol::JsonPayload::from_generated_value(&value)
-                                .expect("scheduled request context hint is valid JSON")
-                        });
-                    canonical.execution.context_hint_beta = opts.context_hint_beta;
-                    canonical.execution.model_attempt = opts.model_attempt;
-                    canonical
-                        .execution
-                        .set_request_dispatch_admission(opts.request_dispatch_admission);
-                    canonical.execution.failed_stream_outlasted_timeout =
-                        opts.failed_stream_outlasted_timeout;
-                    canonical.execution.stream_fallback =
-                        opts.initial_consecutive_overloaded.is_some();
-                    // Scheduled turns own route, reasoning and query source;
-                    // the caller owns this logical call's retry controls.
                     return self
                         .service
-                        .execute_non_stream_request(
-                            canonical,
-                            llm_runtime::NonStreamingRequestClass::Auxiliary,
-                            llm_runtime::NonStreamingRetryOptions {
-                                initial_consecutive_overloaded: opts.initial_consecutive_overloaded,
-                                fallback: opts.fallback,
-                            },
-                        )
+                        .with_account_call_snapshot(async {
+                            let llm_runtime::MessagesCreateRequest {
+                                model: _,
+                                profile: _,
+                                system,
+                                messages,
+                                tools,
+                                opts,
+                            } = request;
+                            let mut canonical = self.build_scheduled_request(
+                                settings,
+                                system.as_ref(),
+                                opts.skip_global_cache_for_system_prompt,
+                                messages,
+                                tools,
+                                opts.max_output_tokens,
+                                opts.tool_result_reminder_suffixes,
+                                opts.typed_attachment_ids,
+                                opts.task_deliveries,
+                                opts.model_source,
+                                opts.scalar_user_content_ids,
+                            )?;
+                            canonical.input.controls.anthropic.context_hint =
+                                opts.context_hint.map(|value| {
+                                    lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                                        &value,
+                                    )
+                                    .expect("scheduled request context hint is valid JSON")
+                                });
+                            canonical.execution.context_hint_beta = opts.context_hint_beta;
+                            canonical.execution.model_attempt = opts.model_attempt;
+                            canonical
+                                .execution
+                                .set_request_dispatch_admission(opts.request_dispatch_admission);
+                            canonical.execution.failed_stream_outlasted_timeout =
+                                opts.failed_stream_outlasted_timeout;
+                            canonical.execution.stream_fallback =
+                                opts.initial_consecutive_overloaded.is_some();
+                            // Scheduled turns own route, reasoning and query source;
+                            // the caller owns this logical call's retry controls.
+                            self.service
+                                .execute_non_stream_request(
+                                    canonical,
+                                    llm_runtime::NonStreamingRequestClass::Auxiliary,
+                                    llm_runtime::NonStreamingRetryOptions {
+                                        initial_consecutive_overloaded: opts
+                                            .initial_consecutive_overloaded,
+                                        fallback: opts.fallback,
+                                    },
+                                )
+                                .await
+                        })
                         .await;
                 }
                 if request.opts.effort.is_none() {
@@ -858,14 +865,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             }
             OrchestratorApiRequest::HookPrompt(request) => {
                 let system = Utf16JsonProjection::from(request.system.as_str());
-                let stream = self.service.stream_json_schema_with_thinking(
-                    &request.model, request.profile.as_deref(), Some(&system), None, request.messages,
-                    serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
-                    None, None, Some(llm_runtime::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
-                ).await?;
-                llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
-                    .await
-                    .map_err(|(_, error)| error)
+                self.service.with_account_call_snapshot(async {
+                    let canonical = self.service.build_json_schema_request_with_thinking(
+                        &request.model, request.profile.as_deref(), Some(&system), None, request.messages,
+                        serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
+                        None, None, Some(llm_runtime::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
+                    )?;
+                    self.service.complete_side_query_request(canonical).await
+                }).await
             }
         }
     }
@@ -997,12 +1004,30 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             })
     }
 
+    fn response_request_id(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> Option<String> {
+        diagnostics.and_then(|value| value.request_id.clone())
+    }
+
+    fn rate_limit_error_message(&self, error: &LlmError) -> Option<String> {
+        error.rate_limit_message().map(str::to_owned)
+    }
+
     fn last_request_id(&self) -> Option<String> {
         self.service.last_request_id()
     }
 
     fn last_retry_count(&self) -> u32 {
         self.service.last_retry_count()
+    }
+
+    fn response_retry_count(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> u32 {
+        diagnostics.map_or(0, |value| value.retries)
     }
 
     fn thinking_signature_stripped(&self) -> bool {
@@ -1445,10 +1470,6 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         self.service.resolve_media_route(model, profile).ok()
     }
 
-    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
-        self.service.consume_pending_near_limit_wrap_up_hint()
-    }
-
     fn dispatch_near_limit_checkpoint(&self, request: agent::NearLimitCheckpointRequest) {
         // The port has one shared `SessionState.todos` list rather than the
         // oracle's per-agent todo buckets. A child-specific bucket therefore
@@ -1514,22 +1535,33 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
                     .collect();
                 return self
                     .service
-                    .stream_memory_fork(fork, request.system, request.effort, request.forced_tool)
+                    .with_subagent_wrap_up(
+                        request.opts.wrap_up,
+                        self.service.stream_memory_fork(
+                            fork,
+                            request.system,
+                            request.effort,
+                            request.forced_tool,
+                        ),
+                    )
                     .await;
             }
         }
         self.service
-            .stream_with_attempt_opts(
-                &request.model,
-                request.profile.as_deref(),
-                request.system.as_ref(),
-                request.messages,
-                request.tools,
-                request.forced_tool.as_deref(),
-                request.effort,
-                request.opts.max_output_tokens,
-                request.opts.query_source_label.as_deref(),
-                request.opts.model_attempt,
+            .with_subagent_wrap_up(
+                request.opts.wrap_up,
+                self.service.stream_with_attempt_opts(
+                    &request.model,
+                    request.profile.as_deref(),
+                    request.system.as_ref(),
+                    request.messages,
+                    request.tools,
+                    request.forced_tool.as_deref(),
+                    request.effort,
+                    request.opts.max_output_tokens,
+                    request.opts.query_source_label.as_deref(),
+                    request.opts.model_attempt,
+                ),
             )
             .await
     }
@@ -1593,70 +1625,82 @@ impl StreamingApiClient for ProviderApiAdapter {
         model_source: Option<Utf16JsonProjection>,
         scalar_user_content_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.build_scheduled_request(
-                settings,
-                system,
-                skip_global_cache_for_system_prompt,
-                messages,
-                tools,
-                max_tokens,
-                tool_result_reminder_suffixes,
-                typed_attachment_ids,
-                task_deliveries,
-                model_source,
-                scalar_user_content_ids,
-            )?;
-            let mut request = request;
-            request
-                .execution
-                .set_request_dispatch_admission(request_dispatch_admission);
-            request.execution.request_dispatch_observer = request_dispatch_observer;
-            request.execution.native_anthropic_request_context = native_anthropic_request_context;
-            return self.service.stream_request(request).await;
-        }
-        // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
-        // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
-        // the pre-M4 body byte-identical.
-        // (/fast) When the shared fast-mode flag is set AND the active model
-        // passes the resolved route/environment gate, send `speed:"fast"` — the
-        // service's `beta_context` reads it back to add the fast-mode beta.
-        // `None` (flag off, or an unsupported model) keeps the body unchanged.
-        let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
-            && self.service.fast_model_allowed(model, profile)?
-        {
-            Some("fast".to_string())
-        } else {
-            None
-        };
         self.service
-            .stream_with_system_prompt(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                max_tokens,
-                effort
-                    .map(|effort| serde_json::Value::String(effort.to_owned()))
-                    .or_else(|| self.current_effort()),
-                speed,
-                skip_global_cache_for_system_prompt,
-                Some(query_source),
-                request_dispatch_admission,
-                tool_result_reminder_suffixes,
-                request_dispatch_observer,
-                native_anthropic_request_context,
-                typed_attachment_ids,
-                task_deliveries,
-                model_source,
-                scalar_user_content_ids,
-            )
+            .with_account_call_snapshot(async {
+                if let Some(settings) = crate::scheduled_turn::current() {
+                    let request = self.build_scheduled_request(
+                        settings,
+                        system,
+                        skip_global_cache_for_system_prompt,
+                        messages,
+                        tools,
+                        max_tokens,
+                        tool_result_reminder_suffixes,
+                        typed_attachment_ids,
+                        task_deliveries,
+                        model_source,
+                        scalar_user_content_ids,
+                    )?;
+                    let mut request = request;
+                    request
+                        .execution
+                        .set_request_dispatch_admission(request_dispatch_admission);
+                    request.execution.request_dispatch_observer = request_dispatch_observer;
+                    request.execution.native_anthropic_request_context =
+                        native_anthropic_request_context;
+                    return self.service.stream_request(request).await;
+                }
+                // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
+                // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
+                // the pre-M4 body byte-identical.
+                // (/fast) When the shared fast-mode flag is set AND the active model
+                // passes the resolved route/environment gate, send `speed:"fast"` — the
+                // service's `beta_context` reads it back to add the fast-mode beta.
+                // `None` (flag off, or an unsupported model) keeps the body unchanged.
+                let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
+                    && self.service.fast_model_allowed(model, profile)?
+                {
+                    Some("fast".to_string())
+                } else {
+                    None
+                };
+                self.service
+                    .stream_with_system_prompt(
+                        model,
+                        profile,
+                        system,
+                        messages,
+                        tools,
+                        max_tokens,
+                        effort
+                            .map(|effort| serde_json::Value::String(effort.to_owned()))
+                            .or_else(|| self.current_effort()),
+                        speed,
+                        skip_global_cache_for_system_prompt,
+                        Some(query_source),
+                        request_dispatch_admission,
+                        tool_result_reminder_suffixes,
+                        request_dispatch_observer,
+                        native_anthropic_request_context,
+                        typed_attachment_ids,
+                        task_deliveries,
+                        model_source,
+                        scalar_user_content_ids,
+                    )
+                    .await
+            })
             .await
     }
 
     fn last_retry_count(&self) -> u32 {
         self.service.last_retry_count()
+    }
+
+    fn response_retry_count(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> u32 {
+        diagnostics.map_or(0, |value| value.retries)
     }
 
     fn thinking_signature_stripped(&self) -> bool {
@@ -2754,6 +2798,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn hook_prompt_uses_batch_only_route_with_its_own_schema_and_thinking() {
+        use serde_json::json;
+        let model = "claude-sonnet-4-6";
+        let config = serde_json::from_value(json!({"providers":[{
+            "provider_id":"anthropic_first_party","profile_name":"batch","base_url":"https://api.anthropic.com",
+            "protocol":"anthropic_messages","auth":"none","credential":{"type":"none"},
+            "models":[{"display_model":model,"request_model":model,"billing_model":model,
+                "capabilities":{"streaming":false,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":true}}]
+        }]})).unwrap();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
+            Arc::new(ModelRuntime::from_config(config).unwrap()),
+            transport.clone(),
+            Default::default(),
+            Default::default(),
+            "test",
+            None,
+            None,
+        )));
+        let response = adapter
+            .messages_create(crate::OrchestratorApiRequest::HookPrompt(
+                crate::HookPromptRequest::new(model, Some("batch"), "evaluate hook", Vec::new()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
+        let requests = transport.seen.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body = &requests[0].body_json;
+        assert_ne!(body.raw_source_at("/stream").as_deref(), Some("true"));
+        assert_eq!(
+            body.string_at("/thinking/type").as_deref(),
+            Some("disabled")
+        );
+        assert_eq!(
+            body.string_at("/output_config/format/type").as_deref(),
+            Some("json_schema")
+        );
     }
 
     #[tokio::test]
@@ -4060,6 +4145,7 @@ mod tests {
                 forced_tool: None,
                 effort: None,
                 opts: agent::api::SubagentApiCallOpts {
+                    wrap_up: None,
                     memory_fork_wire: None,
                     max_output_tokens: Some(777),
                     model_attempt: None,
@@ -4094,6 +4180,7 @@ mod tests {
                 forced_tool: Some("StructuredOutput".into()),
                 effort: None,
                 opts: agent::api::SubagentApiCallOpts {
+                    wrap_up: None,
                     memory_fork_wire: None,
                     max_output_tokens: Some(321),
                     model_attempt: None,
@@ -4192,6 +4279,7 @@ mod tests {
                     forced_tool: forced_tool.map(str::to_string),
                     effort: None,
                     opts: agent::api::SubagentApiCallOpts {
+                        wrap_up: None,
                         memory_fork_wire: None,
                         max_output_tokens: Some(ceiling),
                         model_attempt: None,
@@ -4798,6 +4886,7 @@ mod tests {
         use tool_api::HostedWebSearchClient;
         struct SearchTransport {
             partial: bool,
+            streaming: bool,
             sends: std::sync::atomic::AtomicUsize,
         }
         #[async_trait::async_trait]
@@ -4814,13 +4903,23 @@ mod tests {
                 assert_eq!(body["tools"][0]["type"], "web_search");
                 let call = json!({"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"Rust"}});
                 let citation = json!({"type":"url_citation","url":"https://rust-lang.org","title":"Rust","start_index":0,"end_index":4});
+                let completed = json!({"id":"resp_1","model":"gpt-search","status":"completed","output":[call,{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[citation]}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}});
+                assert_eq!(body["stream"].as_bool().unwrap_or(false), self.streaming);
+                if !self.streaming {
+                    return Ok(sdk::HttpResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: completed.to_string().into(),
+                    }
+                    .into());
+                }
                 let mut events = vec![
                     json!({"type":"response.created","response":{"id":"resp_1","model":"gpt-search"}}),
                     json!({"type":"response.output_item.added","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}),
                     json!({"type":"response.output_item.done","output_index":0,"item":call}),
                     json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"Rust"}),
                     json!({"type":"response.output_text.annotation.added","output_index":1,"content_index":0,"annotation":citation}),
-                    json!({"type":"response.completed","response":{"id":"resp_1","model":"gpt-search","status":"completed","output":[call,{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[citation]}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}),
+                    json!({"type":"response.completed","response":completed}),
                 ];
                 if self.partial {
                     events.pop(); // No response.completed snapshot arrives.
@@ -4842,10 +4941,10 @@ mod tests {
                 })
             }
         }
-        for partial in [false, true] {
+        for (streaming, partial) in [(true, false), (true, true), (false, false)] {
             let mut profile: ProviderProfile = serde_json::from_value(json!({
             "provider_id":"open_ai","profile_name":"search-openai","base_url":"https://api.openai.com/v1","protocol":"open_ai_responses","auth":"none","credential":{"type":"none"},
-            "models":[{"display_model":"gpt-search","request_model":"gpt-search","billing_model":"gpt-search","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+            "models":[{"display_model":"gpt-search","request_model":"gpt-search","billing_model":"gpt-search","capabilities":{"streaming":streaming,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
         })).unwrap();
             profile.protocol = ProtocolFamily::OpenAiResponses;
             let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
@@ -4861,6 +4960,7 @@ mod tests {
             );
             let transport = Arc::new(SearchTransport {
                 partial,
+                streaming,
                 sends: Default::default(),
             });
             let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
@@ -5658,22 +5758,39 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         &self,
         request: tool_api::HostedFetchRequest,
     ) -> Result<tool_api::HostedFetchOutput, tool_api::HostedSearchError> {
-        let output = self
+        self.fetch_with_cache(request, false)
+            .await
+            .map(|(output, _)| output)
+    }
+    async fn fetch_with_cache(
+        &self,
+        request: tool_api::HostedFetchRequest,
+        use_cache: bool,
+    ) -> Result<(tool_api::HostedFetchOutput, Option<u64>), tool_api::HostedSearchError> {
+        let (output, cached_at_ms) = self
             .service
-            .deepseek_fetch(
+            .deepseek_fetch_with_cache(
                 &request.model,
                 request.profile.as_deref(),
                 &llm_runtime::services::sdk::providers::deepseek::web::DeepSeekFetchRequest::new(
                     request.url,
                 ),
+                use_cache,
             )
             .await
             .map_err(hosted_search_error)?;
-        Ok(tool_api::HostedFetchOutput {
-            billable_requests: output.billable_requests(),
-            title: output.title,
-            content: output.content,
-        })
+        Ok((
+            tool_api::HostedFetchOutput {
+                billable_requests: if cached_at_ms.is_some() {
+                    0
+                } else {
+                    output.billable_requests()
+                },
+                title: output.title,
+                content: output.content,
+            },
+            cached_at_ms,
+        ))
     }
     async fn search(
         &self,
@@ -5796,6 +5913,8 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                 )
                 .expect("Codex search options are serializable"),
             );
+        }
+        if codex_standalone_search || !route.capabilities.streaming {
             let response = self
                 .service
                 .execute_non_stream_request(
@@ -5811,24 +5930,48 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                 .filter_map(hosted_search_content_source)
                 .collect::<Vec<_>>();
             let mut results = sdk::hosted_search::parse_response_content(&search_content);
-            let observations = response
+            require_hosted_search_hits(require_native_results, &results)?;
+            let observation = response
                 .provider_metadata
                 .payload_at("/llm_client/web_search")
-                .filter(sdk::protocol::JsonPayload::is_root_object)
-                .map(|web_search| {
-                    sdk::protocol::JsonPayload::parse(&format!("[{}]", web_search.as_json_source()))
-                        .map_err(|error| {
-                            hosted_search_error(llm_runtime::LlmError::InvalidRequest {
-                                message: error.to_string(),
-                            })
-                        })
-                })
-                .transpose()?;
-            sdk::hosted_search::append_citations(&mut results, observations.as_ref());
-            let _ = progress.send(());
+                .filter(sdk::protocol::JsonPayload::is_root_object);
+            let mut observed_searches = search_content
+                .iter()
+                .filter(|block| sdk::hosted_search::search_started(block))
+                .count() as u64;
+            if let Some(observation) = observation {
+                let grounding = sdk::protocol::WebSearchResult {
+                    metadata: observation.payload_at("/metadata").unwrap_or_default(),
+                    ..Default::default()
+                };
+                observed_searches = observed_searches.max(
+                    grounding
+                        .metadata
+                        .array_len("/web_search_calls")
+                        .unwrap_or_default() as u64,
+                );
+                observed_searches +=
+                    sdk::hosted_search::SearchProgress::default().observe(&grounding);
+                let observations = sdk::protocol::JsonPayload::array_from_items(
+                    &[observation],
+                    sdk::exact_json::JsonEncoding::JavaScript,
+                )
+                .expect("normalized search observation is valid JSON");
+                sdk::hosted_search::append_citations(&mut results, Some(&observations));
+            }
+            if codex_standalone_search {
+                observed_searches = 1;
+            }
+            for _ in 0..observed_searches {
+                let _ = progress.send(());
+            }
             return Ok(tool_api::HostedSearchOutput {
                 results,
-                searches: 1,
+                searches: response
+                    .usage
+                    .server_tool_usage()
+                    .and_then(|usage| usage.web_search_requests)
+                    .unwrap_or(observed_searches),
                 input_tokens: response.usage.counts().input_tokens,
                 output_tokens: response
                     .usage
@@ -5918,15 +6061,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .filter_map(hosted_search_content_source)
             .collect::<Vec<_>>();
         let mut results = sdk::hosted_search::parse_response_content(&search_content);
-        if require_native_results
-            && !results
-                .iter()
-                .any(|entry| matches!(entry, sdk::hosted_search::SearchResultEntry::Hit(_)))
-        {
-            return Err(hosted_search_input_error(
-                "DeepSeek returned no structured web_search_tool_result; native search did not complete",
-            ));
-        }
+        require_hosted_search_hits(require_native_results, &results)?;
         let mut observations = metadata
             .payload_at("/llm_client/web_search")
             .filter(lingxi_llm_client::protocol::JsonPayload::is_root_array)
@@ -5972,6 +6107,22 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                 .saturating_sub(usage.counts().reasoning_tokens),
         })
     }
+}
+
+fn require_hosted_search_hits(
+    require_native_results: bool,
+    results: &[tool_api::hosted_search::SearchResultEntry],
+) -> Result<(), tool_api::HostedSearchError> {
+    if require_native_results
+        && !results
+            .iter()
+            .any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Hit(_)))
+    {
+        return Err(hosted_search_input_error(
+                "DeepSeek returned no structured web_search_tool_result; native search did not complete",
+            ));
+    }
+    Ok(())
 }
 
 fn hosted_search_error(error: llm_runtime::LlmError) -> tool_api::HostedSearchError {
@@ -6062,15 +6213,17 @@ fn deepseek_search_request(
         String::from_utf16(&units)
             .map_err(|_| hosted_search_input_error("DeepSeek search requires valid Unicode"))
     }
+    let domain =
+        |value: &Utf16JsonProjection| scalar(value).map(|name| normalized_search_domain(&name));
     let allowed = input
         .allowed_domains
         .iter()
-        .map(scalar)
+        .map(domain)
         .collect::<Result<Vec<_>, _>>()?;
     let blocked = input
         .blocked_domains
         .iter()
-        .map(scalar)
+        .map(domain)
         .collect::<Result<Vec<_>, _>>()?;
     llm_runtime::services::sdk::providers::deepseek::web::DeepSeekSearchRequest::new(scalar(
         &input.query,
@@ -6078,6 +6231,10 @@ fn deepseek_search_request(
     .with_domains(&allowed, &blocked)
     .map_err(|error| hosted_search_input_error(&error.to_string()))
 }
+fn normalized_search_domain(name: &str) -> String {
+    name.trim_end_matches('.').to_ascii_lowercase()
+}
+
 fn deepseek_search_domain_matches(url: &str, input: &tool_api::HostedSearchRequest) -> bool {
     let Ok(url) = url::Url::parse(url) else {
         return false;
@@ -6088,9 +6245,10 @@ fn deepseek_search_domain_matches(url: &str, input: &tool_api::HostedSearchReque
     let Some(host) = url.host_str() else {
         return false;
     };
+    let host = normalized_search_domain(host);
     let matches = |domain: &lingxi_core::types::utf16_json::Utf16JsonProjection| {
         domain.string_at("").is_some_and(|domain| {
-            let domain = domain.to_ascii_lowercase();
+            let domain = normalized_search_domain(&domain);
             host == domain || host.ends_with(&format!(".{domain}"))
         })
     };

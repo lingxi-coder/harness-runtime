@@ -688,7 +688,7 @@ async fn two_real_compactions_cover_an_omitted_thinking_only_assistant_after_col
         probe.clone(),
     )
     .await;
-    let mut previous_receipt = None;
+    let mut previous_receipt: Option<ContextReceipt> = None;
     for index in 0..2 {
         let canonical_before = orch.snapshot_history().await;
         let prompt = fitting_compaction_prompt(&orch, &format!("current-only-{index}")).await;
@@ -706,16 +706,44 @@ async fn two_real_compactions_cover_an_omitted_thinking_only_assistant_after_col
             .iter()
             .any(|message| message.id().as_uuid() == thinking_only_id));
         let checkpoint = orch.verify_persistent_chat_checkpoint(true).await.unwrap();
-        let receipt = replay_context_receipts(&checkpoint).unwrap().unwrap();
-        assert_eq!(receipt.previous_receipt_id, previous_receipt);
-        if index == 0 {
-            assert!(receipt.omitted_thinking_ids.contains(&thinking_only_id));
-            assert!(!receipt.covered_message_ids.contains(&thinking_only_id));
-        } else {
+        let (replayed, receipt) =
+            ConversationOrchestrator::replay_persistent_chat_snapshot_with_receipt(&checkpoint)
+                .unwrap();
+        let receipt = receipt.unwrap();
+        assert_eq!(
+            receipt.previous_receipt_id,
+            previous_receipt
+                .as_ref()
+                .map(|previous| previous.receipt_id)
+        );
+        if let Some(previous) = &previous_receipt {
             assert!(receipt.covered_message_ids.contains(&thinking_only_id),
                 "the second receipt proves the previously omitted canonical assistant through its source checkpoint");
+            // Re-sign the second checkpoint after corrupting the first receipt.
+            // Its valid digest must never excuse the invalid earlier proof.
+            let (prefix, suffix) = checkpoint
+                .source()
+                .split_at(receipt.source_checkpoint.byte_len as usize);
+            let bad_prefix =
+                prefix.replacen(&previous.source_checkpoint.sha256, &"0".repeat(64), 1);
+            assert_ne!(bad_prefix, prefix);
+            let resigned = suffix.replacen(
+                &receipt.source_checkpoint.sha256,
+                &proof(bad_prefix.as_bytes()).sha256,
+                1,
+            );
+            assert_ne!(resigned, suffix);
+            let altered = bad_prefix + &resigned;
+            let directory = chat_directory.join(uuid::Uuid::new_v4().to_string());
+            std::fs::create_dir(&directory).unwrap();
+            let altered_path = directory.join(path.file_name().unwrap());
+            let altered = capture_test_transcript(altered_path, fs.clone(), &altered).await;
+            assert!(ConversationOrchestrator::replay_persistent_chat_snapshot(&altered).is_err());
+        } else {
+            assert!(receipt.omitted_thinking_ids.contains(&thinking_only_id));
+            assert!(!receipt.covered_message_ids.contains(&thinking_only_id));
         }
-        previous_receipt = Some(receipt.receipt_id);
+        previous_receipt = Some(receipt);
         let projected = orch
             .persistent_chat_context
             .as_ref()
@@ -725,12 +753,7 @@ async fn two_real_compactions_cover_an_omitted_thinking_only_assistant_after_col
         assert!(!projected
             .iter()
             .any(|message| message.id().as_uuid() == thinking_only_id));
-        assert_eq!(
-            ConversationOrchestrator::replay_persistent_chat_snapshot(&checkpoint)
-                .unwrap()
-                .display_history,
-            canonical_after
-        );
+        assert_eq!(replayed.display_history, canonical_after);
         drop(orch);
         drop(writer);
         let target = chat_directory

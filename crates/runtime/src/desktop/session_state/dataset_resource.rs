@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DATA_PROTOCOL_VERSION: u32 = 2;
 pub const DATA_CONTRACT_SHA256: &str =
-    "b8c48b561b817dc203e0bed096ecd60314d0aab7cc5b9ab08facd45e1cc3ba73";
+    "6cd49a190a7186495ff12756d050110b3c983eb09104a9708df30f163810b9fc";
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(

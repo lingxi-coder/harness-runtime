@@ -41,6 +41,47 @@ use loop_state::{StepExit, TurnEndVerdict};
 use projected_content::ProjectedUserContent;
 use streaming::StreamingTurnDriver;
 
+/// Match each received tool use to its first remaining completion. Synthetic
+/// or excess completions follow in their original arrival order.
+fn order_post_tool_batch_calls(
+    received: &[crate::streaming_loop::ObservedToolUse],
+    mut completed: Vec<hooks::events::PostToolBatchCall>,
+) -> Vec<hooks::events::PostToolBatchCall> {
+    if completed.len() < 2
+        || received.is_empty()
+        || (completed.len() == received.len()
+            && completed
+                .iter()
+                .zip(received)
+                .all(|(call, tool)| call.tool_use_id == tool.id))
+    {
+        return completed;
+    }
+
+    let mut positions = std::collections::HashMap::new();
+    for (index, tool) in received.iter().enumerate() {
+        positions
+            .entry(&tool.id)
+            .or_insert_with(std::collections::VecDeque::new)
+            .push_back(index);
+    }
+    let mut slots = Vec::with_capacity(received.len());
+    slots.resize_with(received.len(), || None);
+    let mut unmatched = Vec::new();
+    for call in completed.drain(..) {
+        match positions
+            .get_mut(&call.tool_use_id)
+            .and_then(|ids| ids.pop_front())
+        {
+            Some(index) => slots[index] = Some(call),
+            None => unmatched.push(call),
+        }
+    }
+    completed.extend(slots.into_iter().flatten());
+    completed.append(&mut unmatched);
+    completed
+}
+
 tokio::task_local! {
     /// Set only by [`ConversationOrchestrator::run_resumed_turn_streaming_with_cancel`].
     /// The streaming driver then runs the model loop on the already durable
@@ -2138,18 +2179,8 @@ impl ConversationOrchestrator {
         // Concurrent safe tools can finish out of order. PostToolBatch is
         // defined from the assistant's original `toolUseBlocks.map(...)`, so
         // restore received order before firing the single batch event.
-        let mut ordered_batch_calls = Vec::with_capacity(post_tool_batch_calls.len());
-        for tool_use in &pumped.tool_uses {
-            if let Some(index) = post_tool_batch_calls
-                .iter()
-                .position(|call| call.tool_use_id == tool_use.id)
-            {
-                ordered_batch_calls.push(post_tool_batch_calls.remove(index));
-            }
-        }
-        // Defensive preservation for a future synthetic call whose id is not
-        // represented in `pumped.tool_uses`.
-        ordered_batch_calls.extend(post_tool_batch_calls);
+        let ordered_batch_calls =
+            order_post_tool_batch_calls(&pumped.tool_uses, post_tool_batch_calls);
         Ok((
             prevent_continuation,
             crate::turn_loop::PostToolBatchDispatch {
@@ -2398,7 +2429,7 @@ impl ConversationOrchestrator {
         assistant_id: MessageId,
         stop_reason: &str,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
-        let request_id = self.api.last_request_id();
+        let request_id = self.api.response_request_id(pumped.diagnostics.as_ref());
         let api_error = crate::turn_loop::terminal_api_error_text(
             request_model,
             self.prompt_is_interactive(),
@@ -2478,8 +2509,8 @@ impl ConversationOrchestrator {
         request_model: &str,
         stop_details: Option<&llm_runtime::HistoryStopDetails>,
         response_message_id: Option<&str>,
+        request_id: Option<String>,
     ) -> Result<bool, OrchestratorError> {
-        let request_id = self.api.last_request_id();
         let text = crate::turn_loop::terminal_api_error_text(
             request_model,
             self.prompt_is_interactive(),
@@ -4895,6 +4926,7 @@ pub(super) fn llm_response_to_pumped_turn(
     });
 
     PumpedTurn {
+        diagnostics: resp.diagnostics(),
         per_turn_effort: resp.per_turn_effort(),
         tool_use_removals: Vec::new(),
         served_model,

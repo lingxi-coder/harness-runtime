@@ -103,6 +103,9 @@ impl TeamChatReadResult {
                     || m.created_at == 0
                     || m.change_seq == 0
                     || (m.recalled == Some(true) && (!m.text.is_empty() || m.data_ref.is_some()))
+                    || m.visualization.as_ref().is_some_and(|value| {
+                        m.recalled == Some(true) || !value.is_valid(&m.message_id)
+                    })
                     || m.data_ref
                         .as_ref()
                         .is_some_and(|reference| !reference.is_valid())
@@ -157,6 +160,7 @@ pub(crate) struct TeamReadTools {
     pub(super) delegate: Option<Arc<super::delegate_tool::TeamDelegateTools>>,
     /// Present when nobody asked the Bot for this task and it may stay silent.
     pub(super) no_reply: Option<Arc<super::decline_tool::NoReply>>,
+    pub(super) visualization: Option<Arc<super::visualization::Draft>>,
 }
 impl TeamReadTools {
     /// Every tool this process offers the model, and nothing else.
@@ -191,6 +195,9 @@ impl TeamReadTools {
         if self.no_reply.is_some() {
             names.push(super::checkpoint::NO_REPLY_TOOL.to_owned());
         }
+        if self.visualization.is_some() {
+            names.push(super::visualization::NAME.to_owned());
+        }
         names
     }
 }
@@ -220,6 +227,9 @@ pub(crate) fn register(registry: &mut tool_api::ToolRegistry, tools: Arc<TeamRea
     }
     if let Some(choice) = &tools.no_reply {
         super::decline_tool::register(registry, choice.clone());
+    }
+    if let Some(draft) = &tools.visualization {
+        super::visualization::register(registry, draft.clone());
     }
     for history in [true, false] {
         let schema = if history {

@@ -100,6 +100,7 @@ fn request(
         shared_data: Vec::new(),
         local_apps: Vec::new(),
         delegates: Vec::new(),
+        visualizations: false,
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + 300_000).unwrap(),
     }
 }
@@ -238,7 +239,10 @@ impl Server {
                     Reply::Error => ("400 Bad Request", "application/json", json!({"error":{"type":"invalid_request_error","message":"SYNTHETIC_PROVIDER_ERROR_MUST_NOT_BE_RETURNED"}}).to_string()),
                     Reply::Hang => unreachable!(),
                 };
-                let response = format!("HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });

@@ -1,5 +1,7 @@
 //! Pure account directory validation and compare-and-swap mutations.
-use lingxi_core::host::provider_accounts::{AccountMetadata, AccountSnapshot};
+use lingxi_core::host::provider_accounts::{
+    AccountMetadata, AccountSnapshot, ADDITIONAL_OPENAI_MODEL_IDS,
+};
 use std::collections::HashSet;
 
 /// In-memory account snapshot with revision-checked metadata mutations.
@@ -39,6 +41,10 @@ impl AccountRegistry {
     /// Return a copy of the current account snapshot.
     pub fn snapshot(&self) -> AccountSnapshot {
         self.snapshot.clone()
+    }
+    /// Consume the registry, retaining the validated directory without cloning its rows.
+    pub fn into_snapshot(self) -> AccountSnapshot {
+        self.snapshot
     }
     /// Reject a mutation when its expected configuration revision is stale.
     pub fn check_revision(&self, expected: u64) -> Result<(), String> {
@@ -234,6 +240,71 @@ pub fn assemble_account_profiles(
     assembled.pricing = crate::cost_translate::pricing_for(&assembled.client_config.providers);
     Ok(())
 }
+fn is_openai_api_profile(profile: &llm_runtime::ProviderProfile) -> bool {
+    matches!(profile.profile_name.as_str(), "openai" | "openai-chat")
+        && profile.provider_id == llm_runtime::ProviderId::OpenAI
+        && profile.base_url.trim_end_matches('/') == "https://api.openai.com/v1"
+}
+
+fn project_additional_openai_models(profile: &mut llm_runtime::ProviderProfile, enabled: bool) {
+    // https://developers.openai.com/api/docs/deprecations#past-deprecations
+    const RETIRED: &[&str] = &["gpt-4.1-nano", "o1", "o3-mini", "o4-mini"];
+    let is_additional = |id: &str| ADDITIONAL_OPENAI_MODEL_IDS.contains(&id);
+    let keep = |id: &str| !RETIRED.contains(&id) && (enabled || !is_additional(id));
+    profile.models.retain(|model| keep(&model.request_model));
+    if let Some(wire) = &mut profile.wire_profile {
+        wire.models.retain(|model| keep(&model.request_model));
+    }
+    if !enabled {
+        return;
+    }
+
+    static BUILTINS: std::sync::OnceLock<llm_runtime::BuiltinCatalog> = std::sync::OnceLock::new();
+    let Some(source) = BUILTINS
+        .get_or_init(llm_runtime::builtin_presets)
+        .providers
+        .iter()
+        .find(|source| {
+            source.profile_name == profile.profile_name && source.protocol == profile.protocol
+        })
+    else {
+        return;
+    };
+
+    for model in source
+        .models
+        .iter()
+        .filter(|model| is_additional(&model.request_model) && keep(&model.request_model))
+    {
+        if let Some(existing) = profile
+            .models
+            .iter_mut()
+            .find(|existing| existing.request_model == model.request_model)
+        {
+            existing.metadata.catalog_offered = true;
+        } else {
+            let mut model = model.clone();
+            model.metadata.catalog_offered = true;
+            profile.models.push(model);
+        }
+    }
+    if let (Some(wire), Some(source)) = (&mut profile.wire_profile, &source.wire_profile) {
+        for model in source
+            .models
+            .iter()
+            .filter(|model| is_additional(&model.request_model) && keep(&model.request_model))
+        {
+            if !wire
+                .models
+                .iter()
+                .any(|existing| existing.request_model == model.request_model)
+            {
+                wire.models.push(model.clone());
+            }
+        }
+    }
+}
+
 /// Idempotently derive executable account routes from authoritative existing bindings.
 pub fn assemble_account_client_config(
     config: &mut llm_runtime::ClientConfig,
@@ -242,15 +313,55 @@ pub fn assemble_account_client_config(
     config
         .providers
         .retain(|p| !p.profile_name.starts_with("account."));
+    let additional_models_enabled = accounts.iter().any(|account| {
+        account.enabled
+            && account.supports_additional_openai_models()
+            && account.additional_openai_models
+    });
+    for profile in config
+        .providers
+        .iter_mut()
+        .filter(|profile| is_openai_api_profile(profile))
+    {
+        project_additional_openai_models(profile, additional_models_enabled);
+    }
     for account in accounts.iter().filter(|a| a.enabled) {
-        let Some(mut profile) = config
+        let Some(binding) = config
             .providers
             .iter()
             .find(|p| p.profile_name == account.execution_binding_id)
-            .cloned()
         else {
             continue;
         };
+        // Materialize the configured default on the account itself. A link
+        // back to a catalog profile would carry its catalog credential.
+        let alternate = binding.wire_profile.as_ref().and_then(|wire| {
+            let protocol = wire
+                .connection
+                .default_protocol
+                .filter(|p| *p != binding.protocol)?;
+            let name = wire.connection.protocol_profiles.get(&protocol)?;
+            config.providers.iter().find(|target| {
+                &target.profile_name == name
+                    && target.protocol == protocol
+                    && target.provider_id == binding.provider_id
+                    && target.credential == binding.credential
+                    && target.pricing.billing_mode == binding.pricing.billing_mode
+            })
+        });
+        let mut profile = alternate.unwrap_or(binding).clone();
+        if alternate.is_some() {
+            if let Some(wire) = &mut profile.wire_profile {
+                wire.connection.default_protocol = None;
+                wire.connection.protocol_profiles.clear();
+            }
+        }
+        if additional_models_enabled
+            && is_openai_api_profile(&profile)
+            && !(account.supports_additional_openai_models() && account.additional_openai_models)
+        {
+            project_additional_openai_models(&mut profile, false);
+        }
         profile.profile_name = format!("account.{}", account.account_id);
         profile.credential = llm_runtime::CredentialConfig::Static {
             id: account.credential_ref.secret_ref.clone(),
@@ -281,11 +392,75 @@ mod tests {
                 secret_ref: format!("acct.{id}"),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 0,
             identity_generation: 1,
         }
     }
+    #[test]
+    fn additional_openai_models_follow_account_opt_in() {
+        let mut opted_in = account("test");
+        let opted_out = account("test");
+        let mut config = llm_runtime::ClientConfig {
+            providers: llm_runtime::builtin_presets()
+                .providers
+                .into_iter()
+                .filter(|profile| profile.profile_name == "openai")
+                .collect(),
+        };
+
+        assemble_account_client_config(&mut config, &[opted_in.clone(), opted_out.clone()])
+            .unwrap();
+        assert!(config.providers.iter().all(|profile| profile
+            .models
+            .iter()
+            .all(|model| !ADDITIONAL_OPENAI_MODEL_IDS.contains(&model.request_model.as_str()))));
+
+        opted_in.additional_openai_models = true;
+        let mut registry = AccountRegistry::new("test".into());
+        registry.add(opted_in.clone(), 0).unwrap();
+        registry.add(opted_out.clone(), 1).unwrap();
+        let mut snapshot = registry.snapshot();
+        use lingxi_core::host::provider_accounts::{AccountHealth, AccountHealthStatus};
+        snapshot.health = snapshot
+            .accounts
+            .iter()
+            .map(|account| AccountHealth {
+                account_id: account.account_id.clone(),
+                identity_generation: account.identity_generation,
+                status: AccountHealthStatus::Ready,
+                reason: None,
+                cooldown_until_ms: None,
+                health_revision: 0,
+            })
+            .collect();
+        assemble_account_client_config(&mut config, &snapshot.accounts).unwrap();
+        let rows =
+            llm_runtime::ModelRuntime::project_account_model_availability(&config, &snapshot, 0)
+                .unwrap();
+        for model in ADDITIONAL_OPENAI_MODEL_IDS {
+            let row = rows.iter().find(|row| row.model_id == *model);
+            if ["gpt-4.1-nano", "o1", "o3-mini", "o4-mini"].contains(model) {
+                assert!(row.is_none(), "retired model {model}");
+            } else {
+                assert_eq!(
+                    row.unwrap().eligible_account_ids,
+                    [opted_in.account_id.clone()],
+                    "{model}"
+                );
+            }
+        }
+
+        opted_in.additional_openai_models = false;
+        assemble_account_client_config(&mut config, &[opted_in, opted_out]).unwrap();
+        assert!(config.providers.iter().all(|profile| profile
+            .models
+            .iter()
+            .all(|model| !ADDITIONAL_OPENAI_MODEL_IDS.contains(&model.request_model.as_str()))));
+        assert!(!config.providers[0].models.is_empty());
+    }
+
     #[test]
     fn revisions_and_exact_reorder() {
         let mut r = AccountRegistry::new("test".into());

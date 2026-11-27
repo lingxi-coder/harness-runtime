@@ -175,6 +175,7 @@ fn set_type_override(
         "native",
     );
     service
+        .anthropic
         .native_thinking_type_overrides
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

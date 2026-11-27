@@ -12,11 +12,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tool_api::read_file_state::{ReadFileEntry, ReadFileStateMap};
 
-#[derive(Clone)]
-struct FileCall {
-    name: String,
+struct FileCall<'a> {
+    name: &'a str,
     path: PathBuf,
-    input: Utf16JsonProjection,
+    input: &'a Utf16JsonProjection,
 }
 
 #[derive(Clone)]
@@ -110,7 +109,7 @@ fn is_ascii(value: JsonValueView<'_>, expected: &str) -> bool {
         .is_some_and(|units| units.iter().copied().eq(expected.encode_utf16()))
 }
 
-fn file_call(block: &ContentBlock, cwd: &Path) -> Option<(ToolUseId, FileCall)> {
+fn file_call<'a>(block: &'a ContentBlock, cwd: &Path) -> Option<(&'a ToolUseId, FileCall<'a>)> {
     let ContentBlock::ToolUse {
         id, name, input, ..
     } = block
@@ -128,14 +127,7 @@ fn file_call(block: &ContentBlock, cwd: &Path) -> Option<(ToolUseId, FileCall)> 
         "/notebook_path"
     };
     let path = exact_path(input, pointer, cwd)?;
-    Some((
-        id.clone(),
-        FileCall {
-            name: name.clone(),
-            path,
-            input: input.clone(),
-        },
-    ))
+    Some((id, FileCall { name, path, input }))
 }
 
 fn message_blocks(message: &ConversationMessage) -> &[ContentBlock] {
@@ -154,15 +146,15 @@ pub(super) fn restore_file_state(
     map: &ReadFileStateMap,
     attachments: &HashMap<MessageId, Utf16JsonProjection>,
 ) {
-    let history = session.model_context_history();
-    let mut calls: HashMap<ToolUseId, Vec<PathBuf>> = HashMap::new();
-    let mut call_counts: HashMap<ToolUseId, usize> = HashMap::new();
-    let mut result_counts: HashMap<ToolUseId, usize> = HashMap::new();
-    for message in &history {
+    let history = session.iter_model_context_history();
+    let mut calls: HashMap<&ToolUseId, Vec<PathBuf>> = HashMap::new();
+    let mut call_counts: HashMap<&ToolUseId, usize> = HashMap::new();
+    let mut result_counts: HashMap<&ToolUseId, usize> = HashMap::new();
+    for message in history.clone() {
         for block in message_blocks(message) {
             match (message, block) {
                 (ConversationMessage::Assistant { .. }, ContentBlock::ToolUse { id, .. }) => {
-                    *call_counts.entry(id.clone()).or_default() += 1;
+                    *call_counts.entry(id).or_default() += 1;
                     if let Some((id, call)) = file_call(block, cwd) {
                         calls.entry(id).or_default().push(call.path);
                     }
@@ -171,7 +163,7 @@ pub(super) fn restore_file_state(
                     ConversationMessage::User { .. },
                     ContentBlock::ToolResult { tool_use_id, .. },
                 ) => {
-                    *result_counts.entry(tool_use_id.clone()).or_default() += 1;
+                    *result_counts.entry(tool_use_id).or_default() += 1;
                 }
                 _ => {}
             }
@@ -192,7 +184,7 @@ pub(super) fn restore_file_state(
             }
         }
     }
-    for message in &history {
+    for message in history {
         // A diff is not a full snapshot. Never revive an older Write/Read
         // baseline after the transcript proves it was superseded.
         if let Some(source) = attachments
@@ -381,12 +373,12 @@ fn write_snapshot(units: &[u16]) -> RecoveredFile {
 }
 
 fn recover_snapshot(
-    call: &FileCall,
+    call: &FileCall<'_>,
     data: &Utf16JsonProjection,
     prior: Option<&RecoveredFile>,
     cwd: &Path,
 ) -> Option<RecoveredFile> {
-    let result_path = match call.name.as_str() {
+    let result_path = match call.name {
         "Read" => "/file/filePath",
         "NotebookEdit" => "/notebook_path",
         _ => "/filePath",
@@ -394,7 +386,7 @@ fn recover_snapshot(
     if exact_path(data, result_path, cwd)? != call.path {
         return None;
     }
-    match call.name.as_str() {
+    match call.name {
         "Read" if data.string_at("/type")? == "file_unchanged" => prior.cloned(),
         "Read" => {
             if data.string_at("/type")? != "text"

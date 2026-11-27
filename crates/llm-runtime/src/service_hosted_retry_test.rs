@@ -699,6 +699,53 @@ async fn native_hosted_tool_failure_is_dispatched_once() {
     }
 }
 
+#[tokio::test]
+async fn sealed_tool_overrides_control_stream_and_nonstream_replay() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
+    for streaming in [false, true] {
+        for (tool, expected_sends) in [
+            (json!({"type":"web_search_20250305","name":"web_search"}), 1),
+            (
+                json!({"name":"local_lookup","input_schema":{"type":"object"}}),
+                2,
+            ),
+        ] {
+            let transport = ProbeTransport::new(Failure::Transport);
+            let service = service(transport.clone(), true);
+            let mut request = request(false);
+            request.execution.anthropic_extra_body = Some(
+                crate::anthropic_extra_body::CapturedAnthropicExtraBody::new(
+                    Some(
+                        wire::JsonPayload::from_generated_value(&json!({"tools":[tool]})).unwrap(),
+                    ),
+                    request.execution.anthropic_request_kind,
+                )
+                .unwrap(),
+            );
+            let result = if streaming {
+                service.stream_request(request).await.map(|_| ())
+            } else {
+                service
+                    .execute_side_query_request(request)
+                    .await
+                    .map(|_| ())
+            };
+            assert_eq!(transport.count(), expected_sends, "{result:?}");
+            assert_eq!(result.is_ok(), expected_sends == 2);
+            if let Err(error) = result {
+                assert!(!error.allows_automatic_replay());
+            }
+            assert_eq!(
+                transport.seen.lock().unwrap()[0]
+                    .body_json
+                    .string_at("/tools/0/name")
+                    .as_deref(),
+                tool["name"].as_str()
+            );
+        }
+    }
+}
+
 fn client_toolset_options() -> wire::NativeExtension {
     wire::NativeExtension::from_typed(AnthropicRequestOptions {
         client_toolsets: vec![AnthropicClientToolset::Browser(Default::default())],
@@ -803,7 +850,7 @@ async fn hosted_overload_does_not_take_the_model_fallback_chain() {
                 ..Default::default()
             },
             0,
-            &[fallback],
+            &[crate::ConfiguredFallbackTarget::Model(fallback)],
             DispatchHeaderState::default(),
             NonStreamDrivePolicy::Standard,
         )

@@ -1,5 +1,6 @@
 //! Strict opt-in checkpoints for a host-owned, persistent Local App Chat.
 
+use super::super::persistent_chat_context::{replay_context_receipts, ContextReceipt};
 use super::super::*;
 use lingxi_core::types::{ContentBlock, ImageSource};
 use session::jsonl::CapturedChatTranscript;
@@ -703,6 +704,12 @@ impl ConversationOrchestrator {
     pub fn replay_persistent_chat_snapshot(
         captured: &CapturedChatTranscript,
     ) -> Result<crate::resume::ReplayedSession, String> {
+        Self::replay_persistent_chat_snapshot_with_receipt(captured).map(|(replayed, _)| replayed)
+    }
+
+    pub(in crate::conversation) fn replay_persistent_chat_snapshot_with_receipt(
+        captured: &CapturedChatTranscript,
+    ) -> Result<(crate::resume::ReplayedSession, Option<ContextReceipt>), String> {
         let source = captured.source();
         if source.is_empty() || !source.ends_with('\n') {
             return Err(UNAVAILABLE.into());
@@ -789,8 +796,8 @@ impl ConversationOrchestrator {
             return Err(UNAVAILABLE.into());
         }
         validate_inline_history(&replayed.state.history)?;
-        super::super::persistent_chat_context::replay_context_receipts(captured)?;
-        Ok(replayed)
+        let receipt = replay_context_receipts(captured, &replayed.state.history)?;
+        Ok((replayed, receipt))
     }
 
     /// Checkpoint an idle, independently owned side Chat. The turn gate, the
@@ -849,8 +856,9 @@ impl ConversationOrchestrator {
             if captured.session_id() != live.session_id.as_uuid() {
                 return Err(UNAVAILABLE.to_owned());
             }
-            let replayed = Self::replay_persistent_chat_snapshot(&captured)?;
-            self.verify_persistent_chat_context(&captured)?;
+            let (replayed, receipt) =
+                Self::replay_persistent_chat_snapshot_with_receipt(&captured)?;
+            self.verify_persistent_chat_context(&captured, receipt.as_ref())?;
             if live.history != replayed.state.history
                 || live.model_context_excluded_messages
                     != replayed.state.model_context_excluded_messages

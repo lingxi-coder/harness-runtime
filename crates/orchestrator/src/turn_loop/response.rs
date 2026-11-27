@@ -32,6 +32,7 @@ pub(super) async fn handle_max_output_tokens(
     assistant_id: MessageId,
     state: &mut RecoveryState,
     malformed_tool: bool,
+    request_id: Option<String>,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
         // Inject the "resume directly" nudge as a META user message. CC 2.1.207
@@ -74,7 +75,7 @@ pub(super) async fn handle_max_output_tokens(
     // Recovery exhausted — surface the byte-locked `API Error: …` cap message
     // (the streaming twin does this in its terminal arm), then end the turn.
     let surfaced_id =
-        surface_terminal_api_error(orch, request_model, "max_tokens", None, None).await;
+        surface_terminal_api_error(orch, request_model, "max_tokens", None, None, request_id).await;
     Ok(TurnStepOutcome::Ended {
         final_message_id: surfaced_id.unwrap_or(assistant_id),
         stop_reason: "max_tokens".to_string(),

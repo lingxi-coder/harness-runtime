@@ -1691,49 +1691,54 @@ impl ConversationOrchestrator {
         messages: &mut Vec<ConversationMessage>,
         facts: crate::request_context::DeferredToolsProjectionFacts,
     ) {
-        let attachments = self
-            .transcript
-            .model_reminder_attachments
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let name_only_announcement_uuids = attachments
-            .values()
-            .filter(|payload| payload.string_at("/type") == Some("deferred_tools_record"))
-            .flat_map(|payload| {
-                (0..payload
-                    .array_len("/nameOnlyAnnouncements")
-                    .unwrap_or_default())
-                    .filter_map(|index| {
-                        payload
-                            .string_at(&format!("/nameOnlyAnnouncements/{index}"))
-                            .map(str::to_owned)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<std::collections::HashSet<_>>();
-        let mut projected = Vec::with_capacity(messages.len());
-        for message in std::mem::take(messages) {
-            let id = message.id();
-            let Some(source) = attachments
-                .get(&id)
-                .filter(|payload| payload.string_at("/type") == Some("deferred_tools_delta"))
-            else {
-                projected.push(message);
-                continue;
-            };
-            if let Some(message) = crate::request_context::render_deferred_tools_delta_for_request(
-                id,
-                source,
-                Some(&message),
-                crate::request_context::cached_rendered_row_count(&message),
-                facts.clone(),
-                name_only_announcement_uuids.contains(&id.to_string()),
-            ) {
-                projected.push(message);
+        let (deltas, name_only_announcement_uuids) = {
+            let attachments = self
+                .transcript
+                .model_reminder_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if attachments.is_empty() || messages.is_empty() {
+                return;
             }
-        }
-        *messages = projected;
+            let deltas = messages
+                .iter()
+                .filter_map(|message| {
+                    let id = message.id();
+                    let payload = attachments.get(&id)?;
+                    (payload.string_at("/type") == Some("deferred_tools_delta"))
+                        .then(|| (id, payload.clone()))
+                })
+                .collect::<std::collections::HashMap<_, _>>();
+            if deltas.is_empty() {
+                return;
+            }
+            let name_only = attachments
+                .values()
+                .flat_map(crate::request_context::deferred_name_only_announcements)
+                .map(str::to_owned)
+                .collect::<std::collections::HashSet<_>>();
+            (deltas, name_only)
+        };
+        *messages = std::mem::take(messages)
+            .into_iter()
+            .filter_map(|message| {
+                let id = message.id();
+                let Some(source) = deltas.get(&id) else {
+                    return Some(message);
+                };
+                let rendered_count = crate::request_context::cached_rendered_row_count(&message);
+                let name_only = !name_only_announcement_uuids.is_empty()
+                    && name_only_announcement_uuids.contains(&id.to_string());
+                crate::request_context::render_deferred_tools_delta_for_request(
+                    id,
+                    source,
+                    Some(message),
+                    rendered_count,
+                    &facts,
+                    name_only,
+                )
+            })
+            .collect();
     }
 
     /// Native's provider projection reorders typed attachments throughout the

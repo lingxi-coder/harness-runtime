@@ -724,20 +724,15 @@ fn model_betas_in(
     if ctx.per_turn_control {
         betas.push(PER_TURN_CONTROL);
     }
-    if first_party
+    if provider == Provider::Anthropic
         && ctx.request_kind
             == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
         && ctx.mid_conversation_tool_changes
     {
         betas.push(MID_CONVERSATION_TOOL_CHANGES);
-    }
-    if first_party
-        && ctx.request_kind
-            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
-        && ctx.mid_conversation_tool_changes
-        && ctx.inline_tools
-    {
-        betas.push(INLINE_TOOLS_BETA);
+        if ctx.inline_tools {
+            betas.push(INLINE_TOOLS_BETA);
+        }
     }
     if ctx.effort {
         betas.push(EFFORT);
@@ -850,26 +845,7 @@ pub fn apply_beta_header(
     endpoint: Endpoint,
     ctx: &BetaContext,
 ) {
-    // The SDK discovers this token from typed message controls. The native
-    // host owns its position in the model-beta vector, rather than prepending
-    // an encoder-discovered token before the ordinary model gates.
-    let native_per_turn = provider == Provider::Anthropic
-        && ctx.effort
-        && ctx.request_kind == Default::default()
-        && lingxi_llm_client::providers::anthropic::supports_per_message_effort(&ctx.model);
-    if native_per_turn {
-        if let Some(existing) = request.headers.get_mut("anthropic-beta") {
-            *existing = existing
-                .split(',')
-                .filter(|value| value.trim() != PER_TURN_CONTROL)
-                .collect::<Vec<_>>()
-                .join(",");
-        }
-    }
-    lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
-        &mut request.headers,
-        &[assemble_beta_header(provider, endpoint, ctx)],
-    );
+    apply_beta_header_with_auth_and_custom(request, provider, endpoint, ctx, false, &[]);
 }
 
 /// Variant of [`apply_beta_header`] that also appends `oauth-2025-04-20` when
@@ -908,34 +884,21 @@ pub fn apply_beta_header_with_auth_and_custom(
     is_oauth_subscriber: bool,
     custom_betas: &[String],
 ) {
-    apply_beta_header(request, provider, endpoint, ctx);
-
-    // CLI `--betas` additions for a Native Anthropic-family Messages create
-    // request. The caller passes only route-validated, Native-filtered values;
-    // this layer still excludes OAuth and count-token endpoints.
-    if !is_oauth_subscriber
-        && matches!(
-            provider,
-            Provider::Anthropic | Provider::Foundry | Provider::Bedrock | Provider::Vertex
-        )
-        && matches!(
-            endpoint,
-            Endpoint::MessagesCreate | Endpoint::MessagesCreateStream
-        )
-        && !custom_betas.is_empty()
-    {
-        lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
-            &mut request.headers,
-            custom_betas,
-        );
-    }
-
-    if is_oauth_subscriber {
-        lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
-            &mut request.headers,
-            &[OAUTH.to_string()],
-        );
-    }
+    let native_per_turn = provider == Provider::Anthropic
+        && ctx.effort
+        && ctx.request_kind == Default::default()
+        && lingxi_llm_client::providers::anthropic::supports_per_message_effort(&ctx.model);
+    let custom = match endpoint {
+        Endpoint::MessagesCreate | Endpoint::MessagesCreateStream => custom_betas,
+        Endpoint::CountTokens => &[],
+    };
+    lingxi_llm_client::providers::anthropic::request_policy::apply_ordered_message_betas(
+        &mut request.headers,
+        assemble_beta_header(provider, endpoint, ctx),
+        native_per_turn,
+        custom,
+        is_oauth_subscriber,
+    );
 }
 
 #[cfg(test)]
@@ -1142,8 +1105,8 @@ mod tests {
 
         let foundry_header =
             assemble_beta_header(Provider::Foundry, Endpoint::MessagesCreate, &context);
-        assert!(foundry_header.contains(MID_CONVERSATION_TOOL_CHANGES));
-        assert!(foundry_header.contains(INLINE_TOOLS_BETA));
+        assert!(!foundry_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(!foundry_header.contains(INLINE_TOOLS_BETA));
         assert!(foundry_header.contains(DANGEROUS_TOOL_USE));
 
         let side_query = BetaContext::for_model("claude-sonnet-5-5")

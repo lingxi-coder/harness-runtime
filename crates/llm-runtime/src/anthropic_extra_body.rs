@@ -50,13 +50,7 @@ pub(crate) fn capture(request: &mut LlmRequest) -> Result<(), LlmError> {
 }
 
 pub(crate) fn is_anthropic(protocol: ProtocolFamily) -> bool {
-    matches!(
-        protocol,
-        ProtocolFamily::AnthropicMessages
-            | ProtocolFamily::BedrockClaude
-            | ProtocolFamily::VertexClaude
-            | ProtocolFamily::FoundryClaude
-    )
+    protocol.is_anthropic_family()
 }
 
 pub(crate) fn validate(request: &LlmRequest, protocol: ProtocolFamily) -> Result<(), LlmError> {
@@ -97,8 +91,7 @@ pub(crate) fn prompt(request: &LlmRequest) -> Option<&JsonPayload> {
     let protocol = request
         .execution
         .context_usage_protocol
-        .or(request.execution.input_protocol)
-        .unwrap_or(ProtocolFamily::AnthropicMessages);
+        .or(request.execution.input_protocol)?;
     prompt_for_protocol(request, protocol)
 }
 

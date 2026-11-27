@@ -127,6 +127,7 @@ mod tests {
         let (cfg, _fb, _w) = parse_routing(Some(&json!({ "retry": {} })));
         let r = cfg.retry.unwrap();
         assert_eq!(r.max_attempts, 3);
+        assert_eq!(r.max_retries(), 2);
         assert_eq!(r.backoff_ms, 250);
 
         let (cfg2, _fb2, _w2) = parse_routing(Some(
@@ -140,7 +141,9 @@ mod tests {
     #[test]
     fn retry_zero_attempts_clamped_to_one() {
         let (cfg, _fb, _w) = parse_routing(Some(&json!({ "retry": { "maxAttempts": 0 } })));
-        assert_eq!(cfg.retry.unwrap().max_attempts, 1);
+        let retry = cfg.retry.unwrap();
+        assert_eq!(retry.max_attempts, 1);
+        assert_eq!(retry.max_retries(), 0);
     }
 
     #[test]

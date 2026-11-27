@@ -5,7 +5,7 @@ use crate::test_support::{
 };
 use lingxi_core::host::{FileSystem, OrchestratorHandle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct BudgetApi {
     budget: Option<u64>,
@@ -28,6 +28,7 @@ impl OrchestratorApiClient for BudgetApi {
 
 struct SummaryClient {
     calls: tokio::sync::Mutex<Vec<sidequery::SideQueryRequest>>,
+    estimates: AtomicUsize,
     allowed: Arc<AtomicBool>,
     revoke_in_response: AtomicBool,
     emit_tool_call: AtomicBool,
@@ -89,6 +90,7 @@ impl sidequery::SideQueryClient for SummaryClient {
         &self,
         request: sidequery::CanonicalSideQueryRequest,
     ) -> Result<sidequery::SideQueryEstimate, sidequery::SideQueryError> {
+        self.estimates.fetch_add(1, Ordering::Relaxed);
         let sidequery::CanonicalSideQueryRequest::Plain(request) = request else {
             panic!("unexpected structured request")
         };
@@ -363,6 +365,7 @@ async fn fixture_seed_contents(
     let allowed = Arc::new(AtomicBool::new(true));
     let summary = Arc::new(SummaryClient {
         calls: tokio::sync::Mutex::new(Vec::new()),
+        estimates: AtomicUsize::new(0),
         allowed: allowed.clone(),
         revoke_in_response: AtomicBool::new(false),
         emit_tool_call: AtomicBool::new(false),
@@ -481,9 +484,10 @@ async fn actual_turn_uses_only_the_projection_and_keeps_canonical_history() {
         .verify_persistent_chat_checkpoint(true)
         .await
         .unwrap();
-    let replayed = ConversationOrchestrator::replay_persistent_chat_snapshot(&committed).unwrap();
+    let (replayed, receipt) =
+        ConversationOrchestrator::replay_persistent_chat_snapshot_with_receipt(&committed).unwrap();
     assert_eq!(raw, replayed.display_history);
-    assert!(replay_context_receipts(&committed).unwrap().is_some());
+    assert!(receipt.is_some());
     assert_eq!(replayed.state.compacted_user_turns, 0);
     assert!(!replayed.runtime_metadata.compaction_tracking.compacted);
 }
@@ -495,6 +499,11 @@ include!("persistent_chat_context_usage_tests.rs");
 async fn retries_reapply_the_verified_projection_without_calling_the_summarizer() {
     let fixture = fixture(false, Some(8000)).await;
     let projected = prepare_current(&fixture).await.unwrap();
+    assert_eq!(
+        fixture.summary.estimates.load(Ordering::Relaxed),
+        4,
+        "one estimate each for the original, empty replacement, summary, and final request"
+    );
     let raw = fixture.orch.snapshot_history().await;
     let prepared = fixture
         .orch
@@ -905,13 +914,15 @@ async fn durable_receipt_in_an_unfinished_turn_is_not_a_success_frontier() {
         .unwrap()
         .unwrap();
         assert_eq!(recovered.source(), source.source());
-        assert!(replay_context_receipts(&recovered).unwrap().is_none());
+        let (raw, receipt) =
+            ConversationOrchestrator::replay_persistent_chat_snapshot_with_receipt(&recovered)
+                .unwrap();
+        assert!(receipt.is_none());
         assert_eq!(
             std::fs::read(&path).unwrap(),
             original,
             "failed/unknown tail remains audit data"
         );
-        let raw = ConversationOrchestrator::replay_persistent_chat_snapshot(&recovered).unwrap();
         assert!(!raw
             .display_history
             .iter()
@@ -1002,9 +1013,25 @@ async fn cold_reopen_and_recovery_generation_restore_the_same_request_projection
 
 #[tokio::test]
 async fn receipts_reject_wrong_chat_wrong_source_and_unknown_versions() {
-    for mutation in ["app", "chat", "session", "source", "version", "role"] {
+    for mutation in [
+        "app",
+        "chat",
+        "session",
+        "source",
+        "version",
+        "role",
+        "later assistant",
+    ] {
         let fixture = fixture(false, Some(8000)).await;
         prepare_current(&fixture).await.unwrap();
+        let mut later_assistant = None;
+        if mutation == "later assistant" {
+            let answer = answer("completed after the receipt".into());
+            let context = fixture.orch.persistent_chat_context.as_ref().unwrap();
+            let summary = context.latest.lock().unwrap().as_ref().unwrap().summary_id;
+            later_assistant = Some((answer.id().as_uuid().to_string(), summary.to_string()));
+            fixture.orch.append_external_history_message(answer).await;
+        }
         let captured = fixture
             .writer
             .capture_persistent_chat_snapshot(false)
@@ -1015,6 +1042,15 @@ async fn receipts_reject_wrong_chat_wrong_source_and_unknown_versions() {
             .split_inclusive('\n')
             .map(|line| {
                 let mut row = serde_json::from_str::<serde_json::Value>(line).unwrap();
+                if let Some((outer_id, summary)) = &later_assistant {
+                    if row["uuid"].as_str() != Some(outer_id.as_str()) {
+                        return line.to_owned();
+                    }
+                    // Outer JSONL IDs stay unique. Only the reconstructed
+                    // assistant identity collides with the virtual summary.
+                    row["message"]["id"] = summary.clone().into();
+                    return serde_json::to_string(&row).unwrap() + "\n";
+                }
                 if row
                     .pointer("/attachment/type")
                     .and_then(serde_json::Value::as_str)
@@ -1047,19 +1083,27 @@ async fn receipts_reject_wrong_chat_wrong_source_and_unknown_versions() {
         } = fixture;
         drop(orch);
         drop(writer);
-        std::fs::write(&path, &altered).unwrap();
         // Even a physically consistent capture with a matching outer hash
         // cannot launder a foreign/unknown/unbound receipt into model state.
-        let writer = JsonlWriter::open_persistent_chat(path, fs, Some(proof(altered.as_bytes())))
-            .await
-            .unwrap();
-        let altered = writer
-            .capture_persistent_chat_snapshot(false)
-            .await
-            .unwrap();
+        let altered = capture_test_transcript(path, fs, &altered).await;
         assert!(ConversationOrchestrator::replay_persistent_chat_snapshot(&altered).is_err());
         drop(_root);
     }
+}
+
+async fn capture_test_transcript(
+    path: PathBuf,
+    fs: Arc<dyn FileSystem>,
+    source: &str,
+) -> CapturedChatTranscript {
+    std::fs::write(&path, source).unwrap();
+    let writer = JsonlWriter::open_persistent_chat(path, fs, Some(proof(source.as_bytes())))
+        .await
+        .unwrap();
+    writer
+        .capture_persistent_chat_snapshot(false)
+        .await
+        .unwrap()
 }
 
 #[test]

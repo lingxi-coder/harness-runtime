@@ -21,6 +21,15 @@ pub enum LlmError {
         text: lingxi_llm_client::protocol::ProviderErrorText,
         native_anthropic_facts: Option<lingxi_llm_client::protocol::NativeAnthropicErrorFacts>,
     },
+    /// Host correlation and display data captured from the same response.
+    #[error("{source}")]
+    ResponseDiagnostics {
+        source: Box<LlmError>,
+        request_id: Option<String>,
+        rate_limit_message: Option<String>,
+        /// The admitted wire route forbids another automatic generation.
+        route_replay_forbidden: bool,
+    },
     /// Authentication failed or credentials are missing/invalid.
     ///
     /// `message` preserves the PROVIDER's own text (with the SDK status prefix,
@@ -123,6 +132,20 @@ pub enum LlmError {
     /// bytes, so it is never retried and never triggers the PTL recovery loop.
     #[error("request too large")]
     RequestTooLarge,
+    /// The provider returned success, but its response exceeded the local
+    /// collection limit. The dispatched generation must not be replayed.
+    #[error("HTTP {status} response exceeds the {limit_bytes}-byte collection limit")]
+    ResponseBodyLimitExceeded {
+        status: u16,
+        request_id: Option<String>,
+        limit_bytes: u64,
+    },
+    /// The provider accepted generation but the response body could not be read.
+    #[error("HTTP {status} response body ended before it could be collected")]
+    ResponseBodyInterrupted {
+        status: u16,
+        request_id: Option<String>,
+    },
     /// A provider upload was dispatched but its outcome cannot be established.
     /// Retrying the model request could create another provider resource.
     #[error("file upload outcome unknown: {message}")]
@@ -379,18 +402,18 @@ impl LlmError {
     #[must_use]
     pub fn classification_source(&self) -> &Self {
         match self {
-            Self::ProviderErrorText { source, .. } | Self::ProxyAuthHelperRetry { source, .. } => {
-                source.classification_source()
-            }
+            Self::ProviderErrorText { source, .. }
+            | Self::ProxyAuthHelperRetry { source, .. }
+            | Self::ResponseDiagnostics { source, .. } => source.classification_source(),
             other => other,
         }
     }
 
     pub fn classification_source_mut(&mut self) -> &mut Self {
         match self {
-            Self::ProviderErrorText { source, .. } | Self::ProxyAuthHelperRetry { source, .. } => {
-                source.classification_source_mut()
-            }
+            Self::ProviderErrorText { source, .. }
+            | Self::ProxyAuthHelperRetry { source, .. }
+            | Self::ResponseDiagnostics { source, .. } => source.classification_source_mut(),
             other => other,
         }
     }
@@ -414,7 +437,9 @@ impl LlmError {
             } => challenge
                 .as_ref()
                 .or_else(|| source.proxy_auth_helper_challenge()),
-            Self::ProviderErrorText { source, .. } => source.proxy_auth_helper_challenge(),
+            Self::ProviderErrorText { source, .. } | Self::ResponseDiagnostics { source, .. } => {
+                source.proxy_auth_helper_challenge()
+            }
             _ => None,
         }
     }
@@ -433,7 +458,8 @@ impl LlmError {
     pub fn provider_error_text(&self) -> Option<&lingxi_llm_client::protocol::ProviderErrorText> {
         match self {
             Self::ProviderErrorText { text, .. } => Some(text),
-            Self::ProxyAuthHelperRetry { source, .. } => source.provider_error_text(),
+            Self::ProxyAuthHelperRetry { source, .. }
+            | Self::ResponseDiagnostics { source, .. } => source.provider_error_text(),
             _ => None,
         }
     }
@@ -447,10 +473,94 @@ impl LlmError {
                 native_anthropic_facts,
                 ..
             } => native_anthropic_facts.as_ref(),
-            Self::ProxyAuthHelperRetry { source, .. } => source.native_anthropic_error_facts(),
+            Self::ProxyAuthHelperRetry { source, .. }
+            | Self::ResponseDiagnostics { source, .. } => source.native_anthropic_error_facts(),
             _ => None,
         }
     }
+    /// Whether the physical request permits recovery by dispatching another generation.
+    #[must_use]
+    pub fn allows_automatic_replay(&self) -> bool {
+        match self {
+            Self::ResponseDiagnostics {
+                route_replay_forbidden,
+                source,
+                ..
+            } => !route_replay_forbidden && source.allows_automatic_replay(),
+            Self::ProviderErrorText { source, .. } | Self::ProxyAuthHelperRetry { source, .. } => {
+                source.allows_automatic_replay()
+            }
+            _ => true,
+        }
+    }
+
+    pub(crate) fn with_route_replay(mut self, allowed: bool) -> Self {
+        if !allowed {
+            if let Self::ResponseDiagnostics {
+                route_replay_forbidden,
+                ..
+            } = &mut self
+            {
+                *route_replay_forbidden = true;
+            } else {
+                return Self::ResponseDiagnostics {
+                    source: Box::new(self),
+                    request_id: None,
+                    rate_limit_message: None,
+                    route_replay_forbidden: true,
+                };
+            }
+        }
+        self
+    }
+
+    pub(crate) fn with_response_diagnostics(
+        self,
+        request_id: Option<String>,
+        rate_limit_message: Option<String>,
+    ) -> Self {
+        if request_id.is_none() && rate_limit_message.is_none() {
+            return self;
+        }
+        Self::ResponseDiagnostics {
+            source: Box::new(self),
+            request_id,
+            rate_limit_message,
+            route_replay_forbidden: false,
+        }
+    }
+
+    /// Correlation ID from this failed physical response, when available.
+    pub fn response_request_id(&self) -> Option<&str> {
+        match self {
+            Self::ResponseDiagnostics {
+                source, request_id, ..
+            } => request_id
+                .as_deref()
+                .or_else(|| source.response_request_id()),
+            Self::ProviderErrorText { source, .. } | Self::ProxyAuthHelperRetry { source, .. } => {
+                source.response_request_id()
+            }
+            Self::ResponseBodyInterrupted { request_id, .. }
+            | Self::ResponseBodyLimitExceeded { request_id, .. } => request_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// User-facing limit message composed from this response's headers.
+    pub fn rate_limit_message(&self) -> Option<&str> {
+        match self {
+            Self::ResponseDiagnostics {
+                rate_limit_message,
+                source,
+                ..
+            } => rate_limit_message
+                .as_deref()
+                .or_else(|| source.rate_limit_message()),
+            _ => None,
+        }
+    }
+
     /// Build a terminal [`LlmError::TlsCert`] for the given TLS error `code`,
     /// rendering the `YLe` fix hint into `message`.
     ///
@@ -490,7 +600,9 @@ impl LlmError {
     pub fn http_status(&self) -> Option<u16> {
         match self.classification_source() {
             Self::ProviderTimeout { status, .. } => return *status,
-            Self::ProxyTunnelResponse { status, .. } => return Some(*status),
+            Self::ProxyTunnelResponse { status, .. }
+            | Self::ResponseBodyInterrupted { status, .. }
+            | Self::ResponseBodyLimitExceeded { status, .. } => return Some(*status),
             _ => {}
         }
         if let Some(challenge) = self.proxy_auth_helper_challenge() {
@@ -509,7 +621,8 @@ impl LlmError {
     pub fn provider_message(&self) -> Option<&str> {
         match self {
             Self::ProviderErrorText { text, .. } => Some(text.display()),
-            Self::ProxyAuthHelperRetry { source, .. } => source.provider_message(),
+            Self::ProxyAuthHelperRetry { source, .. }
+            | Self::ResponseDiagnostics { source, .. } => source.provider_message(),
             LlmError::Authentication { message }
             | LlmError::ProviderTimeout { message, .. }
             | LlmError::PermissionDenied { message }

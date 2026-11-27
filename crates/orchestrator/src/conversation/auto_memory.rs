@@ -15,12 +15,17 @@ use memory::auto_memory_extract::{
     FILE_EXTRACTION_EVERY_N_TURNS, FILE_EXTRACTION_MAX_TURNS, FILE_EXTRACTION_QUERY_SOURCE,
     FILE_INVENTORY_HEAD_BYTES, FILE_INVENTORY_HEAD_LINES,
 };
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc, Mutex, RwLock, Weak,
 };
+use std::time::SystemTime;
+
+const MEMORY_INVENTORY_LIMIT: usize = 200;
 
 /// Main-turn snapshot. The caller captures `generation()` before assembling
 /// it, so clear/resume invalidates snapshots still being prepared.
@@ -532,7 +537,8 @@ fn read_inventory_file(
     root: &Path,
     relative: &Path,
     identity: &lingxi_core::host::rooted_fs::RootIdentity,
-) -> Option<(std::time::SystemTime, FileInventoryMetadata)> {
+    oldest_retained: Option<SystemTime>,
+) -> Option<(SystemTime, FileInventoryMetadata)> {
     let file =
         lingxi_core::host::rooted_fs::open_read_file_pinned(root, relative, Some(identity)).ok()?;
     #[cfg(unix)]
@@ -546,10 +552,7 @@ fn read_inventory_file(
         return None;
     }
     let modified = file.metadata().ok()?.modified().ok()?;
-    let mut bytes = Vec::new();
-    file.take(FILE_INVENTORY_HEAD_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let bytes = read_inventory_head_if_newer(file, modified, oldest_retained)?;
     if lingxi_core::host::rooted_fs::root_identity(root).ok()? != *identity {
         return None;
     }
@@ -562,14 +565,29 @@ fn read_inventory_file(
     Some((modified, parse_file_inventory_head(&head)))
 }
 
+fn read_inventory_head_if_newer(
+    reader: impl Read,
+    modified: SystemTime,
+    oldest_retained: Option<SystemTime>,
+) -> Option<Vec<u8>> {
+    if oldest_retained.is_some_and(|oldest| modified <= oldest) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    reader
+        .take(FILE_INVENTORY_HEAD_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
 fn scan_memory_inventory(
     root: &Path,
     identity: &lingxi_core::host::rooted_fs::RootIdentity,
 ) -> String {
     let mut directories = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-    // Like the native scanner, inspect candidates before selecting the newest
-    // 200; an early traversal-order cap would silently omit newer memories.
+    let mut files = BTreeMap::new();
+    let mut next_ordinal = 0usize;
     while let Some(directory) = directories.pop() {
         let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
@@ -601,19 +619,29 @@ fn scan_memory_inventory(
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
-            let Some((modified, frontmatter)) = read_inventory_file(root, relative, identity)
+            // A later tie cannot displace an earlier entry. Only successful
+            // reads establish the cutoff, so a newer unreadable file costs no slot.
+            let oldest_retained = if files.len() == MEMORY_INVENTORY_LIMIT {
+                files.keys().next_back().map(|(Reverse(mtime), _)| *mtime)
+            } else {
+                None
+            };
+            let Some((modified, frontmatter)) =
+                read_inventory_file(root, relative, identity, oldest_retained)
             else {
                 continue;
             };
+            if oldest_retained.is_some() {
+                files.pop_last();
+            }
             let filename = relative.to_string_lossy().replace('\\', "/");
-            files.push((modified, filename, frontmatter));
+            files.insert((Reverse(modified), next_ordinal), (filename, frontmatter));
+            next_ordinal += 1;
         }
     }
-    files.sort_by(|left, right| right.0.cmp(&left.0));
     files
         .into_iter()
-        .take(200)
-        .map(|(mtime, filename, metadata)| {
+        .map(|((Reverse(mtime), _), (filename, metadata))| {
             let millis = mtime
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|time| time.as_millis())
@@ -641,7 +669,6 @@ mod tests {
     };
     use lingxi_core::host::{BudgetError, RuntimeError, SubagentSpawnError};
     use lingxi_core::types::{utf16_json::Utf16JsonProjection, AgentId};
-    use std::collections::BTreeMap;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::AtomicU64;
@@ -1198,7 +1225,8 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                read_inventory_file(&root, Path::new("topics/candidate.md"), &identity).is_none(),
+                read_inventory_file(&root, Path::new("topics/candidate.md"), &identity, None)
+                    .is_none(),
                 "{change}"
             );
             assert!(
@@ -1223,6 +1251,74 @@ mod tests {
         assert!(inventory.ends_with(": Prefer focused checks"));
         assert!(!inventory.contains("MEMORY.md"));
         assert!(!inventory.contains("private.md"));
+    }
+
+    #[test]
+    fn inventory_keeps_early_ties_when_newer_files_arrive_later() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("memory");
+        let later = root.join("later");
+        let last = later.join("last");
+        std::fs::create_dir_all(&last).unwrap();
+        let create = |path: &Path, seconds| {
+            std::fs::File::create(path)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+        // The scanner finishes the files in a directory before it descends.
+        // These ties arrive in a fixed order independent of read_dir ordering.
+        for index in 0..MEMORY_INVENTORY_LIMIT - 2 {
+            create(&root.join(format!("retained-{index}.md")), 200);
+        }
+        create(&root.join("early.md"), 100);
+        create(&later.join("middle.md"), 100);
+        create(&last.join("late.md"), 100);
+        create(&last.join("older.md"), 50);
+        create(&last.join("newest.md"), 300);
+        let outside = directory.path().join("outside.md");
+        create(&outside, 500);
+        std::fs::hard_link(&outside, last.join("ineligible.md")).unwrap();
+
+        let root = root.canonicalize().unwrap();
+        let identity = lingxi_core::host::rooted_fs::root_identity(&root).unwrap();
+        let inventory = scan_memory_inventory(&root, &identity);
+        let rows: Vec<_> = inventory.lines().collect();
+        assert_eq!(rows.len(), MEMORY_INVENTORY_LIMIT);
+        assert!(rows[0].starts_with("- later/last/newest.md ("));
+        assert!(rows[1..rows.len() - 1]
+            .iter()
+            .all(|row| row.starts_with("- retained-")));
+        assert!(rows.last().unwrap().starts_with("- early.md ("));
+    }
+
+    #[test]
+    fn inventory_only_skips_body_reads_that_cannot_change_the_result() {
+        use std::io::{self, Cursor};
+
+        let cutoff = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let newest = cutoff + Duration::from_secs(1);
+        let cap = usize::try_from(FILE_INVENTORY_HEAD_BYTES).unwrap();
+        let mut reader = Cursor::new(vec![b'x'; cap + 1]);
+        for older_or_tied in [SystemTime::UNIX_EPOCH, cutoff] {
+            assert!(
+                read_inventory_head_if_newer(&mut reader, older_or_tied, Some(cutoff)).is_none()
+            );
+            assert_eq!(reader.position(), 0);
+        }
+        let bytes = read_inventory_head_if_newer(&mut reader, newest, Some(cutoff)).unwrap();
+        assert_eq!(bytes.len(), cap);
+        assert_eq!(reader.position(), FILE_INVENTORY_HEAD_BYTES);
+
+        struct TailError;
+        impl Read for TailError {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("unreadable tail"))
+            }
+        }
+        let complete_lines = "heading\r\n".repeat(FILE_INVENTORY_HEAD_LINES);
+        let failing = complete_lines.as_bytes().chain(TailError);
+        assert!(read_inventory_head_if_newer(failing, newest, Some(cutoff)).is_none());
     }
 
     struct PausingMemoryGate {

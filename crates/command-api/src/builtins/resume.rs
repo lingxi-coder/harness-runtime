@@ -9,13 +9,14 @@
 //!
 //! The interactive picker and the load-selected-session step have no CLI text
 //! analogue and are deferred. This port delivers the enumeration half: a
-//! newest-first `id` + `label` listing from the additive
-//! [`OrchestratorHandle::list_resumable_sessions`], optionally filtered by a
+//! newest-first `id` + `label` listing from
+//! [`OrchestratorHandle::list_resumable_sessions_matching`], optionally filtered by a
 //! substring search term (the TS `[search term]` arg).
 
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
+use lingxi_core::host::orchestrator::ResumableSessionSearch;
 use lingxi_core::host::OrchestratorHandle;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -42,9 +43,13 @@ impl BuiltinCommandHandler for ResumeHandler {
                 display: Some("Session search text must be valid Unicode text.".into()),
             };
         };
-        let sessions = self.handle.list_resumable_sessions().await;
+        let search = search.trim();
+        let sessions = self
+            .handle
+            .list_resumable_sessions_matching(ResumableSessionSearch::new(search))
+            .await;
         CommandResult::Done {
-            display: Some((render_sessions(&sessions, search.trim())).into()),
+            display: Some(render_sessions(&sessions, search).into()),
         }
     }
     fn name(&self) -> &str {
@@ -55,24 +60,10 @@ impl BuiltinCommandHandler for ResumeHandler {
     }
 }
 
-/// Render the `(id, label)` listing newest-first, one `"id  label"` per line.
-///
-/// When `search` is non-empty, only entries whose `id` or `label` contains
-/// `search` (case-insensitive) are shown — the TS `[search term]` filter. An
-/// empty result renders a locked one-line notice (no interactive picker).
+/// Render the matching sessions in the order supplied by the host.
 #[must_use]
 fn render_sessions(sessions: &[(String, String)], search: &str) -> String {
-    let needle = search.to_lowercase();
-    let matched: Vec<&(String, String)> = sessions
-        .iter()
-        .filter(|(id, label)| {
-            needle.is_empty()
-                || id.to_lowercase().contains(&needle)
-                || label.to_lowercase().contains(&needle)
-        })
-        .collect();
-
-    if matched.is_empty() {
+    if sessions.is_empty() {
         return if search.is_empty() {
             "No resumable sessions found.".to_string()
         } else {
@@ -81,7 +72,7 @@ fn render_sessions(sessions: &[(String, String)], search: &str) -> String {
     }
 
     let mut out = String::from("Resumable sessions:\n");
-    for (id, label) in matched {
+    for (id, label) in sessions {
         // When the label equals the id (first-prompt extraction deferred),
         // show the id alone to avoid a redundant "id  id" line. `writeln!`
         // into a `String` is infallible, so the result is discarded.
@@ -138,19 +129,15 @@ mod tests {
 
     #[test]
     fn filters_by_search_term() {
-        let sessions = vec![
-            ("alpha-1".to_string(), "alpha-1".to_string()),
-            ("beta-2".to_string(), "beta-2".to_string()),
-        ];
-        let s = render_sessions(&sessions, "beta");
-        assert_eq!(s, "Resumable sessions:\n  beta-2\n");
+        let search = ResumableSessionSearch::new("ETA");
+        assert!(!search.matches("alpha-1", "alpha-1"));
+        assert!(search.matches("beta-2", "beta-2"));
     }
 
     #[test]
     fn search_matches_label_case_insensitively() {
-        let sessions = vec![("sess-1".to_string(), "Fix The Bug".to_string())];
-        let s = render_sessions(&sessions, "bug");
-        assert_eq!(s, "Resumable sessions:\n  sess-1  Fix The Bug\n");
+        let search = ResumableSessionSearch::new("RÉSUMÉ");
+        assert!(search.matches("sess-1", "Mon Résumé"));
     }
 
     #[tokio::test]

@@ -50,6 +50,8 @@ pub(super) struct Bootstrap {
     /// Register the delegation tool for this process: the Bots the host lets this run delegate to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegates: Vec<super::TeamDelegateOffer>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub visualizations: bool,
     /// Register the no-reply tool for this process.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub may_decline: bool,
@@ -267,6 +269,11 @@ pub(super) fn validate_result(
     if result.version != 3 || result.text.len() > 8192 || result.finished_at == 0 {
         return Err(TeamProcessError::Protocol);
     }
+    if result.visualization.as_ref().is_some_and(|artifact| {
+        private_data || result.outcome != super::TeamProcessOutcome::Completed || !artifact.valid()
+    }) {
+        return Err(TeamProcessError::Protocol);
+    }
     if matches!(
         result.outcome,
         super::TeamProcessOutcome::Waiting | super::TeamProcessOutcome::Declined
@@ -445,6 +452,7 @@ mod tests {
             denied_tools: 0,
             finished_at: 1,
             cursor: Default::default(),
+            visualization: None,
             document: Some(super::super::chat_session::document(
                 "task_test",
                 "Accepted",

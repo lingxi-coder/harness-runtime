@@ -78,6 +78,12 @@ pub(crate) fn metadata_from_source(source: &str, session: SessionId) -> Vec<Sour
     let mut initial = None;
     let mut notification = None;
     for line in source.lines() {
+        if !session::jsonl::reader::may_contain_record_kind(
+            line,
+            &[CHECKPOINT_KIND, NOTIFICATION_KIND],
+        ) {
+            continue;
+        }
         let Ok(row) = Source::parse(line) else {
             continue;
         };
@@ -189,7 +195,7 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra,
         };
-        self.append_pending_transcript_row(writer, &row)
+        self.append_pending_transcript_row(writer, row)
             .await
             .map_err(|error| {
                 OrchestratorError::Internal(format!(

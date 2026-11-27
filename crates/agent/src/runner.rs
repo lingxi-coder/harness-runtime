@@ -1365,7 +1365,7 @@ async fn accumulate_agent_stream_live(
             Err(error) => {
                 let partial = accumulator.partial_content().to_vec();
                 response_error =
-                    Some((partial, accumulator.take_malformed_error().unwrap_or(error)));
+                    Some((partial, accumulator.stream_failure(error)));
                 break;
             }
         };
@@ -1867,22 +1867,17 @@ fn usage_limit_near_wrap_up_enabled() -> bool {
     ::telemetry::flag_bool(USAGE_LIMIT_NEAR_WRAP_UP_FLAG, false)
 }
 
-async fn maybe_emit_near_limit_wrap_up(
+async fn emit_near_limit_wrap_up(
     history: &mut Vec<ConversationMessage>,
     ctx: &SubagentContext,
     api_client: &dyn crate::api::SubagentApiClient,
     out_tx: &mpsc::Sender<SubagentEvent>,
-    agent_id: AgentId,
-) {
-    if ctx.depth == 0 {
-        return;
-    }
-    // Oracle evaluation order is `depth > 0 && consumePendingHint() &&
-    // flag("tengu_vellum_anchor", false)`: a disabled flag still consumes and
-    // drops the one-shot hint, preventing a stale emission if flags refresh.
-    if !api_client.consume_pending_near_limit_wrap_up_hint() || !usage_limit_near_wrap_up_enabled()
-    {
-        return;
+    note_id: MessageId,
+) -> bool {
+    // The physical credential has already consumed the one-shot hint. A
+    // disabled rollout drops it even if flags change later in this window.
+    if !usage_limit_near_wrap_up_enabled() {
+        return false;
     }
 
     // `Le()` is the owning session's print/SDK gate. A background child of an
@@ -1899,10 +1894,10 @@ async fn maybe_emit_near_limit_wrap_up(
         });
     }
 
-    let note =
-        ConversationMessage::user_meta(MessageId::new(), NEAR_LIMIT_WRAP_UP_NOTE.to_string());
+    let note = ConversationMessage::user_meta(note_id, NEAR_LIMIT_WRAP_UP_NOTE.to_owned());
     history.push(note.clone());
-    emit_message(out_tx, agent_id, &note).await;
+    emit_message(out_tx, ctx.agent_id, &note).await;
+    true
 }
 
 fn workflow_watchdog_timeout_error(phase: &str, timeout: Duration) -> LlmError {
@@ -4620,6 +4615,22 @@ async fn run_subagent_loop(
             let mut mod_physical_usage = llm_runtime::ExecutionUsage::default();
             let mut native_response_request_model = model.clone();
             let mut native_response_request_profile = model_profile.clone();
+            // The driver asks for the checkpoint after selecting the signing
+            // credential. Keep history and transcript mutation on this runner.
+            let (wrap_up_tx, mut wrap_up_rx) =
+                mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<bool>>();
+            let wrap_up = (ctx.depth > 0).then(|| {
+                llm_runtime::service::SubagentWrapUpHint::new(
+                    NEAR_LIMIT_WRAP_UP_NOTE,
+                    MessageId::new(),
+                    move || {
+                        let (ack, result) = tokio::sync::oneshot::channel();
+                        let _ = wrap_up_tx.send(ack);
+                        Box::pin(async move { result.await.unwrap_or(false) })
+                    },
+                )
+            });
+            let mut wrap_up_visible = false;
             let (response, local_only_response) = 'response_attempts: loop {
                 // Only the opened body is retried here; ApiService already owns
                 // connect-phase retries. Any server-side content revokes replay
@@ -4639,14 +4650,6 @@ async fn run_subagent_loop(
                     retry_scope = llm_runtime::model::retry_scope::ModelCallRetryScope::default();
                     flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
                 }
-                maybe_emit_near_limit_wrap_up(
-                    history,
-                    &ctx,
-                    api_client.as_ref(),
-                    &out_tx,
-                    agent_id,
-                )
-                .await;
                 flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
                 if prompt_route.as_ref() != Some(&(model.clone(), model_profile.clone())) {
                     let prepared = async {
@@ -4694,6 +4697,11 @@ async fn run_subagent_loop(
                 }
                 native_response_request_model.clone_from(&model);
                 native_response_request_profile.clone_from(&model_profile);
+                let mut model_snapshot = history.to_vec();
+                // A retry gets the notice only if the same credential sends it.
+                if let Some(hint) = wrap_up.as_ref().filter(|_| wrap_up_visible) {
+                    model_snapshot.retain(|message| message.id() != hint.message_id);
+                }
                 let api_call = async {
                     let current_model = model.clone();
                     tracing::debug!(
@@ -4714,7 +4722,6 @@ async fn run_subagent_loop(
                     // partial (empty vec); a mid-stream error yields whatever
                     // blocks were finalized.
                     let profile = model_profile.as_deref();
-                    let mut model_snapshot = history.to_vec();
                     let mut prompt_context = ctx.clone();
                     if let (Some(state), Some(rendered)) = (&ctx.prompt_state, &request_prompt) {
                         prompt_context.prompt_state = Some(std::sync::Arc::new(
@@ -4751,6 +4758,7 @@ async fn run_subagent_loop(
                             }
                         };
                     let call_opts = crate::api::SubagentApiCallOpts {
+                        wrap_up: wrap_up.clone(),
                         memory_fork_wire: ctx.memory_fork_wire.as_ref().map(|wire| {
                             crate::memory_fork::MemoryForkProjection::rebind_for_route(
                                 wire,
@@ -4812,6 +4820,7 @@ async fn run_subagent_loop(
                                 request.clone(),
                                 mod_cwd.clone(),
                                 physical_responses.clone(),
+                                retry_scope.clone(),
                             ))
                         } else {
                             request.open(&current_model, effort_wire.clone()).await
@@ -4917,63 +4926,20 @@ async fn run_subagent_loop(
                     )
                     .await
                 };
-                let attempt_result = if !event_channel_open {
-                    api_call.await
-                } else if model_attempt.is_some() {
-                    // Registered panel calls cannot silently abandon one wire
-                    // owner and issue another for an unrelated event. Keep the
-                    // same future until response or explicit user cancellation.
+                let attempt_result = {
                     tokio::pin!(api_call);
                     loop {
                         tokio::select! {
                             biased;
-                            ev = async {
-                                loop {
-                                    match event_rx.recv().await {
-                                        Some(lingxi_core::Event::PeerMessage { envelope }) => pending_peer_messages.push(envelope),
-                                        other => break other,
-                                    }
+                            Some(ack) = wrap_up_rx.recv(), if wrap_up.is_some() => {
+                                let hint = wrap_up.as_ref().expect("eligible child");
+                                let enabled = emit_near_limit_wrap_up(history, &ctx, api_client.as_ref(), &out_tx, hint.message_id).await;
+                                if enabled {
+                                    wrap_up_visible = true;
+                                    flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
                                 }
-                            }, if event_channel_open => {
-                                match ev {
-                                    Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
-                                        if let Some(turn) = mod_turn.as_mut() { turn.aborted(); }
-                                        emit_killed(&ctx, &out_tx, transcript.as_ref(), history,
-                                            &mut transcript_written, agent_id, &last_usage, live_hook_model_selection,).await;
-                                        return;
-                                    }
-                                    Some(lingxi_core::Event::UserMessage { content, .. })
-                                        if ctx.persistent || ctx.task_registry.is_some() =>
-                                    {
-                                        wake_message = Some(ExactHookText::from_text(content));
-                                        if !tool_effects_started
-                                            .load(std::sync::atomic::Ordering::Relaxed)
-                                        {
-                                            continue 'response_attempts;
-                                        }
-                                    }
-                                    Some(lingxi_core::Event::UserMessageJsUtf16 { content, utf16_code_units, .. })
-                                        if ctx.persistent || ctx.task_registry.is_some() =>
-                                    {
-                                        wake_message = Some(ExactHookText { display: content, utf16_code_units });
-                                        if !tool_effects_started
-                                            .load(std::sync::atomic::Ordering::Relaxed)
-                                        {
-                                            continue 'response_attempts;
-                                        }
-                                    }
-                                    None => event_channel_open = false,
-                                    Some(_) => {}
-                                }
+                                let _ = ack.send(enabled);
                             }
-                            response = &mut api_call => break response,
-                        }
-                    }
-                } else {
-                    tokio::pin!(api_call);
-                    loop {
-                        tokio::select! {
-                            biased;
                             ev = async {
                                 loop {
                                     match event_rx.recv().await {
@@ -4985,7 +4951,7 @@ async fn run_subagent_loop(
                                 match ev {
                                     Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                                         if let Some(turn) = mod_turn.as_mut() { turn.aborted(); }
-                                        if let Some(executor) = &ctx.hook_executor {
+                                        if let Some(executor) = ctx.hook_executor.as_ref().filter(|_| model_attempt.is_none()) {
                                             executor.discard_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id, ctx.subagent_stop_firer.as_ref());
                                         }
                                         emit_killed(&ctx,
@@ -5052,7 +5018,9 @@ async fn run_subagent_loop(
                     let interrupted_body = retry_response_body
                         && matches!(error.classification_source(), LlmError::Transport { .. })
                         && stream_opened.load(std::sync::atomic::Ordering::Relaxed);
-                    if attempt_result.declined_fallback.is_none()
+                    if error.allows_automatic_replay()
+                        && retry_scope.allows_automatic_replay()
+                        && attempt_result.declined_fallback.is_none()
                         && !live_output_started.load(std::sync::atomic::Ordering::Relaxed)
                         && (is_workflow_watchdog_timeout(error) || interrupted_body)
                         && (!retry_response_body
@@ -5247,6 +5215,8 @@ async fn run_subagent_loop(
                                 && tool_schemas.iter().any(|tool| tool.name == *tool_name);
                             let can_recover = (force_structured_tool == Some(tool_name.as_str())
                                 || create_local_tool)
+                                && e.allows_automatic_replay()
+                                && retry_scope.allows_automatic_replay()
                                 && (!retry_response_body || local_only_response)
                                 && !has_other_tool_calls
                                 && structured_parse_retry_cap > 0

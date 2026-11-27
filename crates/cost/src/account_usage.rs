@@ -104,6 +104,7 @@ mod tests {
                 secret_ref: format!("slot-{id}-{generation}"),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 1,
             identity_generation: generation,

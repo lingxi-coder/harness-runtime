@@ -854,6 +854,24 @@ impl PartialEq for MainLoopAssistantUsageSnapshot {
 
 impl Eq for MainLoopAssistantUsageSnapshot {}
 
+/// Case-insensitive substring search over the ID and displayed label in `/resume`.
+#[derive(Debug, Default)]
+pub struct ResumableSessionSearch(String);
+
+impl ResumableSessionSearch {
+    /// Normalize the search text once for the entire listing.
+    pub fn new(search: &str) -> Self {
+        Self(search.to_lowercase())
+    }
+
+    /// Return whether either displayed field contains the search text.
+    pub fn matches(&self, id: &str, label: &str) -> bool {
+        self.0.is_empty()
+            || id.to_lowercase().contains(&self.0)
+            || (label != id && label.to_lowercase().contains(&self.0))
+    }
+}
+
 /// Host-owned capability kept alive until an admitted resume finishes. This is
 /// process-local state, never a transcript or client-protocol value.
 #[derive(Clone)]
@@ -3934,6 +3952,17 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Default returns an empty `Vec` when no on-disk store is present.
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
         Vec::new()
+    }
+
+    /// Search the newest-first listing. File-backed hosts can apply the same
+    /// predicate before reading each candidate transcript.
+    async fn list_resumable_sessions_matching(
+        &self,
+        search: ResumableSessionSearch,
+    ) -> Vec<(String, String)> {
+        let mut sessions = self.list_resumable_sessions().await;
+        sessions.retain(|(id, label)| search.matches(id, label));
+        sessions
     }
 
     /// Adopt a previously-loaded session IN PLACE: replace the live history with

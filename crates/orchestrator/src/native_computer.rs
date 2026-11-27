@@ -24,6 +24,10 @@ use tool_api::{Tool, ToolCallResult, ToolError, ToolUseContext};
 
 mod recovery;
 
+const MAX_NATIVE_MEDIA_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredOutput {
     message: ConversationMessage,
@@ -149,6 +153,8 @@ pub(crate) struct Work {
     pub(crate) call: Arc<NativeComputerCall>,
     pub(crate) index: usize,
     pub(crate) identity: ToolExecutionIdentity,
+    /// Fresh members of one provider call share its first member's binding file.
+    live_binding_media_id: Option<Arc<str>>,
     pub(crate) frame: ComputerFrame,
     pub(crate) tool: Arc<dyn Tool>,
     pub(crate) binding: NativeContinuationBinding,
@@ -859,6 +865,7 @@ pub(crate) async fn bind_response(
         let mut replacements = HashMap::new();
         for call in calls {
             let call = Arc::new(call);
+            let mut binding_media_id: Option<Arc<str>> = None;
             let mut replacement = Vec::new();
             let originals: Vec<_> = canonical
                 .iter()
@@ -881,11 +888,12 @@ pub(crate) async fn bind_response(
                     provider_call_id: call.context.call_id.clone(),
                     member_index: u32::try_from(index).map_err(internal)?,
                 };
+                let execution_id = identity.execution_id();
+                let shared_media_id = binding_media_id
+                    .get_or_insert_with(|| format!("{execution_id}:binding").into());
                 let id = ToolUseId::from(format!(
                     "native_computer_{}",
-                    identity
-                        .execution_id()
-                        .trim_start_matches("tool-execution:")
+                    execution_id.trim_start_matches("tool-execution:")
                 ));
                 ids.push(id.to_string());
                 replacement.push(ContentBlock::ToolUse {
@@ -900,6 +908,7 @@ pub(crate) async fn bind_response(
                         call: call.clone(),
                         index,
                         identity,
+                        live_binding_media_id: Some(Arc::clone(shared_media_id)),
                         frame: binding.frame.clone(),
                         tool: binding.tool.clone(),
                         binding: execution_binding.clone(),
@@ -1458,14 +1467,90 @@ pub(crate) async fn final_model_result(
     Ok(())
 }
 
-/// True when `path` contains exactly `expected`, read in fixed-size chunks.
-async fn file_matches(path: &std::path::Path, expected: &[u8]) -> std::io::Result<bool> {
-    use tokio::io::AsyncReadExt as _;
-    let mut file = tokio::fs::File::open(path).await?;
+/// Serialize directly into a byte-limited buffer, including JSON escaping.
+struct NativeMediaBuffer(Vec<u8>);
+
+impl std::io::Write for NativeMediaBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > MAX_NATIVE_MEDIA_BYTES - self.0.len() {
+            return Err(std::io::Error::other(
+                "native final result exceeds media limit",
+            ));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn open_native_media(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+#[cfg(windows)]
+fn open_windows_media_for_sync(
+    home: &std::path::Path,
+    dir: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<(std::fs::File, std::fs::File), OrchestratorError> {
+    use lingxi_core::host::rooted_fs;
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_SHARE_READ_WRITE: u32 = 0x0000_0003;
+    // A configured home may be an alias. The checked descendants must still
+    // resolve through the same directory handle that will be flushed.
+    let parent_path = home
+        .canonicalize()
+        .map_err(internal)?
+        .join(dir.strip_prefix(home).map_err(internal)?);
+    let parent = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&parent_path)
+        .map_err(internal)?;
+    let metadata = parent.metadata().map_err(internal)?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(internal(
+            "native media directory is a link or not a directory",
+        ));
+    }
+    let identity = rooted_fs::opened_file_identity(&parent).map_err(internal)?;
+    let leaf = path.strip_prefix(dir).map_err(internal)?;
+    let file = rooted_fs::open_existing_file_for_update_pinned(&parent_path, leaf, &identity)
+        .map_err(internal)?;
+    Ok((file, parent))
+}
+
+/// Compare against the same handle that will be synced after verification.
+fn file_matches(file: &mut std::fs::File, expected: &[u8]) -> std::io::Result<bool> {
+    use std::io::Read as _;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+        return Ok(false);
+    }
     let mut offset = 0usize;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buf).await?;
+        let read = file.read(&mut buf)?;
         if read == 0 {
             return Ok(offset == expected.len());
         }
@@ -1478,10 +1563,10 @@ async fn file_matches(path: &std::path::Path, expected: &[u8]) -> std::io::Resul
 }
 
 /// Store large final outputs in the existing tool-results media directory, then fsync.
-async fn store_payload(
+async fn store_payload<T: Serialize + Send + Sync + 'static>(
     orch: &ConversationOrchestrator,
     id: &str,
-    payload: &impl Serialize,
+    payload: Arc<T>,
 ) -> Result<DurableToolOutput, OrchestratorError> {
     let home = orch
         .config_home
@@ -1493,42 +1578,37 @@ async fn store_payload(
         &orch.current_cwd().to_string_lossy(),
         &session_id.as_uuid().to_string(),
     );
-    let body = serde_json::to_string(payload).map_err(internal)?;
-    let hash = digest_bytes(body.as_bytes());
-    let media_id = format!("computer-{}", digest(&json!([id, hash]))?);
-    if body.len() > 32 * 1024 * 1024 {
-        return Err(internal("native final result exceeds media limit"));
-    }
-    let stored = crate::tool_result_persistence::persist(
-        home,
-        &dir,
-        &media_id,
-        &body.as_str().into(),
-        true,
-        32 * 1024 * 1024,
-    )
+    let id = id.to_owned();
+    let (body, hash, media_id) = tokio::task::spawn_blocking(move || {
+        let mut encoded = NativeMediaBuffer(Vec::new());
+        serde_json::to_writer(&mut encoded, payload.as_ref()).map_err(internal)?;
+        let hash = digest_bytes(&encoded.0);
+        let media_id = format!("computer-{}", digest(&json!([id, hash]))?);
+        Ok::<_, OrchestratorError>((encoded.0, hash, media_id))
+    })
     .await
-    .map_err(internal)?;
-    // Compare in chunks so a 32 MiB result is not loaded a second time.
-    if !file_matches(&stored.filepath, body.as_bytes())
-        .await
-        .map_err(internal)?
-    {
-        return Err(internal("native result media identity conflicts"));
-    }
-    tokio::fs::File::open(&stored.filepath)
-        .await
-        .map_err(internal)?
-        .sync_all()
+    .map_err(internal)??;
+    let path = crate::tool_result_persistence::persist_json_bytes(home, &dir, &media_id, &body)
         .await
         .map_err(internal)?;
-    tokio::fs::File::open(&dir)
-        .await
-        .map_err(internal)?
-        .sync_all()
-        .await
-        .map_err(internal)?;
-    let path = stored.filepath.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let home = home.to_path_buf();
+    let path = tokio::task::spawn_blocking(move || {
+        #[cfg(windows)]
+        let (mut file, parent) = open_windows_media_for_sync(&home, &dir, &path)?;
+        #[cfg(not(windows))]
+        let mut file = open_native_media(&path).map_err(internal)?;
+        if !file_matches(&mut file, &body).map_err(internal)? {
+            return Err(internal("native result media identity conflicts"));
+        }
+        file.sync_all().map_err(internal)?;
+        #[cfg(not(windows))]
+        let parent = std::fs::File::open(dir).map_err(internal)?;
+        parent.sync_all().map_err(internal)?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(internal)??;
     Ok(DurableToolOutput {
         digest: hash,
         payload: json!({"path":path}),
@@ -1547,27 +1627,48 @@ async fn store_execution_binding(
         provider_response_id: work.identity.provider_response_id.clone(),
         context_epoch: work.context_epoch,
     };
-    store_payload(
-        orch,
-        &format!("{}:binding", work.identity.execution_id()),
-        &binding,
-    )
-    .await
+    let media_id = work
+        .live_binding_media_id
+        .clone()
+        .unwrap_or_else(|| format!("{}:binding", work.identity.execution_id()).into());
+    // The path may have changed since a previous member. Recheck and sync the
+    // file in the current session's media directory before every Started ACK.
+    store_payload(orch, &media_id, Arc::new(binding)).await
 }
 
 async fn load_payload(output: &DurableToolOutput) -> Result<Vec<u8>, OrchestratorError> {
     let path = output.payload["path"]
         .as_str()
-        .ok_or_else(|| internal("native result media reference missing"))?;
-    let meta = tokio::fs::symlink_metadata(path).await.map_err(internal)?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 32 * 1024 * 1024 {
-        return Err(internal("native media reference unsafe or oversized"));
-    }
-    let bytes = tokio::fs::read(path).await.map_err(internal)?;
-    if digest_bytes(&bytes) != output.digest {
-        return Err(internal("native result media digest mismatch"));
-    }
-    Ok(bytes)
+        .ok_or_else(|| internal("native result media reference missing"))?
+        .to_owned();
+    let expected_digest = output.digest.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+        let path = std::path::Path::new(&path);
+        let meta = std::fs::symlink_metadata(path).map_err(internal)?;
+        let limit = MAX_NATIVE_MEDIA_BYTES as u64;
+        if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > limit {
+            return Err(internal("native media reference unsafe or oversized"));
+        }
+        let file = open_native_media(path).map_err(internal)?;
+        let opened = file.metadata().map_err(internal)?;
+        if !opened.is_file() || opened.len() > limit {
+            return Err(internal("native media reference unsafe or oversized"));
+        }
+        let mut bytes = Vec::with_capacity(opened.len() as usize);
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(internal)?;
+        if bytes.len() > MAX_NATIVE_MEDIA_BYTES {
+            return Err(internal("native media reference unsafe or oversized"));
+        }
+        if digest_bytes(&bytes) != expected_digest {
+            return Err(internal("native result media digest mismatch"));
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(internal)?
 }
 
 async fn load_output(output: &DurableToolOutput) -> Result<StoredOutput, OrchestratorError> {
@@ -1833,7 +1934,7 @@ pub(crate) async fn persist_native_assistant(
                         let saved = store_payload(
                             orch,
                             &format!("native-response:{}", response.id),
-                            &StoredOutput::new(accepted.clone(), row.clone()),
+                            Arc::new(StoredOutput::new(accepted.clone(), row.clone())),
                         )
                         .await?;
                         // Recovery can finish this exact successor if publication
@@ -1918,7 +2019,10 @@ pub(crate) async fn publish_native_result(
                 store_payload(
                     orch,
                     &record.execution_id(),
-                    &StoredOutput::new(message.clone(), prepare_stored_row(orch, message).await?),
+                    Arc::new(StoredOutput::new(
+                        message.clone(),
+                        prepare_stored_row(orch, message).await?,
+                    )),
                 )
                 .await?,
             );
@@ -2146,7 +2250,7 @@ pub(crate) async fn prepare_receipts(
         };
         let append = orch.transcript.storage_append_lock.lock().await;
         let row = prepare_stored_row(orch, &message).await?;
-        let stored = StoredReceipt {
+        let stored = Arc::new(StoredReceipt {
             block,
             utf16_overrides: session::jsonl::exact_json::message_utf16_overrides(&row),
             row,
@@ -2154,8 +2258,8 @@ pub(crate) async fn prepare_receipts(
             call: call.as_ref().clone(),
             frame: members[0].1.frame.clone(),
             context_epoch: members[0].1.context_epoch,
-        };
-        let payload = store_payload(orch, &receipt_id, &stored).await?;
+        });
+        let payload = store_payload(orch, &receipt_id, Arc::clone(&stored)).await?;
         let record = NativeReceiptRecord {
             response: None,
             session_id: members[0].1.identity.session_id,

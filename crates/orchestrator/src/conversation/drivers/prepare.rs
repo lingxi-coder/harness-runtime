@@ -517,7 +517,7 @@ impl ConversationOrchestrator {
         // staged turn batch before the collector snapshots that batch.
         if cache_nar_ingress
             && !crate::request_context::prompt_ingress_batch_finalized()
-            && crate::request_context::staged_prompt_ingress_attachments().is_some()
+            && crate::request_context::has_staged_prompt_ingress_attachments()
         {
             let prior_history =
                 crate::request_context::prior_history_for_current_prompt(self).await;
@@ -561,7 +561,7 @@ impl ConversationOrchestrator {
         ) = self.build_wire_tools_with_complete().await?;
         if cache_nar_ingress
             && !crate::request_context::prompt_ingress_batch_finalized()
-            && crate::request_context::staged_prompt_ingress_attachments().is_some()
+            && crate::request_context::has_staged_prompt_ingress_attachments()
             && crate::request_context::staged_prompt_ingress_attachment("skill_listing").is_none()
         {
             crate::request_context::prompt_ingress_producer_rows_or_else_fallible(
@@ -802,24 +802,23 @@ impl ConversationOrchestrator {
                 })
                 .collect::<Vec<_>>()
         };
-        let mut inline_tool_definition_names = snapshot
-            .iter()
-            .chain(turn_reminders.iter())
-            .chain(context_announcements.messages.iter())
-            .chain(native_tool_change_api_system_rows.iter())
-            .flat_map(by_value_tool_definition_names)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        inline_tool_definition_names.sort();
-        let inline_tool_definition_names =
-            (!inline_tool_definition_names.is_empty()).then_some(inline_tool_definition_names);
+        let inline_tool_definition_names = surface_late_tool_additions
+            .then(|| {
+                snapshot
+                    .iter()
+                    .chain(turn_reminders.iter())
+                    .chain(context_announcements.messages.iter())
+                    .chain(native_tool_change_api_system_rows.iter())
+                    .flat_map(by_value_tool_definition_names)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .filter(|names| !names.is_empty());
         let deferred_tools_projection_facts =
-            crate::request_context::DeferredToolsProjectionFacts {
+            crate::request_context::DeferredToolsProjectionFacts::new(
                 surface_late_tool_additions,
                 inline_tool_definition_names,
                 deferred_wire_tool_names,
-            };
+            );
         crate::request_context::set_deferred_tools_projection_facts(
             deferred_tools_projection_facts.clone(),
         );
@@ -907,14 +906,14 @@ impl ConversationOrchestrator {
                 self.persist_prompt_ingress_reminder(&row).await;
             }
             let cached_rendered_count = row.rendered.array_len("").unwrap_or_default();
+            let id = row.message.id();
             crate::request_context::render_deferred_tools_delta_for_request(
-                row.message.id(),
+                id,
                 &row.payload,
-                (cached_rendered_count > 0).then_some(&row.message),
+                (cached_rendered_count > 0).then_some(row.message),
                 cached_rendered_count,
-                deferred_tools_projection_facts.clone(),
-                crate::request_context::staged_name_only_announcement_uuids()
-                    .contains(&row.message.id().to_string()),
+                &deferred_tools_projection_facts,
+                crate::request_context::is_staged_name_only_announcement(id),
             )
         } else {
             None
@@ -1416,7 +1415,7 @@ impl ConversationOrchestrator {
                     .await;
                 let staged_batch = native_nar_ingress
                     && !crate::request_context::prompt_ingress_batch_finalized()
-                    && crate::request_context::staged_prompt_ingress_attachments().is_some();
+                    && crate::request_context::has_staged_prompt_ingress_attachments();
                 if !staged_batch {
                     for notification in &notification_rows {
                         self.persist_prompt_ingress_reminder(notification).await;

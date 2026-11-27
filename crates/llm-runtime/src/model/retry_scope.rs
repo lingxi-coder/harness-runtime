@@ -16,16 +16,19 @@ use crate::prefix_lock_recovery::PrefixLockRecoveryState;
 struct State {
     account_call_id: Option<String>,
     account_output_committed: bool,
+    route_replay_forbidden: bool,
     private_output: bool,
     account_replay_error: Option<crate::LlmError>,
     account_failed: std::collections::HashSet<String>,
     account_renewed: std::collections::HashSet<String>,
     account_budget: Option<crate::ApiAttemptsLeft>,
     account_deadline: Option<tokio::time::Instant>,
+    exact_context_count: Option<([u8; 32], u64)>,
     display_probe: lingxi_llm_client::providers::anthropic::thinking_display::DisplayProbe,
     max_retries: Option<u32>,
     retries: u32,
     native_thinking_type_retry_used: bool,
+    foundry_tool_repairs: std::collections::HashSet<(String, Vec<u16>, &'static str)>,
     overloaded: u32,
     tried_without_streaming: bool,
     credential_renewals: u8,
@@ -86,6 +89,24 @@ impl ModelCallRetryScope {
             .unwrap_or_else(|e| e.into_inner())
             .private_output = true;
         self
+    }
+
+    /// A host watchdog can cancel the SDK future before it yields any error.
+    /// Preserve the veto for that outer retry owner as soon as dispatch starts.
+    pub(crate) fn forbid_route_replay(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .route_replay_forbidden = true;
+    }
+
+    /// Whether a host-generated error can still be recovered by reissuing this logical generation.
+    pub fn allows_automatic_replay(&self) -> bool {
+        !self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .route_replay_forbidden
     }
 
     pub(crate) fn record_account_output(&self) {
@@ -154,6 +175,22 @@ impl ModelCallRetryScope {
             .unwrap_or_else(|e| e.into_inner())
             .account_deadline
             .get_or_insert_with(|| tokio::time::Instant::now() + duration)
+    }
+
+    pub(crate) fn exact_context_count(&self, key: [u8; 32]) -> Option<u64> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .exact_context_count
+            .filter(|(recorded, _)| *recorded == key)
+            .map(|(_, tokens)| tokens)
+    }
+
+    pub(crate) fn record_exact_context_count(&self, key: [u8; 32], tokens: u64) {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .exact_context_count = Some((key, tokens));
     }
 
     /// Record one matching Native prefix-lock response on this logical call.
@@ -284,6 +321,20 @@ impl ModelCallRetryScope {
         let mut control = control.clone();
         control.max_retries = max.saturating_sub(shared.retries);
         control
+    }
+
+    /// Bound a concrete tool downgrade to one retry on this deployment and model.
+    pub(crate) fn take_foundry_tool_repair(
+        &self,
+        profile: &str,
+        model: &[u16],
+        feature: &'static str,
+    ) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .foundry_tool_repairs
+            .insert((profile.to_owned(), model.to_vec(), feature))
     }
 
     /// Claim Native's dedicated thinking-type retry at most once. It is a

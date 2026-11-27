@@ -181,6 +181,11 @@ fn read_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
     COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn prefix_read_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub(super) fn record_catalog_read(path: &Path) {
     *read_counts()
         .lock()
@@ -215,6 +220,13 @@ fn read_faults() -> &'static Mutex<HashMap<PathBuf, CatalogReadFault>> {
 }
 
 pub(super) fn catalog_read_fault(path: &Path, prefix: bool) -> Option<lingxi_core::host::FsError> {
+    if prefix {
+        *prefix_read_counts()
+            .lock()
+            .unwrap()
+            .entry(path.to_owned())
+            .or_default() += 1;
+    }
     match read_faults().lock().unwrap().get(path) {
         Some(CatalogReadFault::PermissionDenied) => Some(
             lingxi_core::host::FsError::PermissionDenied(path.display().to_string()),
@@ -260,6 +272,117 @@ fn write_session(dir: &Path, cwd: &str) -> (Uuid, PathBuf) {
     )
     .unwrap();
     (id, path)
+}
+
+#[tokio::test]
+async fn successful_uuid_lookup_only_opens_the_matching_transcript() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = "/workspace/catalog";
+    let home = temp.path().join("home");
+    let dir = project_dir_for_cwd(&home, cwd);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (wanted, path) = write_session(&dir, cwd);
+    let siblings: Vec<_> = (0..31).map(|_| write_session(&dir, cwd).1).collect();
+    let fs = Arc::new(PosixFileSystem::new(temp.path().to_owned()));
+
+    let catalog = find_session_with_diagnostics(&home, cwd, wanted, fs)
+        .await
+        .unwrap();
+    assert_eq!(catalog.sessions.len(), 1);
+    assert_eq!(catalog.sessions[0].uuid, wanted);
+    assert_eq!(catalog.skipped_files, 0);
+    let prefixes = prefix_read_counts().lock().unwrap();
+    let reads = read_counts().lock().unwrap();
+    assert_eq!(prefixes[&path], 1);
+    assert_eq!(reads[&path], 1);
+    for sibling in siblings {
+        assert!(!prefixes.contains_key(&sibling));
+        assert!(!reads.contains_key(&sibling));
+    }
+}
+
+#[tokio::test]
+async fn ordinary_uuid_lookup_refreshes_same_size_rewrites_with_restored_mtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().to_str().unwrap();
+    let home = temp.path().join("home");
+    let dir = project_dir_for_cwd(&home, cwd);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_owned()));
+
+    for padding in [0, crate::jsonl::LITE_READ_BUF_SIZE] {
+        let (id, path) = write_session(&dir, cwd);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let tag = json!({"type":"tag", "sessionId":id, "tag":"x".repeat(padding)});
+        let title = json!({"type":"custom-title", "sessionId":id, "customTitle":"first-title"});
+        let source = format!("{source}{tag}\n{title}\n");
+        std::fs::write(&path, &source).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let modified = filetime::FileTime::from_last_modification_time(&metadata);
+        #[cfg(unix)]
+        let precise = std::os::unix::fs::MetadataExt::ctime_nsec(&metadata) != 0;
+        #[cfg(not(unix))]
+        let precise = false;
+        let lookup = || find_session_with_diagnostics(&home, cwd, id, Arc::clone(&fs));
+        assert_eq!(lookup().await.unwrap().sessions[0].title, "first-title");
+        assert_eq!(lookup().await.unwrap().sessions[0].title, "first-title");
+        let reads = if padding > 0 && !precise { 2 } else { 1 };
+        assert_eq!(read_counts().lock().unwrap()[&path], reads);
+        assert_eq!(parse_counts().lock().unwrap()[&path], 1);
+
+        let updated = source.replace("first-title", "other-title");
+        assert_eq!(source.len(), updated.len());
+        std::fs::write(&path, updated).unwrap();
+        filetime::set_file_mtime(&path, modified).unwrap();
+        assert_eq!(lookup().await.unwrap().sessions[0].title, "other-title");
+        assert_eq!(read_counts().lock().unwrap()[&path], reads + 1);
+        assert_eq!(parse_counts().lock().unwrap()[&path], 2);
+    }
+}
+
+#[tokio::test]
+async fn warm_catalog_rechecks_the_source_after_the_access_probe() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let (_, path) = write_session(dir, dir.to_str().unwrap());
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.to_owned()));
+    let backend = fs.cache_identity();
+    let mut skipped = 0;
+    let mut candidates = Vec::new();
+    collect_dir(dir, None, &fs, true, &mut candidates, &mut skipped)
+        .await
+        .unwrap();
+    let rows = enrich_candidates(
+        candidates.clone(),
+        &fs,
+        false,
+        &[],
+        &[],
+        backend.as_ref(),
+        &mut skipped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows[0].title, "hello");
+
+    let replacement = dir.join("replacement");
+    let source = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&replacement, source.replace("hello", "world")).unwrap();
+    std::fs::rename(replacement, &path).unwrap();
+    let rows = enrich_candidates(
+        candidates,
+        &fs,
+        false,
+        &[],
+        &[],
+        backend.as_ref(),
+        &mut skipped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows[0].title, "world");
+    assert_eq!(skipped, 0);
+    assert_eq!(read_counts().lock().unwrap()[&path], 2);
 }
 
 #[tokio::test]
@@ -376,11 +499,17 @@ fn catalog_cache_replaces_revisions_and_enforces_owned_byte_budget() {
         target_cwds: vec!["/workspace".into()],
     };
     let entry = |revision, title_size| CatalogCacheEntry {
-        file_len: revision,
-        file_modified: SystemTime::UNIX_EPOCH,
-        file_created: SystemTime::UNIX_EPOCH,
+        revision: CatalogCacheRevision {
+            source: CatalogSourceRevision {
+                len: revision,
+                modified: SystemTime::UNIX_EPOCH,
+                created: None,
+                #[cfg(unix)]
+                inode: (0, 0, 0, 0),
+            },
+            complete_digest: None,
+        },
         scoped_cwd: None,
-        skipped: false,
         last_access: 0,
         retained_bytes: 0,
         row: Some(SessionMetadata {
@@ -404,7 +533,7 @@ fn catalog_cache_replaces_revisions_and_enforces_owned_byte_budget() {
     }
     assert_eq!(cache.entries.len(), 1);
     assert_eq!(cache.recency.len(), 1);
-    assert_eq!(cache.entries[&key].file_len, 511);
+    assert_eq!(cache.entries[&key].revision.source.len, 511);
     let mut other = key.clone();
     other.path = PathBuf::from("/other.jsonl");
     cache.insert(other.clone(), entry(1, CATALOG_CACHE_BYTES / 2));
@@ -448,17 +577,9 @@ async fn alias_index_retries_until_admission_and_keeps_all_destination_variants(
     collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
     assert_eq!(candidates.len(), 1);
     let mut skipped = 0;
-    let mut rows = enrich_candidates(
-        candidates,
-        &fs,
-        false,
-        &[],
-        &[],
-        std::slice::from_ref(&path),
-        &mut skipped,
-    )
-    .await
-    .unwrap();
+    let mut rows = enrich_candidates(candidates, &fs, false, &[], &[], None, &mut skipped)
+        .await
+        .unwrap();
     retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
     assert_eq!(
         rows.len(),
@@ -550,7 +671,7 @@ fn alias_source_fixture() -> (
 }
 
 #[tokio::test]
-async fn unchanged_alias_admission_and_enrichment_share_one_full_read_and_parse() {
+async fn unchanged_alias_reuses_its_parse_when_the_file_change_time_is_precise() {
     let (_temp, id, path, destination, fs) = alias_source_fixture();
     let aliases = vec![(path.clone(), destination.clone())];
     let mut candidates = Vec::new();
@@ -560,17 +681,9 @@ async fn unchanged_alias_admission_and_enrichment_share_one_full_read_and_parse(
     assert_eq!(read_counts().lock().unwrap()[&path], 1);
     assert_eq!(parse_counts().lock().unwrap()[&path], 1);
     let mut skipped = 0;
-    let mut rows = enrich_candidates(
-        candidates,
-        &fs,
-        false,
-        &[],
-        &[],
-        std::slice::from_ref(&path),
-        &mut skipped,
-    )
-    .await
-    .unwrap();
+    let mut rows = enrich_candidates(candidates, &fs, false, &[], &[], None, &mut skipped)
+        .await
+        .unwrap();
     retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].uuid, id);
@@ -578,15 +691,26 @@ async fn unchanged_alias_admission_and_enrichment_share_one_full_read_and_parse(
     assert_eq!(rows[0].title, "hello");
     assert_eq!(rows[0].message_count, 1);
     assert_eq!(skipped, 0);
+    #[cfg(unix)]
+    let expected = {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata(&path).unwrap().ctime_nsec() == 0 {
+            2
+        } else {
+            1
+        }
+    };
+    #[cfg(not(unix))]
+    let expected = 2;
     assert_eq!(
         read_counts().lock().unwrap()[&path],
-        1,
-        "a stable alias needs one full read plus its late bounded access probe"
+        expected,
+        "only precise revisions may authorize reuse with a bounded access probe"
     );
     assert_eq!(
         parse_counts().lock().unwrap()[&path],
-        1,
-        "admission and row metadata must use the same routed snapshot"
+        expected,
+        "a whole-second or unavailable change time requires routing the current bytes"
     );
 }
 
@@ -602,17 +726,9 @@ async fn alias_capture_refreshes_late_relocation_before_final_membership_check()
     let relocated = json!({"type":"relocated", "sessionId":id, "relocatedCwd":next_destination});
     std::fs::write(&path, format!("{source}{relocated}\n")).unwrap();
     let mut skipped = 0;
-    let mut rows = enrich_candidates(
-        candidates,
-        &fs,
-        false,
-        &[],
-        &[],
-        std::slice::from_ref(&path),
-        &mut skipped,
-    )
-    .await
-    .unwrap();
+    let mut rows = enrich_candidates(candidates, &fs, false, &[], &[], None, &mut skipped)
+        .await
+        .unwrap();
     assert_eq!(rows[0].workspace_path.as_deref(), next_destination.to_str());
     retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
     assert!(
@@ -644,8 +760,8 @@ async fn alias_capture_refreshes_replacements_rewrites_and_truncation() {
                 std::fs::rename(&replacement, &path).unwrap();
             }
             "rewrite" => {
-                // Length and mtime agree with the captured row; ctime and the
-                // pinned inode revision must still force a fresh read.
+                // Restoring mtime on a same-size rewrite must also refresh on
+                // volumes where both revisions share a whole-second ctime.
                 std::fs::write(&path, source.replace("hello", "world")).unwrap();
                 filetime::set_file_mtime(
                     &path,
@@ -657,17 +773,9 @@ async fn alias_capture_refreshes_replacements_rewrites_and_truncation() {
             _ => unreachable!(),
         }
         let mut skipped = 0;
-        let mut rows = enrich_candidates(
-            candidates,
-            &fs,
-            false,
-            &[],
-            &[],
-            std::slice::from_ref(&path),
-            &mut skipped,
-        )
-        .await
-        .unwrap();
+        let mut rows = enrich_candidates(candidates, &fs, false, &[], &[], None, &mut skipped)
+            .await
+            .unwrap();
         retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
         if mutation == "truncate" {
             assert!(rows.is_empty());
@@ -707,17 +815,9 @@ async fn alias_capture_rechecks_access_and_keeps_unsupported_prefix_fallback() {
         collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
         let _fault = ReadFaultGuard::new(&path, fault);
         let mut skipped = 0;
-        let rows = enrich_candidates(
-            candidates,
-            &fs,
-            false,
-            &[],
-            &[],
-            std::slice::from_ref(&path),
-            &mut skipped,
-        )
-        .await
-        .unwrap();
+        let rows = enrich_candidates(candidates, &fs, false, &[], &[], None, &mut skipped)
+            .await
+            .unwrap();
         match fault {
             CatalogReadFault::FullReadOnly => {
                 unreachable!("full-read-only failures use the separate revision recovery fixture")

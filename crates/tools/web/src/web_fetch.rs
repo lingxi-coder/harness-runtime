@@ -829,6 +829,29 @@ impl WebFetchTool {
         self.ctx.bus.log_event(WEB_FETCH_COMPLETED, md).await;
     }
 
+    async fn preflight_domain(&self, host: &str, invocation_id: &str) -> Result<(), ToolError> {
+        if !(self.ctx.skip_web_fetch_preflight || skip_web_fetch_preflight_env()) {
+            match crate::blocklist::check_domain_blocklist(self.ctx.http.as_ref(), host).await {
+                crate::blocklist::DomainCheckResult::Allowed => {}
+                crate::blocklist::DomainCheckResult::Blocked => {
+                    self.emit_failed(invocation_id, "domain_blocked", None, 0)
+                        .await;
+                    return Err(ToolError::Transport(
+                        crate::blocklist::domain_blocked_msg(host).into(),
+                    ));
+                }
+                crate::blocklist::DomainCheckResult::CheckFailed(_) => {
+                    self.emit_failed(invocation_id, "domain_check_failed", None, 0)
+                        .await;
+                    return Err(ToolError::Transport(
+                        crate::blocklist::domain_check_failed_msg(host).into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn emit_failed(
         &self,
         invocation_id: &str,
@@ -1194,14 +1217,19 @@ impl Tool for WebFetchTool {
                 provider.supports_fetch(model, ctx.options.model_profile.as_deref())
             })
         {
+            self.preflight_domain(parsed_url.host_str().unwrap_or("<unknown>"), &invocation_id)
+                .await?;
             let mut provider_url = parsed_url.clone();
             upgrade_to_https(&mut provider_url);
-            let fetched = match provider
-                .fetch(tool_api::HostedFetchRequest {
-                    model: model.clone(),
-                    profile: ctx.options.model_profile.clone(),
-                    url: provider_url.to_string(),
-                })
+            let (fetched, cached_at_ms) = match provider
+                .fetch_with_cache(
+                    tool_api::HostedFetchRequest {
+                        model: model.clone(),
+                        profile: ctx.options.model_profile.clone(),
+                        url: provider_url.to_string(),
+                    },
+                    !inline_chat && !self.ctx.side_chat,
+                )
                 .await
             {
                 Ok(output) => output,
@@ -1220,6 +1248,12 @@ impl Tool for WebFetchTool {
                 fetched.content
             } else {
                 format!("# {}\n\n{}", fetched.title, fetched.content)
+            };
+            let fetched_at_ms = cached_at_ms.unwrap_or_else(unix_epoch_ms);
+            let source = if cached_at_ms.is_some() {
+                FetchSource::Cache
+            } else {
+                FetchSource::Network
             };
             let bytes = markdown.len();
             let truncated = body_exceeds_markdown_cap(&markdown);
@@ -1253,8 +1287,8 @@ impl Tool for WebFetchTool {
                     subagent_hooks_fired: false,
                 },
                 policy,
-                FetchSource::Network,
-                unix_epoch_ms(),
+                source,
+                fetched_at_ms,
             );
         }
 
@@ -1333,33 +1367,7 @@ impl Tool for WebFetchTool {
         upgrade_to_https(&mut parsed_url);
         let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
 
-        // Domain blocklist preflight (`utils.ts:420-435`). Runs on every host
-        // (cache-miss path only — a URL cache hit returned above) unless the
-        // user opted to skip it. The faithful gate is `settings.skipWebFetchPreflight`
-        // (binary `if(!Mi().skipWebFetchPreflight)switch((await DSd(g)).status){…}`),
-        // threaded here via `ctx.skip_web_fetch_preflight`; the
-        // `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var is a LingXi-local OR-fallback
-        // (CC has no env equivalent). `Blocked`/`CheckFailed` map to the
-        // byte-locked user-facing error messages; `Allowed` continues to the fetch.
-        if !(self.ctx.skip_web_fetch_preflight || skip_web_fetch_preflight_env()) {
-            match crate::blocklist::check_domain_blocklist(self.ctx.http.as_ref(), &host).await {
-                crate::blocklist::DomainCheckResult::Allowed => {}
-                crate::blocklist::DomainCheckResult::Blocked => {
-                    self.emit_failed(&invocation_id, "domain_blocked", None, 0)
-                        .await;
-                    return Err(ToolError::Transport(
-                        crate::blocklist::domain_blocked_msg(&host).into(),
-                    ));
-                }
-                crate::blocklist::DomainCheckResult::CheckFailed(_) => {
-                    self.emit_failed(&invocation_id, "domain_check_failed", None, 0)
-                        .await;
-                    return Err(ToolError::Transport(
-                        crate::blocklist::domain_check_failed_msg(&host).into(),
-                    ));
-                }
-            }
-        }
+        self.preflight_domain(&host, &invocation_id).await?;
 
         let started = Instant::now();
 

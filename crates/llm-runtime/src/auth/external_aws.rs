@@ -174,8 +174,8 @@ impl AwsAuthProcess for ShellAwsAuthProcess {
                 .arg("-c")
                 .arg(command)
                 .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
             {
                 Ok(c) => c,
@@ -514,6 +514,18 @@ async fn emit_empty(bus: &Option<Arc<telemetry::AnalyticsBus>>, name: &'static s
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_helper_can_write_more_than_a_pipe_buffer() {
+        let result = ShellAwsAuthProcess
+            .run_refresh(
+                "head -c 262144 /dev/zero && head -c 262144 /dev/zero >&2",
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(matches!(result, RefreshRunOutcome::Success));
+    }
 
     /// Scriptable fixture for the subprocess seam.
     #[derive(Debug)]

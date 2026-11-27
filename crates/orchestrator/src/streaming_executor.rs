@@ -14,7 +14,7 @@ use lingxi_core::host::tool_use_lifecycle::{
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tool_api::context::ToolUseContext;
@@ -220,6 +220,8 @@ pub(crate) struct StreamingToolExecutor<'a> {
     /// Native query depth for tool calls accepted from this model request.
     native_query_depth: u32,
     pub(crate) tools: Vec<TrackedTool>,
+    first_index_by_id: HashMap<ToolUseId, usize>,
+    indexed_tool_count: usize,
     /// The actor owns dispatch tasks and advances the eligible queue on every
     /// admission/completion, independently of provider events and Tn polling.
     scheduler: ToolScheduler,
@@ -393,6 +395,8 @@ impl<'a> StreamingToolExecutor<'a> {
             orch,
             native_query_depth,
             tools: Vec::new(),
+            first_index_by_id: HashMap::new(),
+            indexed_tool_count: 0,
             scheduler,
             publication_fence,
             actor_ready_indices: VecDeque::new(),
@@ -646,6 +650,26 @@ impl<'a> StreamingToolExecutor<'a> {
             .any(|tool| tool.status == ToolStatus::Executing)
     }
 
+    fn first_tool_index(&mut self, id: &ToolUseId) -> Option<usize> {
+        // Tools are appended in registration order for the life of a generation.
+        // Duplicate tool-use IDs continue to resolve to their first tracked row.
+        for index in self.indexed_tool_count..self.tools.len() {
+            self.first_index_by_id
+                .entry(self.tools[index].id.clone())
+                .or_insert(index);
+        }
+        self.indexed_tool_count = self.tools.len();
+        self.first_index_by_id.get(id).copied()
+    }
+
+    fn clear_tracked_tools(&mut self) {
+        self.tools.clear();
+        self.first_index_by_id.clear();
+        self.indexed_tool_count = 0;
+        self.actor_ready_indices.clear();
+        self.actor_terminal_ready_indices.clear();
+    }
+
     async fn sync_statuses(&mut self) {
         let statuses = match self.scheduler.statuses().await {
             Ok(statuses) => statuses,
@@ -655,9 +679,10 @@ impl<'a> StreamingToolExecutor<'a> {
             }
         };
         for (id, status) in statuses {
-            let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) else {
+            let Some(index) = self.first_tool_index(&id) else {
                 continue;
             };
+            let tool = &mut self.tools[index];
             if tool.status == ToolStatus::Yielded {
                 continue;
             }
@@ -968,11 +993,7 @@ impl<'a> StreamingToolExecutor<'a> {
     ) -> usize {
         let mut count = 0;
         for completed in ready {
-            let Some(index) = self
-                .tools
-                .iter()
-                .position(|tool| tool.id == completed.meta.id)
-            else {
+            let Some(index) = self.first_tool_index(&completed.meta.id) else {
                 tracing::error!(tool_use_id = %completed.meta.id, "scheduler returned an unregistered tool");
                 continue;
             };
@@ -1177,9 +1198,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 scheduler_stopped("resetting after server fallback")
             })?;
         self.publication_fence = self.scheduler.current_publication_fence();
-        self.tools.clear();
-        self.actor_ready_indices.clear();
-        self.actor_terminal_ready_indices.clear();
+        self.clear_tracked_tools();
         self.tool_use_lifecycle.apply_removal(&removal);
         Ok(removal)
     }
@@ -1247,9 +1266,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 tracing::error!("autonomous scheduler stopped while abandoning model-error work")
             }
         }
-        self.tools.clear();
-        self.actor_ready_indices.clear();
-        self.actor_terminal_ready_indices.clear();
+        self.clear_tracked_tools();
         (unmatched, removal)
     }
 
@@ -1281,9 +1298,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 tracing::error!("autonomous scheduler stopped while abandoning tool work")
             }
         }
-        self.tools.clear();
-        self.actor_ready_indices.clear();
-        self.actor_terminal_ready_indices.clear();
+        self.clear_tracked_tools();
         removal
     }
 
@@ -1357,8 +1372,11 @@ impl<'a> StreamingToolExecutor<'a> {
         self.orch.remove_assistant_stream_rows(rows).await
     }
 
-    pub(crate) fn last_request_id(&self) -> Option<String> {
-        self.orch.api.last_request_id()
+    pub(crate) fn response_request_id(
+        &self,
+        diagnostics: Option<&llm_runtime::history::ResponseDiagnostics>,
+    ) -> Option<String> {
+        self.orch.api.response_request_id(diagnostics)
     }
 }
 
@@ -1908,6 +1926,46 @@ mod synthetic_denial_kind_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         ))
+    }
+
+    #[tokio::test]
+    async fn duplicate_synthetic_results_use_the_first_registration_until_reset() {
+        let orch = orch();
+        let mut exec = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+            .await
+            .unwrap();
+        let other_id = ToolUseId::new();
+        let repeated_id = ToolUseId::new();
+        let input = Utf16JsonProjection::parse("{}").unwrap();
+        for (id, name) in [
+            (&other_id, "Other"),
+            (&repeated_id, "First"),
+            (&repeated_id, "Second"),
+        ] {
+            exec.add_tool(
+                id.clone(),
+                name.into(),
+                input.clone(),
+                None,
+                MessageId::new(),
+            )
+            .await;
+        }
+        assert_eq!(exec.drain_ready().await, 3);
+        let results = exec.take_newly_completed();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[1].tool, "First");
+        assert!(
+            matches!(&results[1].block, Some(ContentBlock::ToolResult { content, .. })
+            if content.string_at("").is_some_and(|text| text.contains("Second")))
+        );
+
+        exec.reset_after_server_fallback_owned(None).await.unwrap();
+        exec.add_tool(repeated_id, "New".into(), input, None, MessageId::new())
+            .await;
+        assert_eq!(exec.drain_ready().await, 1);
+        assert_eq!(exec.take_newly_completed()[0].tool, "New");
+        assert_eq!(exec.first_tool_index(&other_id), None);
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use lingxi_core::host::permission_gate::{PermissionPolicyRuleFact, PermissionPol
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_llm_client::protocol::JsonPayload;
 use lingxi_llm_client::{NativeAnthropicRequestContext, NativeAnthropicServerClassifierContext};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -135,14 +135,7 @@ pub(crate) fn supports_native_mid_conversation_tool_changes_route(
     protocol: &llm_runtime::ProtocolFamily,
     first_party_anthropic: bool,
 ) -> bool {
-    match protocol {
-        // Native's `vh()` admits first-party Anthropic, Anthropic AWS/GCP, and
-        // Foundry. The current runtime route identity exposes direct
-        // Anthropic and Foundry, but no distinct Anthropic AWS/GCP providers.
-        llm_runtime::ProtocolFamily::AnthropicMessages => first_party_anthropic,
-        llm_runtime::ProtocolFamily::FoundryClaude => true,
-        _ => false,
-    }
+    first_party_anthropic && *protocol == llm_runtime::ProtocolFamily::AnthropicMessages
 }
 
 pub(crate) fn supports_native_classifier_route(
@@ -882,37 +875,7 @@ async fn git_state(cwd: &Path, diskless: bool) -> GitState {
         GitCommandResult::Timeout => (None, Some("timeout")),
         GitCommandResult::SpawnError | GitCommandResult::NonZero => (None, Some("error")),
     };
-    let remote_names = match git_command(&root, &["remote"]).await {
-        GitCommandResult::Output(value) => value
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    };
-    let mut remotes = Vec::new();
-    let mut origin_remote = None;
-    for name in remote_names {
-        let fetch_urls = git_config_values(&root, &format!("remote.{name}.url")).await;
-        let push_urls = git_config_values(&root, &format!("remote.{name}.pushurl")).await;
-        if name == "origin" {
-            origin_remote = fetch_urls
-                .first()
-                .and_then(|url| remote_visibility_entry(&name, url));
-        }
-        for url in fetch_urls.iter().chain(push_urls.iter()) {
-            if let Some(entry) = remote_visibility_entry(&name, url) {
-                remotes.push(entry);
-            }
-        }
-    }
-    remotes.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.remote.cmp(&right.remote))
-    });
-    let mut seen_remotes = HashSet::new();
-    remotes.retain(|remote| seen_remotes.insert((remote.host.clone(), remote.remote.clone())));
+    let (origin_remote, remotes) = git_remote_visibility(&root).await;
     let branch_remote = if let Some(branch) = branch.as_deref() {
         git_config_value(
             &root,
@@ -956,15 +919,60 @@ async fn git_config_value(cwd: &Path, arguments: &[&str]) -> Option<String> {
     }
 }
 
-async fn git_config_values(cwd: &Path, key: &str) -> Vec<String> {
-    match git_command(cwd, &["config", "--null", "--get-all", key]).await {
-        GitCommandResult::Output(value) => value
-            .split('\0')
-            .filter(|item| !item.is_empty())
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
+async fn git_remote_visibility(
+    cwd: &Path,
+) -> (Option<RemoteVisibilityEntry>, Vec<RemoteVisibilityEntry>) {
+    let GitCommandResult::Output(names) = git_command(cwd, &["remote"]).await else {
+        return (None, Vec::new());
+    };
+    if names.is_empty() {
+        return (None, Vec::new());
     }
+    let arguments = [
+        "config",
+        "--null",
+        "--get-regexp",
+        r"^remote\..*\.(url|pushurl)$",
+    ];
+    let GitCommandResult::Output(config) = git_command(cwd, &arguments).await else {
+        return (None, Vec::new());
+    };
+    // Git separates keys from values with LF and terminates records with NUL.
+    // Preserve the config order within each key and the case of remote names.
+    let mut urls_by_key = HashMap::<&str, Vec<&str>>::new();
+    for (key, url) in config
+        .split_terminator('\0')
+        .filter_map(|record| record.split_once('\n'))
+    {
+        if !url.is_empty() {
+            urls_by_key.entry(key).or_default().push(url);
+        }
+    }
+    let urls_for = |key: &str| urls_by_key.get(key).map(Vec::as_slice).unwrap_or_default();
+    let mut remotes = Vec::new();
+    let mut origin_remote = None;
+    for name in names.lines().filter(|line| !line.is_empty()) {
+        let fetch_urls = urls_for(&format!("remote.{name}.url"));
+        let push_urls = urls_for(&format!("remote.{name}.pushurl"));
+        if name == "origin" {
+            origin_remote = fetch_urls
+                .first()
+                .and_then(|url| remote_visibility_entry(name, url));
+        }
+        for url in fetch_urls.iter().chain(push_urls) {
+            if let Some(entry) = remote_visibility_entry(name, url) {
+                remotes.push(entry);
+            }
+        }
+    }
+    remotes.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.remote.cmp(&right.remote))
+    });
+    let mut seen_remotes = HashSet::new();
+    remotes.retain(|remote| seen_remotes.insert((remote.host.clone(), remote.remote.clone())));
+    (origin_remote, remotes)
 }
 
 #[derive(Clone)]
@@ -1594,7 +1602,7 @@ mod tests {
             &ProtocolFamily::AnthropicMessages,
             false
         ));
-        assert!(supports_native_mid_conversation_tool_changes_route(
+        assert!(!supports_native_mid_conversation_tool_changes_route(
             &ProtocolFamily::FoundryClaude,
             false
         ));
@@ -1665,6 +1673,76 @@ mod tests {
         assert_eq!(value["error"], "not_a_repo");
         assert!(value.get("push_remote").is_none());
         assert!(value.get("status").is_some_and(serde_json::Value::is_null));
+    }
+
+    #[tokio::test]
+    async fn batched_remote_urls_preserve_fetch_order_case_and_redaction() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path();
+        assert!(matches!(
+            git_command(cwd, &["init", "--quiet"]).await,
+            GitCommandResult::Output(_)
+        ));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(cwd.join(".git/config"))
+            .unwrap()
+            .write_all(
+                br#"
+[remote "Case.fixture"]
+    pushURL = https://push.fixture.invalid/team/shared
+    URL = https://sample@fetch.fixture.invalid/team/shared
+    url = "https://omit.fixture.invalid/team/hidden\nsecond"
+[remote "case.fixture"]
+    url = https://fetch.fixture.invalid/team/shared
+    url = https://mirror.fixture.invalid/team/other
+[remote "origin"]
+    url = ""
+    url = https://first.fixture.invalid/team/one
+    url = https://second.fixture.invalid/team/two
+"#,
+            )
+            .unwrap();
+
+        let (origin, remotes) = git_remote_visibility(cwd).await;
+        let visible: Vec<_> = remotes
+            .iter()
+            .filter(|entry| entry.host.ends_with(".fixture.invalid"))
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry.host.as_str(),
+                    entry.remote.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            visible,
+            [
+                ("Case.fixture", "fetch.fixture.invalid", "team/shared"),
+                ("Case.fixture", "push.fixture.invalid", "team/shared"),
+                ("case.fixture", "mirror.fixture.invalid", "team/other"),
+                ("origin", "first.fixture.invalid", "team/one"),
+                ("origin", "second.fixture.invalid", "team/two"),
+            ]
+        );
+
+        // An inherited origin URL, when present, precedes repository config.
+        let GitCommandResult::Output(urls) =
+            git_command(cwd, &["config", "--null", "--get-all", "remote.origin.url"]).await
+        else {
+            panic!("expected the fixture's origin URLs");
+        };
+        let expected_origin = urls
+            .split('\0')
+            .find(|url| !url.is_empty())
+            .and_then(|url| remote_visibility_entry("origin", url));
+        assert_eq!(
+            origin.map(|entry| (entry.host, entry.remote)),
+            expected_origin.map(|entry| (entry.host, entry.remote))
+        );
     }
 
     #[test]

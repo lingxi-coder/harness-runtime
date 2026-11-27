@@ -18,12 +18,47 @@ pub trait ModelRuntimeSource: std::fmt::Debug + Send + Sync {
     }
 }
 
+/// Identity of the authenticated count request. The correlation ID can change
+/// on a re-prepare without affecting what the endpoint counts.
+fn exact_count_key(
+    call: &lingxi_llm_client::PreparedCall,
+    account_generation: Option<u64>,
+    credential_revision: Option<u64>,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let request = call.request();
+    let mut hash = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    };
+    field(call.profile().profile_name.as_bytes());
+    for revision in [account_generation, credential_revision] {
+        if let Some(revision) = revision {
+            field(&revision.to_le_bytes());
+        } else {
+            field(&[]);
+        }
+    }
+    field(request.method.as_bytes());
+    field(request.url.as_bytes());
+    field(&request.body);
+    for (name, value) in &request.headers {
+        if !name.eq_ignore_ascii_case("x-client-request-id") {
+            field(name.as_bytes());
+            field(value.as_bytes());
+        }
+    }
+    hash.finalize().into()
+}
+
 /// Host execution composition: immutable routing, request-local credentials,
 /// and shared SDK clients. Protocol execution and stream assembly belong to SDK.
 #[derive(Debug, Clone)]
 pub struct ModelRuntime {
     source: Option<Arc<dyn ModelRuntimeSource>>,
     account_pool: Option<Arc<crate::accounts::AccountPool>>,
+    account_routing_version: Option<(Arc<str>, u64)>,
     cache: Arc<crate::execution::ClientCache>,
     registry: Arc<ModelRegistry>,
     routes: Arc<BTreeMap<String, RouteEntry>>,
@@ -151,6 +186,52 @@ fn project_route_input<'a>(
     auth: AuthStrategy,
 ) -> Result<std::borrow::Cow<'a, LlmRequest>, LlmError> {
     let mut projected = std::borrow::Cow::Borrowed(request);
+    let native_route_admitted = request
+        .execution
+        .native_anthropic_base_url_fingerprint
+        .as_ref()
+        .is_some_and(|fingerprint| {
+            *fingerprint
+                == lingxi_llm_client::files::provider_file_endpoint_fingerprint(&profile.base_url)
+        });
+    if request
+        .input
+        .messages
+        .iter()
+        .any(crate::service::is_per_turn_effort_marker)
+        && !should_project_native_per_turn_effort(
+            &route.provider_id,
+            protocol,
+            native_route_admitted,
+            request.execution.anthropic_request_kind,
+            &route.request_model,
+            crate::model::thinking_binding_controls::native_b6_disabled(),
+        )
+    {
+        let mut retained = request.clone();
+        retained.input.messages.clear();
+        let mut positions = lingxi_llm_client::message_projection::MessageProjectionMap::default();
+        for (source, message) in request.input.messages.iter().enumerate() {
+            if crate::service::is_per_turn_effort_marker(message) {
+                positions
+                    .insert_message(source, Vec::new())
+                    .map_err(crate::upstream::error)?;
+                continue;
+            }
+            let target = retained.input.messages.len();
+            positions
+                .insert_message(source, vec![target])
+                .map_err(crate::upstream::error)?;
+            for block in 0..message.content.len() {
+                positions
+                    .insert((source, block), vec![(target, block)])
+                    .map_err(crate::upstream::error)?;
+            }
+            retained.input.messages.push(message.clone());
+        }
+        crate::request_projection::apply(request, &mut retained, &positions)?;
+        projected = std::borrow::Cow::Owned(retained);
+    }
     if let Some(source) = projected.execution.input_protocol.filter(|source| {
         lingxi_llm_client::replay::native_family(*source)
             != lingxi_llm_client::replay::native_family(protocol)
@@ -175,6 +256,38 @@ fn project_route_input<'a>(
         {
             projected = std::borrow::Cow::Owned(portable);
         }
+    }
+    if let Some(host_id) = projected.execution.anthropic_user_id.as_deref() {
+        let input_id = projected.input.metadata.string_at("/user_id");
+        if protocol.is_anthropic_family() && input_id.is_none() {
+            let metadata =
+                crate::protocol::anthropic_user_id_metadata(&projected.input.metadata, host_id)?;
+            projected.to_mut().input.metadata = metadata;
+        } else if !protocol.is_anthropic_family() && input_id.as_deref() == Some(host_id) {
+            let metadata = projected
+                .input
+                .metadata
+                .without_object_field("user_id")
+                .map_err(crate::upstream::error)?;
+            projected.to_mut().input.metadata = metadata;
+        }
+    }
+    // The host's automatic Claude mode belongs to its source codec. A
+    // different target uses its own automatic default and retains an explicit
+    // portable effort selection.
+    if !protocol.is_anthropic_family()
+        && projected.execution.automatic_thinking_budget
+        && projected.input.thinking.as_ref().is_some_and(|thinking| {
+            matches!(
+                thinking.mode,
+                Some(
+                    lingxi_llm_client::protocol::ThinkingMode::Adaptive
+                        | lingxi_llm_client::protocol::ThinkingMode::Enabled
+                )
+            ) || thinking.budget.is_some()
+        })
+    {
+        projected.to_mut().set_reasoning(None);
     }
     let reasoning_block = |block: &lingxi_llm_client::protocol::ContentBlock| {
         matches!(
@@ -238,6 +351,13 @@ fn selected_auth(entry: &RouteEntry, credential: Option<&Credential>) -> AuthStr
         }
     }
     entry.auth
+}
+
+fn uses_session_subscription(scope: &CredentialScope, credential: Option<&Credential>) -> bool {
+    scope.selects_anthropic_auth()
+        && matches!(credential,
+        Some(Credential::AnthropicOAuth { access_token, scopes }) if !access_token.is_empty()
+            && lingxi_llm_client::auth::oauth::anthropic::subscription_from_scopes(scopes))
 }
 
 fn plain_text_message_content_for_execution(execution: &crate::ExecutionContext) -> bool {
@@ -873,6 +993,17 @@ impl ModelRuntime {
             .then_some(route.profile_name)
     }
 
+    /// Independent web operations have already passed host region admission.
+    /// Bind the SDK to a region supported by this exact selected profile.
+    pub(crate) fn deepseek_web_region(&self, profile: &str) -> Result<crate::Region, LlmError> {
+        let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
+        let regions = &entry.profile.regions;
+        if regions.contains(&crate::Region::International) {
+            return Ok(crate::Region::International);
+        }
+        regions.first().copied().ok_or(LlmError::ModelUnavailable)
+    }
+
     /// Resolve an auxiliary hosted-search route without changing conversation routing.
     pub(crate) fn hosted_search_route(
         &self,
@@ -893,13 +1024,7 @@ impl ModelRuntime {
         }
         // The caller chooses a format supporting native search from the SDK's
         // declared alternatives. SDK resolution validates provider/account identity.
-        let catalog = lingxi_llm_client::client::RoutingCatalog::new(
-            self.routes
-                .values()
-                .map(|entry| entry.profile.clone())
-                .collect(),
-            lingxi_llm_client::protocol::Region::International,
-        );
+        let catalog = self.registry.routing_catalog();
         for format in source.profile.connection.protocol_profiles.keys() {
             if let Ok(selected) = catalog.resolve_in_with_protocol(
                 &route.request_model,
@@ -991,6 +1116,7 @@ impl ModelRuntime {
         Ok(Self {
             source: None,
             account_pool: None,
+            account_routing_version: None,
             cache: Arc::new(Default::default()),
             registry: Arc::new(registry),
             routes: Arc::new(routes),
@@ -1038,6 +1164,7 @@ impl ModelRuntime {
         current.source = None;
         current.credentials = template.credentials.clone();
         current.account_pool = template.account_pool.clone();
+        current.account_routing_version = None;
         current.capture_account_identities();
         current.cache = template.cache.clone();
         Arc::new(current)
@@ -1056,8 +1183,8 @@ impl ModelRuntime {
             return self.current().model_enabled(model, profile);
         }
         self.registry
-            .resolve_in(model, profile)
-            .is_ok_and(|route| !self.registry.model_disabled(&route))
+            .available_route_and_source(model, profile)
+            .is_ok()
     }
 
     pub fn reconfigured(&self, config: ClientConfig) -> Result<Self, LlmError> {
@@ -1080,8 +1207,25 @@ impl ModelRuntime {
         current.credentials = self.credentials.clone();
         current.account_pool = self.account_pool.clone();
         current.capture_account_identities_from_snapshot(snapshot);
+        current.account_routing_version = Some((
+            Arc::from(snapshot.store_scope.as_str()),
+            snapshot.config_revision,
+        ));
         current.cache = self.cache.clone();
         Ok(Arc::new(current))
+    }
+
+    /// Test the version of the authoritative directory used to build these routes.
+    #[must_use]
+    pub fn matches_account_routing_snapshot(
+        &self,
+        snapshot: &lingxi_core::host::provider_accounts::AccountSnapshot,
+    ) -> bool {
+        self.account_routing_version
+            .as_ref()
+            .is_some_and(|(scope, revision)| {
+                scope.as_ref() == snapshot.store_scope && *revision == snapshot.config_revision
+            })
     }
 
     /// Reuse a runtime that [`Self::reconfigured_with_account_snapshot`] built
@@ -1099,6 +1243,7 @@ impl ModelRuntime {
     /// Share one host account health domain across main, auxiliary and child calls.
     pub fn with_account_pool(mut self, pool: Arc<crate::accounts::AccountPool>) -> Self {
         self.account_pool = Some(pool);
+        self.account_routing_version = None;
         self.capture_account_identities();
         self
     }
@@ -1163,34 +1308,42 @@ impl ModelRuntime {
                         .clone()
                         .unwrap_or_else(|| profile.profile_name.clone())
                 });
-            let mut seen = std::collections::BTreeSet::new();
+            // The public availability row is keyed by wire ID. Several selectable
+            // display rows can share it, each admitting different account copies.
+            let mut by_wire = BTreeMap::new();
             for model in &profile.models {
-                if !seen.insert(model.request_model.clone()) {
+                let index = *by_wire
+                    .entry(model.request_model.as_str())
+                    .or_insert_with(|| {
+                        let index = result.len();
+                        result.push(AccountModelAvailability {
+                            provider_id: provider_id.clone(),
+                            execution_binding_id: profile.profile_name.clone(),
+                            model_id: model.request_model.clone(),
+                            eligible_account_ids: vec![],
+                            confirmed_account_ids: vec![],
+                            unverified_account_ids: vec![],
+                            forbidden_account_ids: vec![],
+                        });
+                        index
+                    });
+                let row = &mut result[index];
+                let Some(key) = runtime.row_selector(
+                    &profile.profile_name,
+                    &model.display_model,
+                    &model.request_model,
+                ) else {
                     continue;
-                }
-                let mut row = AccountModelAvailability {
-                    provider_id: provider_id.clone(),
-                    execution_binding_id: profile.profile_name.clone(),
-                    model_id: model.request_model.clone(),
-                    eligible_account_ids: vec![],
-                    confirmed_account_ids: vec![],
-                    unverified_account_ids: vec![],
-                    forbidden_account_ids: vec![],
                 };
-                if !runtime.model_enabled(&model.request_model, Some(&profile.profile_name)) {
-                    result.push(row);
-                    continue;
-                }
-                let coordinator = match runtime
-                    .account_coordinator(&model.request_model, Some(&profile.profile_name))
-                {
-                    Ok(Some(coordinator)) => coordinator,
-                    Ok(None) | Err(LlmError::AllAccountsUnavailable { .. }) => {
-                        result.push(row);
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
+                let coordinator =
+                    match runtime.account_coordinator(key, Some(&profile.profile_name)) {
+                        Ok(Some(coordinator)) => coordinator,
+                        Ok(None)
+                        | Err(
+                            LlmError::ModelUnavailable | LlmError::AllAccountsUnavailable { .. },
+                        ) => continue,
+                        Err(error) => return Err(error),
+                    };
                 for candidate in coordinator.candidate_profiles() {
                     let Some(account) = snapshot
                         .accounts
@@ -1199,16 +1352,16 @@ impl ModelRuntime {
                     else {
                         continue;
                     };
-                    if !account.enabled {
+                    if !account.enabled
+                        || row.eligible_account_ids.contains(&account.account_id)
+                        || row.forbidden_account_ids.contains(&account.account_id)
+                    {
                         continue;
                     }
-                    let target = runtime
-                        .registry
-                        .resolve_in(&model.request_model, Some(&candidate))?;
                     let entitlement = snapshot.model_entitlements.iter().find(|entry| {
                         entry.account_id == account.account_id
                             && entry.identity_generation == account.identity_generation
-                            && entry.model_id == target.request_model
+                            && entry.model_id == model.request_model
                     });
                     let forbidden = entitlement.is_some_and(|entry| {
                         entry.status == AccountModelEntitlementStatus::Forbidden
@@ -1228,7 +1381,7 @@ impl ModelRuntime {
                             && health.identity_generation == account.identity_generation
                             && match &health.scope_kind {
                                 AccountHealthScopeKind::Model => {
-                                    health.scope_id == target.request_model
+                                    health.scope_id == model.request_model
                                 }
                                 AccountHealthScopeKind::Endpoint => {
                                     endpoint.as_deref() == Some(health.scope_id.as_str())
@@ -1269,10 +1422,12 @@ impl ModelRuntime {
                         row.unverified_account_ids.push(account.account_id.clone());
                     }
                 }
-                result.push(row);
             }
         }
         Ok(result)
+    }
+    pub(crate) fn row_selector(&self, profile: &str, display: &str, wire: &str) -> Option<&str> {
+        crate::registry::row_selector(&self.routes.get(profile)?.profile, display, wire)
     }
     pub(crate) fn account_supports_request(
         &self,
@@ -1280,8 +1435,18 @@ impl ModelRuntime {
         hop: &crate::ConnectionHop,
     ) -> bool {
         self.registry
-            .resolve_in(&hop.request_model, Some(&hop.profile_name))
+            .resolve_in(hop.selector(), Some(&hop.profile_name))
             .is_ok_and(|route| {
+                if route.profile_name != hop.profile_name
+                    || route.request_model != hop.request_model
+                    || hop
+                        .display_model
+                        .as_ref()
+                        .is_some_and(|display| display != &route.display_model)
+                    || self.registry.model_disabled(&route)
+                {
+                    return false;
+                }
                 let mut capabilities = route.capabilities;
                 // Thinking is an existing optional degradation; hard capabilities
                 // (streaming, tools, structured output, media) must be supported.
@@ -1402,6 +1567,8 @@ impl ModelRuntime {
                 candidates.push(crate::ConnectionHop {
                     profile_name: name,
                     request_model: operation_model.into(),
+                    display_model: None,
+                    selected_key: None,
                 });
             }
         }
@@ -1422,13 +1589,22 @@ impl ModelRuntime {
                 earliest_recovery_ms: None,
             });
         }
+        // The pinned SDK sends each independent DeepSeek operation to a
+        // fixed first-party path, regardless of the account's chat base URL.
+        let operation_endpoint = match operation_model {
+            "web/search" => Some("https://api.deepseek.com/v1/tools/search"),
+            "web/fetch" => Some("https://api.deepseek.com/v1/tools/fetch"),
+            _ => None,
+        };
         let endpoints = self
             .routes
             .iter()
             .map(|(name, entry)| {
                 (
                     name.clone(),
-                    lingxi_llm_client::files::provider_file_endpoint_fingerprint(&entry.base_url),
+                    lingxi_llm_client::files::provider_file_endpoint_fingerprint(
+                        operation_endpoint.unwrap_or(&entry.base_url),
+                    ),
                 )
             })
             .collect();
@@ -1466,14 +1642,16 @@ impl ModelRuntime {
         let Some(pool) = self.account_pool.as_ref() else {
             return Ok(None);
         };
-        let mut route = self.registry.resolve_in(model, profile)?;
+        let (wire, source) = self.registry.available_route_and_source(model, profile)?;
+        let route = source.unwrap_or(wire);
+        let source = &route.profile_name;
         let selected = snapshot
             .accounts
             .iter()
-            .find(|account| route.profile_name == format!("account.{}", account.account_id));
-        if route.profile_name.starts_with("account.")
+            .find(|account| *source == format!("account.{}", account.account_id));
+        if source.starts_with("account.")
             && selected.is_none_or(|account| {
-                self.routes.get(&route.profile_name).is_none_or(|entry| {
+                self.routes.get(source).is_none_or(|entry| {
                     entry.identity_generation != Some(account.identity_generation)
                 })
             })
@@ -1483,7 +1661,7 @@ impl ModelRuntime {
                 earliest_recovery_ms: None,
             });
         }
-        let binding = selected.map_or(route.profile_name.as_str(), |account| {
+        let binding = selected.map_or(source.as_str(), |account| {
             account.execution_binding_id.as_str()
         });
         let logical_provider = selected
@@ -1495,15 +1673,19 @@ impl ModelRuntime {
                 earliest_recovery_ms: None,
             });
         };
-        let billing = self.routes.get(&route.profile_name).map(|entry| {
+        let billing_of = |route: &crate::ResolvedRoute| {
+            let entry = self.routes.get(&route.profile_name)?;
             entry
                 .profile
                 .models
                 .iter()
-                .find(|model| model.request_model == route.request_model)
-                .and_then(|model| model.billing_mode)
-                .unwrap_or(entry.profile.pricing.billing_mode)
-        });
+                .find(|model| {
+                    model.request_model == route.request_model
+                        && model.display_model == route.display_model
+                })
+                .map(|model| model.billing_mode_on(&entry.profile.pricing))
+        };
+        let billing = billing_of(&route).ok_or(LlmError::ModelUnavailable)?;
         let allow_metered = snapshot
             .provider_policies
             .get(&logical_provider)
@@ -1515,41 +1697,44 @@ impl ModelRuntime {
             .filter(|account| account.provider_id == logical_provider)
         {
             let account_profile = format!("account.{}", account.account_id);
-            if self
+            let Some(account_entry) = self
                 .routes
                 .get(&account_profile)
-                .is_none_or(|entry| entry.identity_generation != Some(account.identity_generation))
+                .filter(|entry| entry.identity_generation == Some(account.identity_generation))
+            else {
+                continue;
+            };
+            // Prefer the matching display/wire pair. Connections that label the
+            // same model differently may still use an unambiguous wire selector.
+            let exact_key = crate::registry::row_selector(
+                &account_entry.profile,
+                &route.display_model,
+                &route.request_model,
+            );
+            let selector = exact_key.unwrap_or(&route.request_model);
+            let Ok(target) = self.registry.resolve_in(selector, Some(&account_profile)) else {
+                continue;
+            };
+            if target.profile_name != account_profile
+                || target.request_model != route.request_model
+                || (exact_key.is_some() && target.display_model != route.display_model)
+                || self.registry.model_disabled(&target)
             {
                 continue;
             }
-            let target_billing = self.routes.get(&account_profile).map(|entry| {
-                entry
-                    .profile
-                    .models
-                    .iter()
-                    .find(|model| model.request_model == route.request_model)
-                    .and_then(|model| model.billing_mode)
-                    .unwrap_or(entry.profile.pricing.billing_mode)
-            });
-            let compatible = billing == target_billing
+            let Some(target_billing) = billing_of(&target) else {
+                continue;
+            };
+            if billing == target_billing
                 || (allow_metered
-                    && billing == Some(lingxi_llm_client::protocol::BillingMode::Subscription)
-                    && target_billing == Some(lingxi_llm_client::protocol::BillingMode::PerToken));
-            if !compatible {
-                continue;
-            }
-            // Equivalence comes from the binding canonical model id. Display
-            // labels and brand strings never establish model compatibility.
-            if let Ok(target) = self
-                .registry
-                .resolve_in(&route.request_model, Some(&account_profile))
+                    && billing == lingxi_llm_client::protocol::BillingMode::Subscription
+                    && target_billing == lingxi_llm_client::protocol::BillingMode::PerToken)
             {
-                if self.registry.model_disabled(&target) {
-                    continue;
-                }
                 hops.push(crate::ConnectionHop {
                     profile_name: account_profile,
                     request_model: target.request_model,
+                    selected_key: Some(selector.to_owned()),
+                    display_model: Some(target.display_model),
                 });
             }
         }
@@ -1574,7 +1759,6 @@ impl ModelRuntime {
                 earliest_recovery_ms: None,
             });
         }
-        route.connection_chain = hops;
         let endpoints = self
             .routes
             .iter()
@@ -1585,13 +1769,8 @@ impl ModelRuntime {
                 )
             })
             .collect();
-        let mut candidates = vec![crate::ConnectionHop {
-            profile_name: route.profile_name.clone(),
-            request_model: route.request_model.clone(),
-        }];
-        candidates.extend(route.connection_chain);
         let mut coordinator =
-            pool.coordinator_from_snapshot(&route.display_model, candidates, &endpoints, snapshot);
+            pool.coordinator_from_snapshot(&route.display_model, hops, &endpoints, snapshot);
         if let (Some(coordinator), Some(profile)) = (
             coordinator.as_mut(),
             profile.filter(|profile| profile.starts_with("account.")),
@@ -1837,6 +2016,20 @@ impl ModelRuntime {
         Ok(facts)
     }
 
+    /// Resolve a request and the profile that owns its authorized wire route.
+    pub(crate) fn resolve_model_binding(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<(crate::ResolvedRoute, String), LlmError> {
+        if self.source.is_some() {
+            return self.current().resolve_model_binding(model, profile);
+        }
+        let route = self.registry.resolve_in(model, profile)?;
+        let binding = self.registry.source_binding(model, profile, &route)?;
+        Ok((route, binding))
+    }
+
     /// Resolve the selected main route plus an optional same-profile vision delegate.
     pub fn resolve_media_route(
         &self,
@@ -1865,6 +2058,47 @@ impl ModelRuntime {
         Some(entry.profile.clone())
     }
 
+    /// Bind a child notice to the credential snapshot that counting and sealing
+    /// will reuse. Ordinary requests never resolve credentials through here.
+    pub(crate) async fn subagent_wrap_up_note(
+        &self,
+        request: &mut LlmRequest,
+        hint: &crate::service::BoundWrapUpHint,
+    ) -> Result<Option<(&'static str, lingxi_core::types::MessageId)>, LlmError> {
+        let route = self.resolve_available_route(request)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let scope = credential_scope(entry, &route.profile_name);
+        if !hint.may_match(&scope) {
+            return Ok(None);
+        }
+        let shared = request
+            .execution
+            .request_credentials
+            .get_or_insert_with(Default::default);
+        let auth = crate::execution::HostAuthenticator::for_request(
+            self.clone(),
+            route.profile_name.clone(),
+            None,
+            Default::default(),
+        )
+        .with_request_credentials(Some(shared));
+        let credential = auth.captured_credential().await?;
+        let native = route.provider_id == ProviderId::AnthropicFirstParty
+            && entry.effective_protocol(&route) == ProtocolFamily::AnthropicMessages;
+        let selected = credential.as_ref().filter(|_| native);
+        Ok(hint
+            .note_for(
+                &scope,
+                selected_auth(entry, selected),
+                uses_session_subscription(&scope, selected),
+                &auth,
+            )
+            .await)
+    }
+
     /// Resolve, validate, encode, and authenticate a request.
     ///
     /// The returned provider request may carry credentials in its headers;
@@ -1883,19 +2117,22 @@ impl ModelRuntime {
         request: &LlmRequest,
         now: std::time::SystemTime,
     ) -> Result<PreparedLlmCall, LlmError> {
-        self.prepare_internal(request, now, None, true).await
+        self.prepare_internal(request, now, None, true, Default::default())
+            .await
     }
 
     pub(crate) async fn prepare_on(
         &self,
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
+        dispatch: crate::execution::PreparationDispatchPolicy,
     ) -> Result<PreparedLlmCall, LlmError> {
         self.prepare_internal(
             request,
             std::time::SystemTime::now(),
             Some(transport),
             false,
+            dispatch,
         )
         .await
     }
@@ -1908,16 +2145,29 @@ impl ModelRuntime {
         now: std::time::SystemTime,
         transport: Option<Arc<dyn Transport>>,
         authenticate: bool,
+        dispatch: crate::execution::PreparationDispatchPolicy,
     ) -> crate::BoxFuture<'a, Result<PreparedLlmCall, LlmError>> {
         if self.source.is_some() {
             let current = self.current();
             return Box::pin(async move {
                 current
-                    .prepare_internal_impl(request, now, transport, authenticate)
+                    .prepare_internal_impl(request, now, transport, authenticate, dispatch)
                     .await
             });
         }
-        Box::pin(self.prepare_internal_impl(request, now, transport, authenticate))
+        Box::pin(self.prepare_internal_impl(request, now, transport, authenticate, dispatch))
+    }
+
+    pub(crate) fn resolve_available_route(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<crate::ResolvedRoute, LlmError> {
+        if self.source.is_some() {
+            return self.current().resolve_available_route(request);
+        }
+        self.registry
+            .available_route_and_source(&request.input.model, request.profile.as_deref())
+            .map(|(route, _)| route)
     }
 
     async fn prepare_internal_impl(
@@ -1926,14 +2176,9 @@ impl ModelRuntime {
         now: std::time::SystemTime,
         transport: Option<Arc<dyn Transport>>,
         authenticate: bool,
+        dispatch: crate::execution::PreparationDispatchPolicy,
     ) -> Result<PreparedLlmCall, LlmError> {
-        let resolved_route = self
-            .registry
-            .resolve_in(&request.input.model, request.profile.as_deref())?;
-
-        if self.registry.model_disabled(&resolved_route) {
-            return Err(LlmError::ModelUnavailable);
-        }
+        let resolved_route = self.resolve_available_route(request)?;
 
         let effective_protocol =
             self.protocol_for_model(&request.input.model, request.profile.as_deref())?;
@@ -1983,6 +2228,7 @@ impl ModelRuntime {
             )
             .with_request_credentials(
                 (request.execution.selected_account.is_some()
+                    || request.execution.wrap_up_credential_bound
                     || (resolved_route.provider_id == ProviderId::AnthropicFirstParty
                         && entry.protocol == ProtocolFamily::AnthropicMessages))
                     .then_some(request.execution.request_credentials.as_ref())
@@ -1998,6 +2244,29 @@ impl ModelRuntime {
             .prompt_cache
             .as_ref()
             .map(|context| (context.current_account_epoch)());
+        let prompt_cache_scope = credential_scope(entry, &resolved_route.profile_name);
+        let native_thinking_binding_controls_attempt = if effective_protocol.is_anthropic_family() {
+            request
+                .execution
+                .native_tbc_routes
+                .clone()
+                .or_else(|| {
+                    request
+                        .execution
+                        .thinking_recovery_scope
+                        .as_ref()
+                        .map(|scope| scope.native_thinking_binding_controls_routes())
+                })
+                .map(|routes| {
+                    routes.attempt(
+                        prompt_cache_scope.clone(),
+                        request.execution.selected_account.clone(),
+                        prompt_cache_account_epoch_before.unwrap_or_default(),
+                    )
+                })
+        } else {
+            None
+        };
         // Native h3() can be proven false from a selected non-empty API key.
         // Capture through this request's HostAuthenticator OnceCell before the
         // TBC beta policy runs; final SDK signing reuses the same snapshot.
@@ -2015,7 +2284,8 @@ impl ModelRuntime {
             crate::model::thinking_binding_controls::first_party_h3_from_selected_credential(
                 captured_credential.as_ref(),
             );
-        let prompt_cache_scope = credential_scope(entry, &resolved_route.profile_name);
+        let uses_session_subscription =
+            uses_session_subscription(&prompt_cache_scope, captured_credential.as_ref());
         // Fast mode is a first-party Anthropic request property, not a generic
         // Anthropic-wire feature. Resolve the route before encoding and strip
         // it for custom compatible endpoints, cloud transports, and models
@@ -2243,6 +2513,11 @@ impl ModelRuntime {
             };
             let is_subscriber = subscriber == PromptCacheSubscriberState::Subscriber;
             let mut cache_policy = context.policy.clone();
+            if effective_protocol.is_anthropic_family() {
+                if let Some(load_settings) = &context.ttl_settings {
+                    cache_policy.prompt_cache_ttl_settings = load_settings()?;
+                }
+            }
             cache_policy.prompt_cache_ttl_inputs.subscriber = subscriber;
             cache_policy.prompt_cache_ttl_inputs.is_using_overage = is_subscriber
                 && !account_epoch_stale
@@ -2304,7 +2579,6 @@ impl ModelRuntime {
                 account_epoch,
                 account_epoch_stale,
                 is_subscriber,
-                pending_overage: context.pending_overage.clone(),
             });
         }
 
@@ -2314,34 +2588,30 @@ impl ModelRuntime {
         // selected and attached the user-message breakpoint.
         if let Some(effort) = native_per_turn_effort {
             let request_for_encoding = owned.get_or_insert_with(|| request.clone());
-            let has_unfinished_user_turn = request_for_encoding
-                .input
-                .messages
+            use lingxi_llm_client::protocol::MessageRole;
+
+            let messages = &mut request_for_encoding.input.messages;
+            if let Some(user_index) = messages
                 .iter()
-                .rposition(|message| message.role == lingxi_llm_client::protocol::MessageRole::User)
-                .is_some_and(|user_index| {
-                    !request_for_encoding.input.messages[user_index + 1..]
-                        .iter()
-                        .any(|message| {
-                            message.role == lingxi_llm_client::protocol::MessageRole::Assistant
-                        })
-                });
-            let has_existing_per_turn_effort = request_for_encoding
-                .input
-                .messages
-                .iter()
-                .rposition(|message| message.role == lingxi_llm_client::protocol::MessageRole::User)
-                .is_some_and(|user_index| {
-                    request_for_encoding.input.messages[user_index + 1..]
-                        .iter()
-                        .any(|message| {
-                            message
+                .rposition(|row| row.role == MessageRole::User)
+            {
+                let active = &mut messages[user_index + 1..];
+                if !active.iter().any(|row| row.role == MessageRole::Assistant) {
+                    if let Some(row) = active.iter_mut().rev().find(|row| {
+                        row.role == MessageRole::System
+                            && row
                                 .anthropic_options()
                                 .is_some_and(|options| options.effort.is_some())
-                        })
-                });
-            if has_unfinished_user_turn && !has_existing_per_turn_effort {
-                append_native_per_turn_effort_marker(request_for_encoding, effort);
+                            && (effective_protocol != ProtocolFamily::FoundryClaude
+                                || crate::service::is_per_turn_effort_marker(row))
+                    }) {
+                        let mut options = row.anthropic_options().cloned().unwrap_or_default();
+                        options.effort = Some(effort);
+                        *row = row.clone().with_anthropic_options(options);
+                    } else {
+                        append_native_per_turn_effort_marker(request_for_encoding, effort);
+                    }
+                }
             }
         }
         let request = owned.as_ref().unwrap_or(request);
@@ -2369,15 +2639,16 @@ impl ModelRuntime {
             encoding_request,
             transport,
             authenticator.clone(),
-            (
-                if request.stream {
+            crate::execution::PreparationOptions {
+                mode: if request.stream {
                     lingxi_llm_client::RequestMode::Stream
                 } else {
                     lingxi_llm_client::RequestMode::Complete
                 },
-                fast_mode_allowed
+                fast_capability: fast_mode_allowed
                     .then_some(lingxi_llm_client::protocol::CapabilitySupport::Supported),
-            ),
+                dispatch,
+            },
         )
         .await
         .map_err(|error| {
@@ -2420,9 +2691,13 @@ impl ModelRuntime {
         }
 
         Ok(PreparedLlmCall {
+            credential_scope: prompt_cache_scope.clone(),
+            request_auth,
+            uses_session_subscription,
             local_tool_search_admitted: request.execution.local_tool_search_admitted,
             request_session_id: request.execution.request_session_id.clone(),
             api_attempts_left: request.execution.api_attempts_left.clone(),
+            request_dispatch_admission: request.execution.request_dispatch_admission.clone(),
             computer_binding,
             computer_submission: request.execution.computer_submission.clone(),
             server_fallback_lane: None,
@@ -2470,11 +2745,7 @@ impl ModelRuntime {
                 .as_ref()
                 .map(|scope| scope.beta_rejections())
                 .unwrap_or_default(),
-            native_thinking_binding_controls_attempt: request
-                .execution
-                .thinking_recovery_scope
-                .as_ref()
-                .map(|scope| scope.native_thinking_binding_controls_attempt()),
+            native_thinking_binding_controls_attempt,
             thinking_recovery_scope: request.execution.thinking_recovery_scope.clone(),
             authenticator,
             fast_account_binding: None,
@@ -2517,62 +2788,13 @@ impl ModelRuntime {
             return Err(crate::model_attempt::missing_hooks_error());
         }
         let mut prepared = self
-            .prepare_internal(
-                request,
-                std::time::SystemTime::now(),
-                Some(transport.clone()),
-                false,
-            )
+            .prepare_on(request, transport.clone(), Default::default())
             .await?;
         self.seal_prepared(&mut prepared).await?;
-        let admission = request.execution.request_dispatch_admission.as_ref();
-        if prepared.computer_submission.is_some()
-            && admission.is_some_and(|admission| !admission.is_admitted())
-        {
-            return Err(LlmError::RequestDispatchRejected {
-                prior_dispatch: false,
-            });
-        }
-        prepared.before_computer_submit().await?;
         let call = prepared.wire_call.take().expect("sealed");
-        let raw = transport.clone();
-        let api_attempts_left = request.execution.api_attempts_left.clone();
-        let mut callback_error = None;
-        let received = call
-            .dispatch_once_using(raw.as_ref(), || {
-                if admission.is_some_and(|admission| !admission.is_admitted()) {
-                    let error = LlmError::RequestDispatchRejected {
-                        prior_dispatch: false,
-                    };
-                    callback_error = Some(error.clone());
-                    return Err(crate::execution::wire_error(error));
-                }
-                let reservation = if let Some(budget) = api_attempts_left.as_ref() {
-                    let Some(reservation) = budget.reserve() else {
-                        callback_error = Some(LlmError::ApiAttemptsExhausted);
-                        return Err(crate::execution::wire_error(LlmError::ApiAttemptsExhausted));
-                    };
-                    Some(reservation)
-                } else {
-                    None
-                };
-                if let Some(reservation) = reservation {
-                    reservation.commit();
-                }
-                Ok(())
-            })
-            .await;
-        let received = match received {
-            Ok(received) => received,
-            Err(error) => {
-                if callback_error.is_some() {
-                    if let Some(submission) = prepared.computer_submission.as_ref() {
-                        submission.not_submitted().await?;
-                    }
-                }
-                return Err(callback_error.unwrap_or_else(|| crate::upstream::error(error)));
-            }
-        };
+        let received = prepared
+            .dispatch_unregistered(call, transport.as_ref(), None)
+            .await?;
         let collected = received.collect().await.map_err(crate::upstream::error)?;
         let decoded = crate::execution::decode(&collected);
         collected.finish().await;
@@ -2592,46 +2814,13 @@ impl ModelRuntime {
             });
         }
         let mut prepared = self
-            .prepare_internal(
-                request,
-                std::time::SystemTime::now(),
-                Some(transport.clone()),
-                false,
-            )
+            .prepare_on(request, transport.clone(), Default::default())
             .await?;
         self.seal_prepared(&mut prepared).await?;
-        prepared.before_computer_submit().await?;
         let call = prepared.wire_call.take().expect("sealed");
-        let api_attempts_left = request.execution.api_attempts_left.clone();
-        let mut callback_error = None;
-        let received = call
-            .dispatch_once_using(transport.as_ref(), || {
-                let reservation = if let Some(budget) = api_attempts_left.as_ref() {
-                    let Some(reservation) = budget.reserve() else {
-                        callback_error = Some(LlmError::ApiAttemptsExhausted);
-                        return Err(crate::execution::wire_error(LlmError::ApiAttemptsExhausted));
-                    };
-                    Some(reservation)
-                } else {
-                    None
-                };
-                if let Some(reservation) = reservation {
-                    reservation.commit();
-                }
-                Ok(())
-            })
-            .await;
-        let received = match received {
-            Ok(received) => received,
-            Err(error) => {
-                if callback_error.is_some() {
-                    if let Some(submission) = prepared.computer_submission.as_ref() {
-                        submission.not_submitted().await?;
-                    }
-                }
-                return Err(callback_error.unwrap_or_else(|| crate::upstream::error(error)));
-            }
-        };
+        let received = prepared
+            .dispatch_unregistered(call, transport.as_ref(), None)
+            .await?;
         model_stream(received).await
     }
     pub async fn preconnect_websocket(
@@ -2649,12 +2838,7 @@ impl ModelRuntime {
         let mut req = request.clone();
         req.stream = true;
         let mut prepared = self
-            .prepare_internal(
-                &req,
-                std::time::SystemTime::now(),
-                Some(transport.clone()),
-                false,
-            )
+            .prepare_on(&req, transport.clone(), Default::default())
             .await?;
         if !matches!(
             prepared.provider_request.stream_transport,
@@ -2680,12 +2864,7 @@ impl ModelRuntime {
         let mut req = request.clone();
         req.stream = true;
         let prepared = self
-            .prepare_internal(
-                &req,
-                std::time::SystemTime::now(),
-                Some(transport.clone()),
-                false,
-            )
+            .prepare_on(&req, transport.clone(), Default::default())
             .await?;
         self.prewarm_prepared_websocket(prepared, transport, session)
             .await
@@ -2738,12 +2917,7 @@ impl ModelRuntime {
             });
         }
         let prepared = self
-            .prepare_internal(
-                request,
-                std::time::SystemTime::now(),
-                Some(transport.clone()),
-                false,
-            )
+            .prepare_on(request, transport.clone(), Default::default())
             .await?;
         let (_prepared, received) = self
             .dispatch_unregistered_stream(prepared, transport, session, false)
@@ -2789,41 +2963,9 @@ impl ModelRuntime {
             .seal()
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
-        prepared.before_computer_submit().await?;
-        let api_attempts_left = prepared.api_attempts_left.clone();
-        let mut callback_rejected = false;
-        let mut callback_error = None;
-        let dispatch = || {
-            let reservation = match api_attempts_left.as_ref() {
-                Some(budget) => match budget.reserve() {
-                    Some(reservation) => Some(reservation),
-                    None => {
-                        callback_rejected = true;
-                        callback_error = Some(LlmError::ApiAttemptsExhausted);
-                        return Err(crate::execution::wire_error(LlmError::ApiAttemptsExhausted));
-                    }
-                },
-                None => None,
-            };
-            if let Some(reservation) = reservation {
-                reservation.commit();
-            }
-            Ok(())
-        };
-        let received = if websocket {
-            session
-                .dispatch_using(call, dispatch, Some(raw.as_ref()))
-                .await
-        } else {
-            call.dispatch_once_using(raw.as_ref(), dispatch).await
-        };
-        if callback_rejected {
-            if let Some(submission) = prepared.computer_submission.as_ref() {
-                submission.not_submitted().await?;
-            }
-        }
-        let received = received
-            .map_err(|error| callback_error.unwrap_or_else(|| crate::upstream::error(error)))?;
+        let received = prepared
+            .dispatch_unregistered(call, raw.as_ref(), websocket.then_some(session))
+            .await?;
         Ok((prepared, received))
     }
 
@@ -2835,7 +2977,13 @@ impl ModelRuntime {
     ) -> Result<ProviderRequest, LlmError> {
         let captured = self.source.as_ref().map(|_| self.current());
         let runtime = captured.as_deref().unwrap_or(self);
-        let (draft, mut host, failure) = runtime.count_draft(request, None).await?;
+        let route = runtime.resolve_available_route(request)?;
+        let entry = runtime
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let (draft, mut host, failure, _) =
+            runtime.count_draft(request, &route, entry, None).await?;
         let call = crate::execution::seal(draft, &host, None)
             .await
             .map_err(|error| {
@@ -2918,25 +3066,21 @@ impl ModelRuntime {
     async fn count_draft(
         &self,
         request: &LlmRequest,
+        route: &crate::ResolvedRoute,
+        entry: &RouteEntry,
         transport: Option<Arc<dyn Transport>>,
     ) -> Result<
         (
             lingxi_llm_client::RequestDraft,
             ProviderRequest,
             crate::execution::HostFailure,
+            Option<u64>,
         ),
         LlmError,
     > {
-        let route = self
-            .registry
-            .resolve_in(&request.input.model, request.profile.as_deref())?;
-        let entry = self
-            .routes
-            .get(&route.profile_name)
-            .ok_or(LlmError::ModelUnavailable)?;
-        let protocol = entry.effective_protocol(&route);
+        let protocol = entry.effective_protocol(route);
         crate::anthropic_extra_body::validate(request, protocol)?;
-        let visible = project_route_input(request, protocol, &route, &entry.profile, entry.auth)?;
+        let visible = project_route_input(request, protocol, route, &entry.profile, entry.auth)?;
         let request = visible.as_ref();
         validate_capabilities(request, route.capabilities)?;
         if !matches!(protocol, ProtocolFamily::AnthropicMessages) {
@@ -2958,6 +3102,7 @@ impl ModelRuntime {
             .with_request_credentials(request.execution.request_credentials.as_ref()),
         );
         let captured = auth.captured_credential().await?;
+        let credential_revision = auth.captured_credential_revision();
         let request_auth = selected_auth(entry, captured.as_ref());
         let mut profile = entry.profile.clone();
         profile.auth = request_auth;
@@ -2965,11 +3110,15 @@ impl ModelRuntime {
             &self.cache,
             profile,
             request_auth,
-            &route,
+            route,
             request,
             transport,
             auth,
-            (lingxi_llm_client::RequestMode::CountTokens, None),
+            crate::execution::PreparationOptions {
+                mode: lingxi_llm_client::RequestMode::CountTokens,
+                fast_capability: None,
+                dispatch: Default::default(),
+            },
         )
         .await?;
         crate::prompt_projection::apply_count_output_format(request, &mut host.body_json)?;
@@ -3013,7 +3162,7 @@ impl ModelRuntime {
         let betas = crate::model::betas::assemble_beta_header(
             crate::model::betas::Provider::Anthropic,
             crate::model::betas::Endpoint::CountTokens,
-            &crate::model::betas::BetaContext::for_model(route.request_model),
+            &crate::model::betas::BetaContext::for_model(&route.request_model),
         );
         let betas = betas
             .split(',')
@@ -3028,18 +3177,18 @@ impl ModelRuntime {
             &betas,
         )
         .map_err(crate::upstream::error)?;
-        Ok((draft, host, failure))
+        Ok((draft, host, failure, credential_revision))
     }
     pub(crate) async fn count_tokens_exact(
         &self,
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
+        scope: Option<&crate::model::retry_scope::ModelCallRetryScope>,
+        before_dispatch: impl FnOnce() -> Result<(), LlmError> + Send,
     ) -> Result<Option<u64>, LlmError> {
         let captured = self.source.as_ref().map(|_| self.current());
         let runtime = captured.as_deref().unwrap_or(self);
-        let route = runtime
-            .registry
-            .resolve_in(&request.input.model, request.profile.as_deref())?;
+        let route = runtime.resolve_available_route(request)?;
         let entry = runtime
             .routes
             .get(&route.profile_name)
@@ -3053,8 +3202,8 @@ impl ModelRuntime {
         // Counting is an auxiliary operation outside the generation watchdog.
         // Bound preparation/authentication, dispatch and response collection together.
         tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            let (draft, host, failure) = runtime
-                .count_draft(request, Some(transport.clone()))
+            let (draft, host, failure, credential_revision) = runtime
+                .count_draft(request, &route, entry, Some(transport.clone()))
                 .await?;
             let call = crate::execution::seal(draft, &host, None)
                 .await
@@ -3065,10 +3214,33 @@ impl ModelRuntime {
                         .take()
                         .unwrap_or(error)
                 })?;
+            let count_key = scope.map(|scope| {
+                let key = exact_count_key(&call, entry.identity_generation, credential_revision);
+                (scope, key)
+            });
+            if let Some(tokens) = count_key.and_then(|(scope, key)| scope.exact_context_count(key))
+            {
+                return Ok(Some(tokens));
+            }
+            let mut admission_error = None;
             let collected = call
-                .dispatch_once_using(transport.as_ref(), || Ok(()))
+                .dispatch_once_using(transport.as_ref(), || {
+                    let admitted = before_dispatch().and_then(|()| {
+                        if let Some(budget) = request.execution.api_attempts_left.as_ref() {
+                            budget
+                                .reserve()
+                                .ok_or(LlmError::ApiAttemptsExhausted)?
+                                .commit();
+                        }
+                        Ok(())
+                    });
+                    admitted.map_err(|error| {
+                        admission_error = Some(error.clone());
+                        crate::execution::wire_error(error)
+                    })
+                })
                 .await
-                .map_err(crate::upstream::error)?
+                .map_err(|error| admission_error.unwrap_or_else(|| crate::upstream::error(error)))?
                 .collect()
                 .await
                 .map_err(crate::upstream::error)?;
@@ -3077,6 +3249,9 @@ impl ModelRuntime {
                 .map(Some)
                 .map_err(crate::upstream::error);
             collected.finish().await;
+            if let (Ok(Some(tokens)), Some((scope, key))) = (&result, count_key) {
+                scope.record_exact_context_count(key, *tokens);
+            }
             result
         })
         .await
@@ -3360,9 +3535,13 @@ impl PlannedNativeBetaContext {
 }
 
 pub struct PreparedLlmCall {
+    pub(crate) credential_scope: CredentialScope,
+    pub(crate) request_auth: AuthStrategy,
+    pub(crate) uses_session_subscription: bool,
     pub(crate) local_tool_search_admitted: bool,
     pub(crate) request_session_id: Option<String>,
     pub(crate) api_attempts_left: Option<crate::ApiAttemptsLeft>,
+    request_dispatch_admission: Option<crate::RequestDispatchAdmission>,
     pub(crate) computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
     pub(crate) computer_submission: Option<Arc<crate::computer::ComputerReceiptSubmission>>,
     pub(crate) server_fallback_lane:
@@ -3649,7 +3828,6 @@ pub(crate) struct PreparedPromptCacheContext {
     pub account_epoch: u64,
     pub account_epoch_stale: bool,
     pub is_subscriber: bool,
-    pub pending_overage: Arc<Mutex<Option<crate::PendingPromptCacheObservation>>>,
 }
 
 /// Keep provider execution canonical. History projection is the service edge.
@@ -3900,11 +4078,9 @@ impl ModelRuntime {
 }
 
 impl ModelRuntime {
-    pub(crate) async fn prepare_shared_stream(
-        &self,
-        mut prepared: PreparedLlmCall,
-        session: &mut lingxi_llm_client::ConversationSession,
-    ) -> Result<PreparedLlmCall, LlmError> {
+    pub(crate) fn shared_stream_draft(
+        prepared: &mut PreparedLlmCall,
+    ) -> Result<lingxi_llm_client::RequestDraft, LlmError> {
         let mut draft = prepared
             .wire_draft
             .take()
@@ -3928,6 +4104,15 @@ impl ModelRuntime {
         draft.set_native_anthropic_thinking_binding_controls_beta_requested(
             prepared.native_thinking_binding_controls_beta_requested,
         );
+        Ok(draft)
+    }
+
+    pub(crate) async fn prepare_shared_stream(
+        &self,
+        mut prepared: PreparedLlmCall,
+        mut draft: lingxi_llm_client::RequestDraft,
+        session: &mut lingxi_llm_client::ConversationSession,
+    ) -> Result<PreparedLlmCall, LlmError> {
         session
             .prepare(&mut draft)
             .await
@@ -3966,7 +4151,8 @@ impl ModelRuntime {
         &self,
         mut prepared: PreparedLlmCall,
         session: &mut lingxi_llm_client::ConversationSession,
-        on_dispatch: &mut (dyn FnMut() -> Result<(), LlmError> + Send),
+        on_dispatch: &mut (dyn FnMut(&PreparedLlmCall) -> Result<Option<u64>, LlmError> + Send),
+        on_headers: &mut (dyn FnMut(Option<u64>, &lingxi_llm_client::ReceivedCall) + Send),
     ) -> Result<
         (
             PreparedLlmCall,
@@ -3981,21 +4167,25 @@ impl ModelRuntime {
             .ok_or_else(|| LlmError::InvalidRequest {
                 message: "request must be sealed before dispatch".into(),
             })?;
-        let mut callback_rejected = false;
         let mut callback_error = None;
+        let mut submission = prepared.prepare_computer_submission().await?;
+        let mut rate_limit_binding = None;
         let mark = || {
-            on_dispatch().map_err(|error| {
-                callback_rejected = true;
+            rate_limit_binding = on_dispatch(&prepared).map_err(|error| {
                 callback_error = Some(error.clone());
                 crate::execution::wire_error(error)
-            })
-        };
-        prepared.before_computer_submit().await?;
-        let received = session.dispatch(call, mark).await;
-        if callback_rejected {
-            if let Some(submission) = prepared.computer_submission.as_ref() {
-                submission.not_submitted().await?;
+            })?;
+            if let Some(guard) = submission.as_mut() {
+                guard.dispatched();
             }
+            Ok(())
+        };
+        let received = session.dispatch(call, mark).await;
+        if let Ok(received) = &received {
+            on_headers(rate_limit_binding, received);
+        }
+        if let Some(guard) = submission.as_mut() {
+            guard.close().await?;
         }
         let mut received = received
             .map_err(|error| callback_error.unwrap_or_else(|| crate::upstream::error(error)))?;
@@ -4093,11 +4283,77 @@ impl ModelRuntime {
 }
 
 impl PreparedLlmCall {
-    pub(crate) async fn before_computer_submit(&self) -> Result<(), LlmError> {
-        if let Some(submission) = self.computer_submission.as_ref() {
-            submission.before_submit().await?;
+    async fn dispatch_unregistered(
+        &self,
+        call: lingxi_llm_client::PreparedCall,
+        transport: &dyn Transport,
+        session: Option<&mut ResponsesSession>,
+    ) -> Result<lingxi_llm_client::ReceivedCall, LlmError> {
+        let check_admission = || {
+            if self
+                .request_dispatch_admission
+                .as_ref()
+                .is_some_and(|gate| !gate.is_admitted())
+            {
+                Err(LlmError::RequestDispatchRejected {
+                    prior_dispatch: false,
+                })
+            } else {
+                Ok(())
+            }
+        };
+        if self.computer_submission.is_some() {
+            check_admission()?;
+            if self
+                .api_attempts_left
+                .as_ref()
+                .is_some_and(|budget| budget.remaining() == 0)
+            {
+                return Err(LlmError::ApiAttemptsExhausted);
+            }
         }
-        Ok(())
+        let mut submission = self.prepare_computer_submission().await?;
+        let mut callback_error = None;
+        let dispatch = || {
+            let admission = check_admission().and_then(|()| {
+                if let Some(budget) = &self.api_attempts_left {
+                    budget
+                        .reserve()
+                        .ok_or(LlmError::ApiAttemptsExhausted)?
+                        .commit();
+                }
+                Ok(())
+            });
+            admission.map_err(|error| {
+                callback_error = Some(error.clone());
+                crate::execution::wire_error(error)
+            })?;
+            if let Some(guard) = submission.as_mut() {
+                guard.dispatched();
+            }
+            Ok(())
+        };
+        let received = match session {
+            Some(session) => {
+                session
+                    .dispatch_using(call, dispatch, Some(transport))
+                    .await
+            }
+            None => call.dispatch_once_using(transport, dispatch).await,
+        };
+        if let Some(guard) = submission.as_mut() {
+            guard.close().await?;
+        }
+        received.map_err(|error| callback_error.unwrap_or_else(|| crate::upstream::error(error)))
+    }
+
+    pub(crate) async fn prepare_computer_submission(
+        &self,
+    ) -> Result<Option<crate::computer::PendingComputerSubmission>, LlmError> {
+        match &self.computer_submission {
+            Some(submission) => Ok(Some(submission.prepare_dispatch().await?)),
+            None => Ok(None),
+        }
     }
     /// Exact model prices retained before the physical generation dispatch.
     pub fn pricing_snapshot(&self) -> Option<lingxi_llm_client::FrozenPricing> {
@@ -4400,6 +4656,7 @@ mod shared_client_regression {
                 secret_ref: "acct.a".into(),
             },
             enabled: true,
+            additional_openai_models: false,
             user_priority: 0,
             config_revision: 1,
             identity_generation: 1,

@@ -4,13 +4,15 @@
 
 use std::collections::BTreeMap;
 
-use llm_runtime::{ClientConfig, ProviderId};
+use llm_runtime::{ClientConfig, ConfiguredFallbackTarget, ProviderId};
 
 /// Per-model cross-provider failover entry (one hop in a `ChainConfig` chain).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainEntry {
     /// Resolved provider identity for this hop.
     pub provider_id: ProviderId,
+    /// Exact configured profile that resolved this hop.
+    pub profile_name: String,
     /// Provider-local model id sent on the wire for this hop.
     pub model: String,
 }
@@ -25,6 +27,14 @@ pub struct RetryOverride {
     pub backoff_ms: u64,
 }
 
+impl RetryOverride {
+    /// Retries available after the initial dispatch on a chain entry.
+    #[must_use]
+    pub const fn max_retries(&self) -> u32 {
+        self.max_attempts.saturating_sub(1)
+    }
+}
+
 /// Parsed routing config: aliases, fallback chains, and the retry override.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChainConfig {
@@ -34,6 +44,27 @@ pub struct ChainConfig {
     pub chains: BTreeMap<String, Vec<ChainEntry>>,
     /// Optional per-entry retry budget override.
     pub retry: Option<RetryOverride>,
+}
+
+impl ChainConfig {
+    /// Convert assembled chains into runtime routes, including their owning profiles.
+    #[must_use]
+    pub fn fallback_overrides(&self) -> BTreeMap<String, Vec<ConfiguredFallbackTarget>> {
+        self.chains
+            .iter()
+            .map(|(source, entries)| {
+                let targets = entries
+                    .iter()
+                    .map(|entry| ConfiguredFallbackTarget::Profile {
+                        provider_id: entry.provider_id.clone(),
+                        profile_name: entry.profile_name.clone(),
+                        model: entry.model.clone(),
+                    })
+                    .collect();
+                (source.clone(), targets)
+            })
+            .collect()
+    }
 }
 
 /// Credential kind recorded per profile in `Assembled.credential_sources`.
@@ -122,9 +153,11 @@ mod tests {
             provider_id: ProviderId::OpenAICompatible {
                 name: "deepseek".to_string(),
             },
+            profile_name: "deepseek:cn".to_string(),
             model: "deepseek-chat".to_string(),
         };
         assert_eq!(e.model, "deepseek-chat");
+        assert_eq!(e.profile_name, "deepseek:cn");
         assert_eq!(
             e.provider_id,
             ProviderId::OpenAICompatible {

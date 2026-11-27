@@ -1242,14 +1242,16 @@ impl ConversationOrchestrator {
         // that reply enters session.history. Append the live suffix so a Mod
         // fork observes the assistant reply that prompted its hook while the
         // captured prefix keeps the same message bytes.
-        let live_messages = self.session.lock().await.model_context_history();
-        let prefix_len = params.fork_context_messages.len();
-        if live_messages.len() > prefix_len
-            && live_messages[..prefix_len] == params.fork_context_messages
         {
-            params
+            let session = self.session.lock().await;
+            let mut live = session.iter_model_context_history();
+            if params
                 .fork_context_messages
-                .extend(live_messages.into_iter().skip(prefix_len));
+                .iter()
+                .all(|cached| live.next() == Some(cached))
+            {
+                params.fork_context_messages.extend(live.cloned());
+            }
         }
         // Claude Code's hAt removes unanswered tool uses from the trailing
         // assistant run, while retaining any text/reasoning in those messages.
@@ -1909,7 +1911,14 @@ impl ConversationOrchestrator {
             let params = match slot.get_last().await {
                 Some(params) => Some(params),
                 None => {
-                    if self.session.lock().await.model_context_history().is_empty() {
+                    if self
+                        .session
+                        .lock()
+                        .await
+                        .iter_model_context_history()
+                        .next()
+                        .is_none()
+                    {
                         None
                     } else {
                         let system = self.provider_side_query_system_prompt().await?;
@@ -2500,6 +2509,16 @@ impl ConversationOrchestrator {
         Some(t.snapshot().await)
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    fn nano_usd_to_usd(total_nano_usd: u64) -> f64 {
+        (total_nano_usd as f64) / 1_000_000_000.0
+    }
+
+    pub(super) async fn session_cost_usd(&self, session_id: SessionId) -> Option<f64> {
+        let tracker = self.model_runtime.cost_tracker.as_ref()?.scoped(session_id);
+        Some(Self::nano_usd_to_usd(tracker.total_nano_usd().await))
+    }
+
     /// Seed the wired [`cost::CostTracker`]'s cumulative total from a restored
     /// session (resume). No-op when no tracker is wired. Paired with the CLI
     /// mount's project-config `lastCost`/`lastSessionId` persistence so a
@@ -2560,8 +2579,7 @@ impl ConversationOrchestrator {
             .model_runtime
             .api_calls_recorded
             .load(std::sync::atomic::Ordering::SeqCst);
-        #[allow(clippy::cast_precision_loss)]
-        let total_usd = (state.total_nano_usd as f64) / 1_000_000_000.0;
+        let total_usd = Self::nano_usd_to_usd(state.total_nano_usd);
         let session_duration = self
             .model_runtime
             .session_started_at
@@ -2679,7 +2697,7 @@ impl ConversationOrchestrator {
         let Some(tracker) = self.model_runtime.cost_tracker.as_ref() else {
             return false;
         };
-        tracker.snapshot().await.total_nano_usd >= budget
+        tracker.total_nano_usd().await >= budget
     }
 
     /// A3: construct a fresh [`BudgetTracker`] for this turn IFF the
@@ -3184,7 +3202,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // a real 429 does.
             LlmError::RateLimited { .. } => {
                 let raw = err.to_string();
-                let source = self.api.last_rate_limit_error_message().unwrap_or(raw);
+                let source = self.api.rate_limit_error_message(err).unwrap_or(raw);
                 if crate::api_error_copy::is_long_context_credit_message(&source) {
                     crate::api_error_copy::usage_credits_required_for_1m_context(false)
                 } else {
@@ -3249,7 +3267,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     pub(super) fn enrich_api_error(&self, err: OrchestratorError) -> OrchestratorError {
-        enrich_rate_limited_error(err, self.api.last_rate_limit_error_message())
+        let message = match &err {
+            OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => {
+                self.api.rate_limit_error_message(error)
+            }
+            _ => None,
+        };
+        enrich_rate_limited_error(err, message)
     }
 
     /// Advance the session-scoped Ultracode state at the one prompt-ingress

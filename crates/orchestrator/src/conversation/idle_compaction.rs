@@ -5,12 +5,12 @@
 //! cache-expiry timestamp, and invokes the existing automatic compaction path.
 
 use crate::ConversationOrchestrator;
+use futures::future::{BoxFuture, FutureExt, Shared};
 use lingxi_core::types::SessionId;
 use llm_runtime::prompt_cache::RequestSnapshot;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const ONE_HOUR_MS: u64 = 60 * 60 * 1_000;
@@ -32,7 +32,9 @@ struct IdleTaskState {
     generation: u64,
     closed: bool,
     cancel: Option<CancellationToken>,
-    task: Option<JoinHandle<()>>,
+    // Replacements and shutdown callers can vanish while the task is cleaning up.
+    // Keep the join in the controller so every waiter observes the same completion.
+    completion: Option<Shared<BoxFuture<'static, ()>>>,
 }
 
 /// One timer at a time. A replaced task receives cancellation before it is
@@ -48,7 +50,7 @@ impl Default for IdleCompactionState {
                 generation: 0,
                 closed: false,
                 cancel: None,
-                task: None,
+                completion: None,
             }),
         }
     }
@@ -71,7 +73,7 @@ impl IdleCompactionState {
         F: FnOnce(CancellationToken) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let (generation, old_task) = {
+        let (generation, previous) = {
             let mut state = self
                 .inner
                 .lock()
@@ -83,28 +85,27 @@ impl IdleCompactionState {
             if let Some(cancel) = state.cancel.take() {
                 cancel.cancel();
             }
-            (state.generation, state.task.take())
+            (state.generation, state.completion.clone())
         };
-        if let Some(old_task) = old_task {
-            let _ = old_task.await;
+        if let Some(previous) = previous {
+            previous.await;
         }
 
-        let cancel = CancellationToken::new();
         let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.closed || state.generation != generation {
-            cancel.cancel();
             return;
         }
+        let cancel = CancellationToken::new();
         let handle = tokio::spawn(task(cancel.clone()));
         state.cancel = Some(cancel);
-        state.task = Some(handle);
+        state.completion = Some(handle.map(|_| ()).boxed().shared());
     }
 
     pub(crate) async fn shutdown_and_drain(&self) {
-        let task = {
+        let completion = {
             let mut state = self
                 .inner
                 .lock()
@@ -114,10 +115,10 @@ impl IdleCompactionState {
             if let Some(cancel) = state.cancel.take() {
                 cancel.cancel();
             }
-            state.task.take()
+            state.completion.clone()
         };
-        if let Some(task) = task {
-            let _ = task.await;
+        if let Some(completion) = completion {
+            completion.await;
         }
     }
 }
@@ -498,6 +499,69 @@ mod tests {
         assert_eq!(started_rx.recv().await, Some(2));
         state.shutdown_and_drain().await;
         assert_eq!(stopped_rx.recv().await, Some(2));
+    }
+
+    async fn install_timer_with_held_cleanup(
+        state: &IdleCompactionState,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, cleanup_started) = tokio::sync::oneshot::channel();
+        let (release_cleanup, release) = tokio::sync::oneshot::channel();
+        state
+            .replace(move |cancel| async move {
+                cancel.cancelled().await;
+                started.send(()).unwrap();
+                release.await.unwrap();
+            })
+            .await;
+        (cleanup_started, release_cleanup)
+    }
+
+    #[tokio::test]
+    async fn overlapping_drains_still_wait_after_the_first_waiter_is_dropped() {
+        let state = IdleCompactionState::default();
+        let (cleanup_started, release_cleanup) = install_timer_with_held_cleanup(&state).await;
+        let mut first = Box::pin(state.shutdown_and_drain());
+        assert!(futures::poll!(&mut first).is_pending());
+        cleanup_started.await.unwrap();
+
+        let mut overlapping = Box::pin(state.shutdown_and_drain());
+        assert!(futures::poll!(&mut overlapping).is_pending());
+        drop(first);
+        let mut retry = Box::pin(state.shutdown_and_drain());
+        assert!(futures::poll!(&mut retry).is_pending());
+
+        release_cleanup.send(()).unwrap();
+        tokio::join!(overlapping, retry);
+    }
+
+    #[tokio::test]
+    async fn overlapping_replacements_start_only_the_latest_timer_after_cleanup() {
+        let state = IdleCompactionState::default();
+        let (cleanup_started, release_cleanup) = install_timer_with_held_cleanup(&state).await;
+        let mut abandoned = Box::pin(state.replace(|_| std::future::ready(())));
+        assert!(futures::poll!(&mut abandoned).is_pending());
+        cleanup_started.await.unwrap();
+        drop(abandoned);
+
+        let (started, mut timers) = tokio::sync::mpsc::unbounded_channel();
+        let first_started = started.clone();
+        let mut superseded = Box::pin(state.replace(move |_| async move {
+            first_started.send(1).unwrap();
+        }));
+        assert!(futures::poll!(&mut superseded).is_pending());
+        let mut latest = Box::pin(state.replace(move |_| async move {
+            started.send(2).unwrap();
+        }));
+        assert!(futures::poll!(&mut latest).is_pending());
+
+        release_cleanup.send(()).unwrap();
+        tokio::join!(superseded, latest);
+        state.shutdown_and_drain().await;
+        assert_eq!(timers.recv().await, Some(2));
+        assert_eq!(timers.recv().await, None);
     }
 
     #[tokio::test(start_paused = true)]

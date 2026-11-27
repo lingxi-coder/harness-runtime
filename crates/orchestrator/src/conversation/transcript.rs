@@ -12,19 +12,23 @@ fn erase_tool_dispatch_fence(
     Arc::new(fence)
 }
 
+fn user_content_source_shape(row: &session::JsonlMessage) -> Option<(MessageId, bool)> {
+    if row.message_type != "user" {
+        return None;
+    }
+    let id = MessageId::from_uuid(uuid::Uuid::parse_str(&row.uuid).ok()?);
+    Some((id, row.message.string_at("/content").is_some()))
+}
+
 async fn remember_user_content_source_shape(
     orchestrator: &ConversationOrchestrator,
-    row: &session::JsonlMessage,
+    shape: Option<(MessageId, bool)>,
 ) {
-    if row.message_type != "user" {
-        return;
-    }
-    let Ok(uuid) = uuid::Uuid::parse_str(&row.uuid) else {
+    let Some((id, is_scalar)) = shape else {
         return;
     };
-    let id = MessageId::from_uuid(uuid);
     let mut session = orchestrator.session.lock().await;
-    if row.message.string_units("/content").is_some() {
+    if is_scalar {
         session
             .native_request_history
             .scalar_user_content_ids
@@ -1783,7 +1787,7 @@ impl ConversationOrchestrator {
                 row.message = source_object([("role", "user".into()), ("content", text)]);
             }
         }
-        self.append_transcript_row(&writer, &row)
+        self.append_transcript_row(&writer, row)
             .await
             .map_err(|error| {
                 lingxi_core::host::HandleError::ActionFailed(format!(
@@ -4176,8 +4180,9 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra: source_object([]),
         };
+        let line_uuid = row.uuid.clone();
         let (outcome, last_uuid) = self
-            .append_pending_transcript_row(writer, &row)
+            .append_pending_transcript_row(writer, row)
             .await
             .map_err(|error| {
                 OrchestratorError::Internal(format!(
@@ -4191,7 +4196,7 @@ impl ConversationOrchestrator {
         })?;
         let appended = outcome == session::jsonl::TranscriptAppendOutcome::Appended;
         if appended {
-            telemetry::emit_session_appended(&session_id, &row.uuid);
+            telemetry::emit_session_appended(&session_id, &line_uuid);
         }
         Ok(appended)
     }
@@ -4286,11 +4291,12 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra,
         };
-        match self.append_transcript_row(&writer, &row).await {
+        let line_uuid = row.uuid.clone();
+        match self.append_transcript_row(&writer, row).await {
             Ok(()) => {
                 #[cfg(test)]
                 crate::request_context::pause_after_first_ingress_append_for_test().await;
-                telemetry::emit_session_appended(&session_id, &row.uuid);
+                telemetry::emit_session_appended(&session_id, &line_uuid);
             }
             Err(error) => {
                 self.record_transcript_append_failure(
@@ -4359,7 +4365,7 @@ impl ConversationOrchestrator {
             extra,
         };
         let line_uuid = jmsg.uuid.clone();
-        match self.append_transcript_row(&writer, &jmsg).await {
+        match self.append_transcript_row(&writer, jmsg).await {
             Ok(()) => {
                 #[cfg(test)]
                 crate::request_context::pause_after_first_ingress_append_for_test().await;
@@ -4435,9 +4441,10 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra,
         };
-        match self.append_transcript_row(&writer, &row).await {
+        let line_uuid = row.uuid.clone();
+        match self.append_transcript_row(&writer, row).await {
             Ok(()) => {
-                telemetry::emit_session_appended(&session_id, &row.uuid);
+                telemetry::emit_session_appended(&session_id, &line_uuid);
             }
             Err(error) => {
                 self.record_transcript_append_failure(&session_id, "queued_command", &error)
@@ -4825,7 +4832,7 @@ impl ConversationOrchestrator {
             match result {
                 Ok(()) => {
                     telemetry::emit_session_appended(&row.session_id, &row.uuid);
-                    remember_user_content_source_shape(self, row).await;
+                    remember_user_content_source_shape(self, user_content_source_shape(row)).await;
                     if let Some(id) = crate::resume::native_zce_message_id(row) {
                         self.session
                             .lock()
@@ -5276,8 +5283,10 @@ impl ConversationOrchestrator {
             return Ok(Some(rewritten));
         }
         let uuid_for_chain = jmsg.uuid.clone();
+        let source_shape = user_content_source_shape(&jmsg);
+        let closing_id = crate::resume::native_zce_message_id(&jmsg);
         let append_result = if pending_prompt_id.is_some() {
-            self.append_pending_transcript_row(writer, &jmsg)
+            self.append_pending_transcript_row(writer, jmsg)
                 .await
                 .map(|(outcome, last_uuid)| {
                     (
@@ -5287,14 +5296,14 @@ impl ConversationOrchestrator {
                 })
                 .map_err(|error| error.to_string())
         } else {
-            self.append_transcript_row_with_parent(writer, &jmsg, explicit_parent)
+            self.append_transcript_row_with_parent(writer, jmsg, explicit_parent)
                 .await
                 .map(|_| (Some(uuid_for_chain.clone()), true))
                 .map_err(|error| error.to_string())
         };
         match append_result {
             Ok((last_uuid, newly_appended)) => {
-                remember_user_content_source_shape(self, &jmsg).await;
+                remember_user_content_source_shape(self, source_shape).await;
                 if pending_prompt_id.is_some() && last_uuid.is_none() {
                     return Err(OrchestratorError::Internal(
                         "pending prompt append completed without a transcript tip".into(),
@@ -5303,7 +5312,7 @@ impl ConversationOrchestrator {
                 if newly_appended {
                     telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
                 }
-                if let Some(id) = crate::resume::native_zce_message_id(&jmsg) {
+                if let Some(id) = closing_id {
                     self.session
                         .lock()
                         .await
@@ -5869,7 +5878,7 @@ impl ConversationOrchestrator {
                         .expect("generated transcript metadata is valid JSON"),
                     )
                     .expect("extra metadata is an object");
-                match self.append_transcript_row(&writer, &jmsg).await {
+                match self.append_transcript_row(&writer, jmsg).await {
                     Ok(()) => {
                         telemetry::emit_session_appended(
                             &session_id_for_commit,
@@ -6230,19 +6239,18 @@ impl ConversationOrchestrator {
 
         let writer = Arc::clone(writer);
         let session_id_for_write = session_id.clone();
-        let jmsg_for_write = jmsg;
-        let row_content = row.content.clone();
+        let row_content = &row.content;
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let persist = async move {
             // The common append transaction chooses and returns the parent
             // after admission, including concurrent unfenced lifecycle rows.
             let result = match self
-                .append_transcript_row_with_parent(&writer, &jmsg_for_write, false)
+                .append_transcript_row_with_parent(&writer, jmsg, false)
                 .await
             {
                 Ok(parent_uuid) => {
                     telemetry::emit_session_appended(&session_id_for_write, &row_uuid);
-                    for block in &row_content {
+                    for block in row_content {
                         if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
                             self.record_source_tool_assistant_uuid(id, row_uuid.clone())
                                 .await;
@@ -6500,25 +6508,21 @@ impl ConversationOrchestrator {
         let writer = Arc::clone(writer);
         let assistant_id = *turn_id;
         let assistant_content = match msg {
-            ConversationMessage::Assistant { content, .. } => content.clone(),
-            _ => Vec::new(),
+            ConversationMessage::Assistant { content, .. } => content.as_slice(),
+            _ => &[],
         };
         let session_id_for_write = session_id_str.clone();
         let line_uuid_for_write = line_uuid.clone();
-        let assistant_content_for_write = assistant_content.clone();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let persist = async move {
             self.note_assistant_commit(msg).await;
-            let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
-            let mut jmsg = jmsg;
-            jmsg.parent_uuid.clone_from(&parent_uuid);
-            let persisted = match self.append_transcript_row(&writer, &jmsg).await {
+            let persisted = match self.append_transcript_row(&writer, jmsg).await {
                 Ok(()) => {
                     telemetry::emit_session_appended(&session_id_for_write, &line_uuid_for_write);
                     // O1: the batched path writes ONE merged line, so every
                     // `tool_use` block in it shares that line's uuid as its
                     // `sourceToolAssistantUUID`.
-                    for block in &assistant_content_for_write {
+                    for block in assistant_content {
                         if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
                             self.record_source_tool_assistant_uuid(id, line_uuid_for_write.clone())
                                 .await;
@@ -6535,7 +6539,7 @@ impl ConversationOrchestrator {
                     true
                 }
                 Err(error) => {
-                    for block in &assistant_content_for_write {
+                    for block in assistant_content {
                         if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
                             if name == "LocalApp" {
                                 self.record_durable_tool_origin(
@@ -6566,7 +6570,7 @@ impl ConversationOrchestrator {
         };
         if !admitted {
             self.fail_local_app_publication_origins(
-                &assistant_content,
+                assistant_content,
                 &assistant_id.as_uuid().to_string(),
                 "assistant publication fence closed",
             )
@@ -7685,7 +7689,7 @@ impl ConversationOrchestrator {
         // the current tip only for a new row; retries retain their original parent.
         row.parent_uuid = None;
         let (outcome, _tip) = self
-            .append_pending_transcript_row(writer, &row)
+            .append_pending_transcript_row(writer, row)
             .await
             .map_err(|e| e.to_string())?;
         if outcome == session::jsonl::TranscriptAppendOutcome::Appended {

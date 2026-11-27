@@ -1,34 +1,28 @@
 //! Host implementation of the Mod `fs.ancestors` operation.
 
+use crate::prompt::git_status::{git_metadata_before, GIT_PROBE_TIMEOUT};
 use hooks::mods::ModError;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tokio::time::Instant;
 
-fn git_path(cwd: &Path, args: &[&str]) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .arg("--no-optional-locks")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(output.stdout).ok()?;
+async fn git_path(cwd: &Path, args: &[&str], deadline: Instant) -> Option<PathBuf> {
+    let path = String::from_utf8(git_metadata_before(cwd, args, deadline).await?).ok()?;
     let path = path.trim();
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
-fn worktree_roots(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
-    let worktree = git_path(cwd, &["rev-parse", "--show-toplevel"])?;
+async fn worktree_roots(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
+    let deadline = Instant::now() + GIT_PROBE_TIMEOUT;
+    let worktree = git_path(cwd, &["rev-parse", "--show-toplevel"], deadline).await?;
     let common_dir = git_path(
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    let common_dir = std::fs::canonicalize(common_dir).ok()?;
+        deadline,
+    )
+    .await?;
+    let common_dir = tokio::fs::canonicalize(common_dir).await.ok()?;
     if common_dir.file_name()? != ".git" {
         return None;
     }
@@ -122,12 +116,12 @@ pub(super) async fn run(
         Some(path) if path != original_cwd => path.parent().unwrap_or(path).to_path_buf(),
         _ => original_cwd.clone(),
     };
+    if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|value| !value.is_empty()) {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let roots = worktree_roots(&original_cwd).await;
     tokio::task::spawn_blocking(move || {
-        if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|value| !value.is_empty()) {
-            return Ok(Value::Array(Vec::new()));
-        }
         let home = dirs::home_dir();
-        let roots = worktree_roots(&original_cwd);
         let mut processed = HashSet::new();
         processed.insert(
             memory::lingxi_md::hierarchy::managed_path()
@@ -365,5 +359,39 @@ mod tests {
             Some(&roots)
         ));
         assert!(!is_other_worktree_ancestor(Path::new("/tmp"), Some(&roots)));
+    }
+
+    #[tokio::test]
+    async fn git_probe_resolves_a_real_linked_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = std::fs::canonicalize(dir.path()).unwrap();
+        let linked = main.join("linked");
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+            vec!["worktree", "add", "--quiet", "--detach", "linked"],
+        ] {
+            let status = tokio::process::Command::new("git")
+                .args(permission::auto_mode_producers::GIT_HARDENING_FLAGS)
+                .args(args)
+                .current_dir(&main)
+                .status()
+                .await
+                .unwrap();
+            assert!(status.success());
+        }
+        assert_eq!(worktree_roots(&main).await, None);
+        assert_eq!(worktree_roots(&linked).await, Some((main, linked)));
     }
 }

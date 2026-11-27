@@ -18,8 +18,8 @@
 //! through the SAME `reasoning_for_request` rules as the main loop, so the
 //! isolated call inherits the supplied extended-thinking config.
 //! `output_format` drives the structured-text decode (not a server-side
-//! `response_format`); `max_retries` stays dropped. Existing callers pass
-//! `None`/empty for the extras, so their wire stays byte-identical.
+//! `response_format`). Session calls cap physical attempts at `max_retries + 1`
+//! while also spending from a supplied operation budget.
 //!
 //! ## System forwarding fix
 //!
@@ -304,11 +304,15 @@ fn decode_response(
     first_text_only: bool,
     separate_text_blocks: bool,
 ) -> SideQueryResponse {
-    let retry_count = resp
-        .provider_metadata
-        .unsigned_integer_at("/_lingxi_retry_count")
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(0);
+    let retry_count = resp.diagnostics().map_or_else(
+        || {
+            resp.provider_metadata
+                .unsigned_integer_at("/_lingxi_retry_count")
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0)
+        },
+        |diagnostics| diagnostics.retries,
+    );
     let mut text_units = Vec::new();
     let mut saw_text = false;
     let mut tool_calls = Vec::new();
@@ -576,108 +580,114 @@ impl ProviderSideQueryClient {
             crate::purposes::QuerySource::Custom(source) if source == "side_question"
         );
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
-            let wants_structured = request.output_format.is_some();
-            let query_source = request.query_source.as_str();
-            let native_prompt_context = request.native_prompt_context.clone();
-            let system_prompt = request.system_prompt.clone();
-            let model_source = request.model_source.clone();
-            let mut canonical = service.build_side_query_request_with_thinking(
-                &request.model,
-                request.profile.as_deref(),
-                system_prompt.as_ref(),
-                request.system_prompt_input.as_ref(),
-                false,
-                request.messages,
-                request.tools,
-                // Fork compaction resolves the parent's ordinary output
-                // budget; other side queries carry their explicit cap.
-                request.max_tokens,
-                convert_tool_choice(request.tool_choice.as_ref()),
-                request.stop_sequences,
-                if prompt_suggestion {
-                    Some(service.thinking()?)
-                } else {
-                    request.thinking
-                },
-                request.effort,
-                request.temperature,
-                Some(query_source),
-                request.typed_attachment_ids,
-                request.task_deliveries,
-            )?;
-            apply_exact_model_source(&mut canonical, model_source.as_ref())?;
-            canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
-            canonical.execution.model_attempt = request.model_attempt;
-            canonical.execution.api_attempts_left = request.api_attempts_left;
-            canonical.execution.request_usage_observer =
-                options.usage_observer.clone().map(|observer| {
-                    llm_runtime::RequestUsageObserver::new(move |usage| {
-                        observe_fork_usage(&observer, usage)
-                    })
-                });
-            canonical
-                .execution
-                .set_request_dispatch_admission(admission);
-            canonical.execution.fork_point_message_id = options.fork_point_message_id;
-            let explicit_system_blocks = options.system_blocks.is_some();
-            if let Some(system_blocks) = options.system_blocks {
-                // The utility caller supplied its complete system wire shape.
-                // Do not reclassify/cache-join it as a main conversation prompt.
-                let family =
+            return service
+                .with_account_call_snapshot(async {
+                    let wants_structured = request.output_format.is_some();
+                    let query_source = request.query_source.as_str();
+                    let native_prompt_context = request.native_prompt_context.clone();
+                    let system_prompt = request.system_prompt.clone();
+                    let model_source = request.model_source.clone();
+                    let mut canonical = service.build_side_query_request_with_thinking(
+                        &request.model,
+                        request.profile.as_deref(),
+                        system_prompt.as_ref(),
+                        request.system_prompt_input.as_ref(),
+                        false,
+                        request.messages,
+                        request.tools,
+                        // Fork compaction resolves the parent's ordinary output
+                        // budget; other side queries carry their explicit cap.
+                        request.max_tokens,
+                        convert_tool_choice(request.tool_choice.as_ref()),
+                        request.stop_sequences,
+                        if prompt_suggestion {
+                            Some(service.thinking()?)
+                        } else {
+                            request.thinking
+                        },
+                        request.effort,
+                        request.temperature,
+                        Some(query_source),
+                        request.typed_attachment_ids,
+                        request.task_deliveries,
+                    )?;
+                    apply_exact_model_source(&mut canonical, model_source.as_ref())?;
+                    canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
+                    canonical.execution.model_attempt = request.model_attempt;
+                    canonical.execution.side_query_max_retries = Some(request.max_retries);
+                    canonical.execution.api_attempts_left = request.api_attempts_left;
+                    canonical.execution.request_usage_observer =
+                        options.usage_observer.clone().map(|observer| {
+                            llm_runtime::RequestUsageObserver::new(move |usage| {
+                                observe_fork_usage(&observer, usage)
+                            })
+                        });
                     canonical
                         .execution
-                        .input_protocol
-                        .ok_or_else(|| LlmError::InvalidRequest {
-                            message: "side-query protocol was not resolved".into(),
+                        .set_request_dispatch_admission(admission);
+                    canonical.execution.fork_point_message_id = options.fork_point_message_id;
+                    let explicit_system_blocks = options.system_blocks.is_some();
+                    if let Some(system_blocks) = options.system_blocks {
+                        // The utility caller supplied its complete system wire shape.
+                        // Do not reclassify/cache-join it as a main conversation prompt.
+                        let family = canonical.execution.input_protocol.ok_or_else(|| {
+                            LlmError::InvalidRequest {
+                                message: "side-query protocol was not resolved".into(),
+                            }
                         })?;
-                let (system_input, _) = llm_runtime::convert::history_input(
-                    &request.model,
-                    &[],
-                    &system_blocks,
-                    &[],
-                    family,
-                )?;
-                canonical.input.system = system_input.system;
-                canonical.input.prompt_cache = system_input.prompt_cache;
-                if query_source == "agent_classifier" {
-                    canonical.execution.classifier_system_blocks = true;
-                } else {
-                    canonical.execution.prompt_cache = None;
-                }
-            }
-            if !explicit_system_blocks {
-                apply_native_side_query_prompt_context(
-                    &mut canonical,
-                    native_prompt_context.as_ref(),
-                    query_source,
-                )?;
-            }
-            let streaming_compaction = compaction
-                && service
-                    .resolve_media_route(&canonical.input.model, canonical.profile.as_deref())?
-                    .main
-                    .capabilities
-                    .streaming;
-            let resp = if prompt_suggestion || streaming_compaction {
-                // Native I -> runForkedAgent -> query uses the main streaming
-                // request policy, with auxiliary ownership and no transcript writes.
-                canonical.execution.anthropic_request_kind = Default::default(); // Main
-                canonical.execution.isolated_query = true;
-                collect_completed_response_with_observer(
-                    service.stream_request(canonical).await?,
-                    options.usage_observer.clone(),
-                )
-                .await?
-            } else {
-                service.execute_side_query_request(canonical).await?
-            };
-            return Ok(decode_fork_response(
-                resp,
-                wants_structured,
-                first_text_only,
-                separate_text_blocks,
-                compaction,
-            ));
+                        let (system_input, _) = llm_runtime::convert::history_input(
+                            &request.model,
+                            &[],
+                            &system_blocks,
+                            &[],
+                            family,
+                        )?;
+                        canonical.input.system = system_input.system;
+                        canonical.input.prompt_cache = system_input.prompt_cache;
+                        if query_source == "agent_classifier" {
+                            canonical.execution.classifier_system_blocks = true;
+                        } else {
+                            canonical.execution.prompt_cache = None;
+                        }
+                    }
+                    if !explicit_system_blocks {
+                        apply_native_side_query_prompt_context(
+                            &mut canonical,
+                            native_prompt_context.as_ref(),
+                            query_source,
+                        )?;
+                    }
+                    let streaming_compaction = compaction
+                        && service
+                            .resolve_media_route(
+                                &canonical.input.model,
+                                canonical.profile.as_deref(),
+                            )?
+                            .main
+                            .capabilities
+                            .streaming;
+                    let resp = if prompt_suggestion || streaming_compaction {
+                        // Native I -> runForkedAgent -> query uses the main streaming
+                        // request policy, with auxiliary ownership and no transcript writes.
+                        canonical.execution.anthropic_request_kind = Default::default(); // Main
+                        canonical.execution.isolated_query = true;
+                        collect_completed_response_with_observer(
+                            service.stream_request(canonical).await?,
+                            options.usage_observer.clone(),
+                        )
+                        .await?
+                    } else {
+                        service.execute_side_query_request(canonical).await?
+                    };
+                    Ok(decode_fork_response(
+                        resp,
+                        wants_structured,
+                        first_text_only,
+                        separate_text_blocks,
+                        compaction,
+                    ))
+                })
+                .await;
         }
 
         let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
@@ -924,53 +934,64 @@ impl SideQueryClient for ProviderSideQueryClient {
         let profile = request.profile.clone();
         let resp = match &self.backend {
             ProviderSideQueryBackend::Session(service) => {
-                let query_source = request.query_source.as_str().to_string();
-                let system_prompt = request
-                    .system_prompt
-                    .as_deref()
-                    .map(Utf16JsonProjection::from);
-                // Round-3 review finding 4: an explicit `temperature`
-                // override (e.g. the fusion analyst's hard `Some(0.0)`) used
-                // to be silently dropped by the old 7-arg `stream_json_schema`
-                // this backend called; now that it reaches the wire
-                // verbatim, it must be withheld from a model whose own
-                // vendored capability row says temperature control is
-                // unsupported — see `temperature_for_capable_model`.
-                let temperature = temperature_for_capable_model(
-                    &service.model_listings(),
-                    request.profile.as_deref(),
-                    &request.model,
-                    request.temperature,
-                );
-                // F003 round 2: route through the `_with_thinking` sibling
-                // so an explicit `temperature` override is never sent
-                // alongside a session-derived `thinking` block —
-                // `StrictStructuredQueryRequest` has no thinking field of
-                // its own, so `None` here means the same "no reasoning
-                // field at all" that `SideQueryRequest{thinking: None}`
-                // already means for the non-strict path above.
-                let mut canonical = service
-                    .build_json_schema_request_with_thinking(
-                        &request.model,
-                        request.profile.as_deref(),
-                        system_prompt.as_ref(),
-                        None,
-                        request.messages,
-                        request.schema,
-                        request.max_tokens,
-                        None,
-                        None,
-                        temperature,
-                        Some(query_source.as_str()),
-                    )
-                    .map_err(map_structured_llm_error)?;
-                canonical.execution.enable_prompt_caching = Some(false);
-                canonical.execution.model_attempt = request.model_attempt;
-                let stream = service
-                    .stream_request(canonical)
-                    .await
-                    .map_err(map_structured_llm_error)?;
-                collect_completed_response(stream).await?
+                service
+                    .with_account_call_snapshot(async {
+                        let query_source = request.query_source.as_str().to_string();
+                        let system_prompt = request
+                            .system_prompt
+                            .as_deref()
+                            .map(Utf16JsonProjection::from);
+                        // Round-3 review finding 4: an explicit `temperature`
+                        // override (e.g. the fusion analyst's hard `Some(0.0)`) used
+                        // to be silently dropped by the old 7-arg `stream_json_schema`
+                        // this backend called; now that it reaches the wire
+                        // verbatim, it must be withheld from a model whose own
+                        // vendored capability row says temperature control is
+                        // unsupported — see `temperature_for_capable_model`.
+                        let temperature = temperature_for_capable_model(
+                            &service.model_listings(),
+                            request.profile.as_deref(),
+                            &request.model,
+                            request.temperature,
+                        );
+                        // F003 round 2: route through the `_with_thinking` sibling
+                        // so an explicit `temperature` override is never sent
+                        // alongside a session-derived `thinking` block —
+                        // `StrictStructuredQueryRequest` has no thinking field of
+                        // its own, so `None` here means the same "no reasoning
+                        // field at all" that `SideQueryRequest{thinking: None}`
+                        // already means for the non-strict path above.
+                        let mut canonical = service
+                            .build_json_schema_request_with_thinking(
+                                &request.model,
+                                request.profile.as_deref(),
+                                system_prompt.as_ref(),
+                                None,
+                                request.messages,
+                                request.schema,
+                                request.max_tokens,
+                                None,
+                                None,
+                                temperature,
+                                Some(query_source.as_str()),
+                            )
+                            .map_err(map_structured_llm_error)?;
+                        canonical.execution.enable_prompt_caching = Some(false);
+                        canonical.execution.model_attempt = request.model_attempt;
+                        if canonical.stream {
+                            let stream = service
+                                .stream_request(canonical)
+                                .await
+                                .map_err(map_structured_llm_error)?;
+                            collect_completed_response(stream).await
+                        } else {
+                            service
+                                .execute_side_query_request(canonical)
+                                .await
+                                .map_err(map_structured_llm_error)
+                        }
+                    })
+                    .await?
             }
             ProviderSideQueryBackend::Direct { client, transport } => {
                 if request.model_attempt.is_some() {
@@ -1450,6 +1471,7 @@ mod tests {
     /// 200 body. Kept local so the sidequery crate needs no extra
     /// dev-dependency (mirrors the `OneShot` template in `platform-api/src/http.rs`).
     struct StubTransport {
+        status: u16,
         body: String,
         received: Mutex<Vec<HttpRequest>>,
     }
@@ -1457,6 +1479,7 @@ mod tests {
     impl StubTransport {
         fn new(body: impl Into<String>) -> Self {
             Self {
+                status: 200,
                 body: body.into(),
                 received: Mutex::new(Vec::new()),
             }
@@ -1468,7 +1491,7 @@ mod tests {
         async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
             self.received.lock().unwrap().push(req);
             Ok(HttpResponse {
-                status: 200,
+                status: self.status,
                 headers: vec![],
                 body: self.body.clone(),
                 body_bytes: Vec::new(),
@@ -1543,6 +1566,24 @@ mod tests {
             None,
         );
         ProviderSideQueryClient::from_service(Arc::new(service))
+    }
+
+    #[tokio::test]
+    async fn session_side_query_respects_caller_retry_ceiling() {
+        let transport = Arc::new(StubTransport {
+            status: 503,
+            ..StubTransport::new(r#"{"error":{"message":"temporarily unavailable"}}"#)
+        });
+        let client = deepseek_session_client(transport.clone());
+        let budget = llm_runtime::ApiAttemptsLeft::new(3);
+        let mut request = req(None);
+        request.model = "deepseek-flash".into();
+        request.profile = Some("deepseek".into());
+        request.max_retries = 0;
+        request.api_attempts_left = Some(budget.clone());
+        assert!(client.query(request).await.is_err());
+        assert_eq!(transport.received.lock().unwrap().len(), 1);
+        assert_eq!(budget.remaining(), 2);
     }
 
     fn local_app_deepseek_image_request(
@@ -2489,7 +2530,7 @@ mod tests {
         }
     }
 
-    /// `query_json_schema` on the Session backend is a STREAMING call
+    /// A streaming-capable Session route uses a streaming structured query
     /// (`build_request(..., stream=true, ..)` -> `ApiService::drive_stream`),
     /// so it needs a scripted [`llm_runtime::Transport::open_stream`], not
     /// [`StubTransport`]'s non-streaming `request` (whose `stream_sse` always
@@ -2621,18 +2662,20 @@ mod tests {
         transport: Arc<StreamStubTransport>,
         analytics: Option<Arc<telemetry::AnalyticsBus>>,
     ) -> ProviderSideQueryClient {
-        structured_session_client_with_parent_forced_tool_choice(
+        structured_session_client_for_model(
             transport,
             analytics,
             false,
+            true,
             "claude-sonnet-4-20250514",
         )
     }
 
-    fn structured_session_client_with_parent_forced_tool_choice(
-        transport: Arc<StreamStubTransport>,
+    fn structured_session_client_for_model(
+        transport: Arc<dyn llm_runtime::Transport>,
         analytics: Option<Arc<telemetry::AnalyticsBus>>,
         parent_forced_tool_choice: bool,
+        streaming: bool,
         request_model: &str,
     ) -> ProviderSideQueryClient {
         let config = ClientConfig {
@@ -2655,7 +2698,7 @@ mod tests {
                     description: None,
                     metadata: Default::default(),
                     capabilities: Capabilities {
-                        streaming: true,
+                        streaming,
                         tools: true,
                         reasoning: true,
                         structured_output: true,
@@ -2702,9 +2745,10 @@ mod tests {
     #[tokio::test]
     async fn session_json_schema_does_not_inherit_parent_forced_tool_choice() {
         let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
-        let client = structured_session_client_with_parent_forced_tool_choice(
+        let client = structured_session_client_for_model(
             transport.clone(),
             None,
+            true,
             true,
             "claude-sonnet-4-6",
         );
@@ -2734,6 +2778,50 @@ mod tests {
             serde_json::json!({ "type": "json_schema", "schema": expected_schema }),
             "structured response format must remain on the wire"
         );
+    }
+
+    #[tokio::test]
+    async fn registered_schema_query_completes_on_nonstreaming_route() {
+        let model = "claude-sonnet-4-6";
+        let transport = Arc::new(StubTransport::new(
+            serde_json::json!({
+                "id":"msg_complete", "type":"message", "role":"assistant", "model":model,
+                "content":[{"type":"text","text":r#"{"ok":true}"#}],
+                "stop_reason":"end_turn", "usage":{"input_tokens":7,"output_tokens":3}
+            })
+            .to_string(),
+        ));
+        let client =
+            structured_session_client_for_model(transport.clone(), None, true, false, model);
+        let probe = Arc::new(SchemaAttemptProbe::default());
+        let ProviderSideQueryBackend::Session(service) = &client.backend else {
+            unreachable!()
+        };
+        service.set_model_attempt_hooks(Arc::new(SchemaAttemptHooks(probe.clone())));
+        let mut request = strict_req();
+        request.model = model.into();
+        request.model_attempt = Some(
+            lingxi_core::host::ModelAttemptRun::new(Arc::new(()))
+                .context(lingxi_core::host::ModelAttemptStage::Analyst, None)
+                .unwrap(),
+        );
+        let response = client.query_json_schema(request).await.unwrap();
+        assert_eq!(response.value, serde_json::json!({"ok":true}));
+        assert!(probe.settled.load(std::sync::atomic::Ordering::SeqCst));
+        let usages = probe.usages.lock().unwrap();
+        let (usage, completeness) = usages.last().unwrap();
+        assert_eq!(usage.counts().input_tokens, 7);
+        assert_eq!(
+            *completeness,
+            llm_runtime::ModelAttemptUsageCompleteness::Complete
+        );
+        let received = transport.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_str(received[0].body.as_deref().unwrap()).unwrap();
+        assert_ne!(body["stream"], true);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert!(body.get("tool_choice").is_none());
     }
 
     /// F003: `query_json_schema` decodes the accumulated text as a strict

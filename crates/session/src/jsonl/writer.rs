@@ -739,30 +739,33 @@ fn scan_latest_custom_title(
         return Ok(latest_custom_title_from_source(&source, session_id));
     }
     let mut end = len;
-    // Bytes of a line that started before the newer window. Appended to the
-    // next older window so a record split by the window boundary is parsed whole.
-    let mut carry: Vec<u8> = Vec::new();
+    let mut buffer = vec![0; crate::jsonl::LITE_READ_BUF_SIZE];
+    // Preceding windows extend this unfinished line without copying its suffix.
+    let mut reversed_suffix = Vec::new();
     while end > 0 {
         let start = end.saturating_sub(crate::jsonl::LITE_READ_BUF_SIZE as u64);
         let read_len = usize::try_from(end - start)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
         file.seek(SeekFrom::Start(start))?;
-        let mut buf = vec![0u8; read_len];
-        file.read_exact(&mut buf)?;
-        let head = if start > 0 {
-            match buf.iter().position(|byte| *byte == b'\n') {
-                Some(index) => {
-                    let head = buf[..index].to_vec();
-                    buf.drain(..=index);
-                    head
-                }
-                None => std::mem::take(&mut buf),
-            }
+        file.read_exact(&mut buffer[..read_len])?;
+        let window = &buffer[..read_len];
+        end = start;
+        let (head, complete) = if start == 0 {
+            (&[][..], window)
+        } else if let Some(index) = memchr::memchr(b'\n', window) {
+            (&window[..index], &window[index + 1..])
         } else {
-            Vec::new()
+            reversed_suffix.extend(window.iter().rev());
+            continue;
         };
-        buf.extend_from_slice(&carry);
-        let text = match String::from_utf8(buf) {
+        let batch = if reversed_suffix.is_empty() {
+            complete
+        } else {
+            reversed_suffix.extend(complete.iter().rev());
+            reversed_suffix.reverse();
+            &reversed_suffix
+        };
+        let text = match std::str::from_utf8(batch) {
             Ok(text) => text,
             Err(_) => {
                 file.seek(SeekFrom::Start(0))?;
@@ -771,11 +774,11 @@ fn scan_latest_custom_title(
                 return Ok(latest_custom_title_from_source(&source, session_id));
             }
         };
-        if let Some(title) = latest_custom_title_from_source(&text, session_id) {
+        if let Some(title) = latest_custom_title_from_source(text, session_id) {
             return Ok(Some(title));
         }
-        carry = head;
-        end = start;
+        reversed_suffix.clear();
+        reversed_suffix.extend(head.iter().rev());
     }
     Ok(None)
 }
@@ -2285,6 +2288,9 @@ impl JsonlWriter {
         ];
         let mut latest = std::collections::BTreeMap::new();
         for line in content.lines() {
+            if !crate::jsonl::reader::may_contain_record_kind(line, KINDS) {
+                continue;
+            }
             let Ok(row) = Utf16JsonProjection::parse(line) else {
                 continue;
             };
@@ -4580,7 +4586,7 @@ impl JsonlWriter {
         content: &str,
         session_id: &str,
     ) -> Result<FixedSessionProfile, String> {
-        Self::fixed_session_profile_from_lines(content.lines().map(Ok), session_id)
+        Self::fixed_session_profile_from_lines(content.lines().map(Ok), session_id, None)
     }
 
     /// Validate the complete transcript while retaining only one line in memory.
@@ -4588,12 +4594,24 @@ impl JsonlWriter {
         reader: impl std::io::BufRead,
         session_id: &str,
     ) -> Result<FixedSessionProfile, String> {
-        Self::fixed_session_profile_from_lines(reader.lines(), session_id)
+        Self::fixed_session_profile_from_lines(reader.lines(), session_id, None)
+    }
+
+    /// Check the creation header and fully validate candidates for this mode.
+    /// A foreign mode can be excluded as soon as its valid header is read.
+    pub fn reader_matches_fixed_session_mode(
+        reader: impl std::io::BufRead,
+        session_id: &str,
+        mode: ConversationMode,
+    ) -> Result<bool, String> {
+        Self::fixed_session_profile_from_lines(reader.lines(), session_id, Some(mode))
+            .map(|profile| profile.mode == mode)
     }
 
     fn fixed_session_profile_from_lines<S: AsRef<str>>(
         mut lines: impl Iterator<Item = Result<S, std::io::Error>>,
         session_id: &str,
+        validate_tail_for_mode: Option<ConversationMode>,
     ) -> Result<FixedSessionProfile, String> {
         let header = lines
             .next()
@@ -4626,9 +4644,28 @@ impl JsonlWriter {
         if instruction_epoch > (1_u64 << 53) - 1 {
             return Err("invalid instruction epoch".into());
         }
+        let profile = FixedSessionProfile {
+            mode,
+            instruction_epoch,
+        };
+        if validate_tail_for_mode.is_some_and(|expected| expected != mode) {
+            return Ok(profile);
+        }
+        // Both mode record names end with `session-mode`. If the value
+        // escapes any of its ASCII characters, the line contains `\u00`.
+        // Keep the exact parser for every candidate, including nested or
+        // malformed lookalikes, and propagate all reader errors as before.
+        let mode_suffix = memchr::memmem::Finder::new(b"session-mode\"");
+        let ascii_escape = memchr::memmem::Finder::new(b"\\u00");
         for line in lines {
             let line = line.map_err(|error| error.to_string())?;
-            if let Ok(row) = Utf16JsonProjection::parse(line.as_ref()) {
+            let line = line.as_ref();
+            if mode_suffix.find(line.as_bytes()).is_none()
+                && ascii_escape.find(line.as_bytes()).is_none()
+            {
+                continue;
+            }
+            if let Ok(row) = Utf16JsonProjection::parse(line) {
                 if matches!(
                     row.string_at("/type"),
                     Some("fixed-session-mode" | "session-mode")
@@ -4637,10 +4674,7 @@ impl JsonlWriter {
                 }
             }
         }
-        Ok(FixedSessionProfile {
-            mode,
-            instruction_epoch,
-        })
+        Ok(profile)
     }
 
     /// Distinguish an empty new target from a malformed existing transcript.
@@ -9720,6 +9754,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn title_scan_recovers_the_newest_record_across_multiple_windows() {
+        use std::io::Cursor;
+
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let old = json!({"type": "custom-title", "sessionId": sid, "customTitle": "old"});
+        for (unit, trailing_rows) in [("x", ""), ("界", "\r\n{}\r\n")] {
+            let title = unit.repeat(3 * crate::jsonl::LITE_READ_BUF_SIZE / unit.len() + 7);
+            let new = json!({"type": "custom-title", "sessionId": sid, "customTitle": title});
+            let source = format!("{old}\r\n{new}{trailing_rows}");
+            let found = scan_latest_custom_title(
+                &mut Cursor::new(source.as_bytes()),
+                source.len() as u64,
+                sid,
+            )
+            .unwrap()
+            .flatten()
+            .unwrap();
+            assert!(found.string_at("") == Some(title.as_str()));
+        }
+    }
+
+    #[test]
+    fn title_scan_validates_the_complete_window_before_selecting_a_title() {
+        use std::io::{Cursor, ErrorKind};
+
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let title = json!({"type": "custom-title", "sessionId": sid, "customTitle": "latest"});
+        let scan = |bytes: &[u8]| {
+            scan_latest_custom_title(&mut Cursor::new(bytes), bytes.len() as u64, sid)
+        };
+        let mut bytes = vec![0xff];
+        bytes.resize(crate::jsonl::LITE_READ_BUF_SIZE + 1, b'\n');
+        bytes.extend_from_slice(title.to_string().as_bytes());
+        assert_eq!(
+            scan(&bytes).unwrap().flatten().unwrap().string_at(""),
+            Some("latest")
+        );
+        // An invalid byte in the same batch must trigger the strict full read.
+        bytes[crate::jsonl::LITE_READ_BUF_SIZE - 1] = 0xff;
+        assert_eq!(scan(&bytes).unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
     #[tokio::test]
     async fn external_title_append_survives_a_large_writer_append() {
         let (dir, path, writer) = temp_writer("external-title");
@@ -10504,11 +10581,22 @@ mod tests {
             format!("{fixed}\n{fixed}\n"),
             format!("{fixed}\n{other}\n"),
             format!("{fixed}\n{{\"type\":\"session-mode\",\"sessionId\":\"{id}\",\"sessionMode\":\"code\"}}\n"),
+            format!("{fixed}\n{}\n", r#"{"\u0074ype":"fixed-session-m\u006Fde"}"#),
+            format!("{fixed}\n{}\n", r#"{"type":"session\u002Dmode"}"#),
         ] {
             assert!(JsonlWriter::fixed_session_mode_from_source(&invalid, id).is_err(), "accepted {invalid}");
             assert!(
                 JsonlWriter::fixed_session_profile_from_reader(invalid.as_bytes(), id).is_err(),
                 "reader accepted {invalid}"
+            );
+            assert!(
+                JsonlWriter::reader_matches_fixed_session_mode(
+                    invalid.as_bytes(),
+                    id,
+                    ConversationMode::Chat,
+                )
+                .is_err(),
+                "session listing accepted {invalid}"
             );
         }
         let non_uuid = r#"{"type":"fixed-session-mode","sessionId":"not-a-uuid","sessionMode":"code","instructionEpoch":0}"#;
@@ -10521,7 +10609,8 @@ mod tests {
         let header = format!(
             r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"chat","instructionEpoch":7}}"#
         );
-        let source = format!("{header}\r\n{{\"type\":\"user\",\"text\":\"\\ud800\"}}\r\n\r\n");
+        let user_row = r#"{"type":"user","text":"\ud800","nested":{"type":"fixed-session-mode"}}"#;
+        let source = format!("{header}\r\n{user_row}\r\n\r\n");
         let from_source = JsonlWriter::fixed_session_profile_from_source(&source, id).unwrap();
         let from_reader = JsonlWriter::fixed_session_profile_from_reader(
             std::io::BufReader::with_capacity(3, source.as_bytes()),
@@ -10532,18 +10621,43 @@ mod tests {
 
         let invalid_utf8 = [source.as_bytes(), &[0xff]].concat();
         assert!(JsonlWriter::fixed_session_profile_from_reader(&invalid_utf8[..], id).is_err());
+        assert!(JsonlWriter::reader_matches_fixed_session_mode(
+            &invalid_utf8[..],
+            id,
+            ConversationMode::Chat,
+        )
+        .is_err());
 
-        struct FailingReader;
-        impl std::io::Read for FailingReader {
+        struct FailingReader<'a>(&'a std::cell::Cell<usize>);
+        impl std::io::Read for FailingReader<'_> {
             fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.set(self.0.get() + 1);
                 Err(std::io::Error::other("tail read failed"))
             }
         }
-        let reader = std::io::BufReader::new(std::io::Read::chain(
-            std::io::Cursor::new(format!("{header}\n").into_bytes()),
-            FailingReader,
-        ));
-        let error = JsonlWriter::fixed_session_profile_from_reader(reader, id).unwrap_err();
+        let tail_reads = std::cell::Cell::new(0);
+        let header = format!("{header}\n");
+        let reader = || {
+            std::io::BufReader::new(std::io::Read::chain(
+                header.as_bytes(),
+                FailingReader(&tail_reads),
+            ))
+        };
+        assert!(!JsonlWriter::reader_matches_fixed_session_mode(
+            reader(),
+            id,
+            ConversationMode::Code,
+        )
+        .unwrap());
+        assert_eq!(tail_reads.get(), 0);
+
+        let error =
+            JsonlWriter::reader_matches_fixed_session_mode(reader(), id, ConversationMode::Chat)
+                .unwrap_err();
+        assert!(error.contains("tail read failed"), "{error}");
+        assert_eq!(tail_reads.get(), 1);
+
+        let error = JsonlWriter::fixed_session_profile_from_reader(reader(), id).unwrap_err();
         assert!(error.contains("tail read failed"), "{error}");
     }
 
