@@ -146,8 +146,6 @@ pub struct ChatSourceMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_ref: Option<super::lingxi_data::DataRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_ref: Option<super::dataset_resource::ResourceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visualization: Option<ChatVisualization>,
@@ -309,22 +307,16 @@ impl ChatInputBatch {
                 || (message.recalled == Some(true)
                     && (!message.text.is_empty()
                         || !message.attachments.is_empty()
-                        || message.data_ref.is_some()
                         || message.resource_ref.is_some()
                         || message.visualization.is_some()))
                 || message
                     .resource_ref
                     .as_ref()
                     .is_some_and(|reference| !reference.is_valid())
-                || (message.resource_ref.is_some() && message.data_ref.is_some())
                 || message
                     .visualization
                     .as_ref()
                     .is_some_and(|value| !value.is_valid(&message.message_id))
-                || message
-                    .data_ref
-                    .as_ref()
-                    .is_some_and(|reference| !reference.is_valid())
                 || message.attachments.len() > CHAT_FILES
                 || message.attachments.iter().any(|file| {
                     !file_facts(
@@ -567,7 +559,6 @@ mod tests {
                     artifact_id: None,
                     wait_id: None,
                     attachments: Vec::new(),
-                    data_ref: None,
                     resource_ref: None,
                     visualization: None,
                 })

@@ -147,7 +147,6 @@ pub(super) fn validate_private_data_input(
         || !batch.bootstrap
         || !batch.files.is_empty()
         || !batch.changes.is_empty()
-        || message.data_ref.is_some()
         || message.reply_to.is_some()
         || !matches!(&message.author, ChatAuthor::User { uid, .. } if uid == requester)
     {

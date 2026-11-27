@@ -102,11 +102,11 @@ impl TeamChatReadResult {
                 m.seq == 0
                     || m.created_at == 0
                     || m.change_seq == 0
-                    || (m.recalled == Some(true) && (!m.text.is_empty() || m.data_ref.is_some()))
+                    || (m.recalled == Some(true) && (!m.text.is_empty() || m.resource_ref.is_some()))
                     || m.visualization.as_ref().is_some_and(|value| {
                         m.recalled == Some(true) || !value.is_valid(&m.message_id)
                     })
-                    || m.data_ref
+                    || m.resource_ref
                         .as_ref()
                         .is_some_and(|reference| !reference.is_valid())
             })
