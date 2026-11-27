@@ -21,26 +21,34 @@ pub(super) struct WaitReply {
     pub approved: Option<bool>,
 }
 /// What a call that opens a wait is waiting for. A proposal and a delegation
-/// name their wait, which every process derives from the call's durable step.
+/// name their wait, which every process derives from the call's durable step;
+/// a question names its tool call (its wait id is the checkpoint's own).
 #[derive(Clone, Copy)]
 pub(super) enum Wait<'a> {
-    Question,
+    Question(Option<&'a str>),
     Proposal(&'a str),
     Delegation(&'a str),
 }
 enum Mode {
-    /// The model loop is running: the first well-formed question or proposal pauses the task.
+    /// The model loop is running: the first well-formed question, proposal or
+    /// delegation that waits for its reply pauses the task.
     Live { asked: bool },
-    /// Unfinished calls are being replayed: the first well-formed question or
-    /// proposal is the one the task waited on and receives the reply, if there is one.
+    /// Unfinished calls are being replayed: the first well-formed question,
+    /// proposal or delegation that waits is the one the task waited on and
+    /// receives the reply, if there is one.
     Replay { answer: Option<WaitReply> },
+}
+/// The wait this process opened: its kind, and the wait id of a proposal or
+/// a delegation or the tool call id of a question.
+struct Opened {
+    kind: TeamWaitKind,
+    wait_id: Option<String>,
+    tool_use_id: Option<String>,
 }
 pub(crate) struct AskRequester {
     mode: Mutex<Mode>,
     asked: tokio::sync::Notify,
-    /// The wait this process opened: its kind and, for a proposal or a
-    /// delegation, its id (a question's id is the checkpoint's own).
-    opened: Mutex<Option<(TeamWaitKind, Option<String>)>>,
+    opened: Mutex<Option<Opened>>,
 }
 impl AskRequester {
     pub(super) fn new() -> Self {
@@ -69,7 +77,7 @@ impl AskRequester {
         match &mut *mode {
             Mode::Replay { answer } => {
                 let meant = answer.as_ref().is_some_and(|reply| match wait {
-                    Wait::Question => reply.kind == TeamWaitKind::HumanInput,
+                    Wait::Question(_) => reply.kind == TeamWaitKind::HumanInput,
                     Wait::Proposal(wait_id) => {
                         reply.kind == TeamWaitKind::ToolApproval
                             && reply.approved.is_some()
@@ -89,29 +97,47 @@ impl AskRequester {
             Mode::Live { asked } => {
                 *asked = true;
                 *self.opened.lock().unwrap_or_else(|e| e.into_inner()) = Some(match wait {
-                    Wait::Question => (TeamWaitKind::HumanInput, None),
-                    Wait::Proposal(wait_id) => {
-                        (TeamWaitKind::ToolApproval, Some(wait_id.to_owned()))
-                    }
-                    Wait::Delegation(wait_id) => {
-                        (TeamWaitKind::Delegation, Some(wait_id.to_owned()))
-                    }
+                    Wait::Question(tool_use_id) => Opened {
+                        kind: TeamWaitKind::HumanInput,
+                        wait_id: None,
+                        tool_use_id: tool_use_id.map(str::to_owned),
+                    },
+                    Wait::Proposal(wait_id) => Opened {
+                        kind: TeamWaitKind::ToolApproval,
+                        wait_id: Some(wait_id.to_owned()),
+                        tool_use_id: None,
+                    },
+                    Wait::Delegation(wait_id) => Opened {
+                        kind: TeamWaitKind::Delegation,
+                        wait_id: Some(wait_id.to_owned()),
+                        tool_use_id: None,
+                    },
                 });
                 Ok(None)
             }
         }
     }
-    /// Whether `wait`, the first one the checkpoint finds, is the one this
-    /// process opened. It is not when an earlier call of the same response was
-    /// refused before its result was written: that call is no wait, and the
-    /// task must not pause on it.
-    pub(super) fn opened(&self, wait: &super::checkpoint::TeamTaskWait) -> bool {
+    /// Whether `wait`, the first one the checkpoint finds and held by the
+    /// unfinished call `tool_use_id`, is the one this process opened. It is
+    /// not when an earlier call of the same response was refused before its
+    /// result was written: that call is no wait, and the task must not pause on
+    /// it (nor hand that call's reply to the call that did open the wait).
+    pub(super) fn opened(
+        &self,
+        wait: &super::checkpoint::TeamTaskWait,
+        tool_use_id: Option<&str>,
+    ) -> bool {
         self.opened
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .is_some_and(|(kind, id)| {
-                *kind == wait.kind && id.as_ref().is_none_or(|id| *id == wait.wait_id)
+            .is_some_and(|opened| {
+                opened.kind == wait.kind
+                    && opened.wait_id.as_ref().is_none_or(|id| *id == wait.wait_id)
+                    && opened
+                        .tool_use_id
+                        .as_deref()
+                        .is_none_or(|id| Some(id) == tool_use_id)
             })
     }
     /// The worker ends this process once the call is durable. Returning would
@@ -186,7 +212,7 @@ impl Tool for AskTool {
     async fn call(
         &self,
         input: Json,
-        _: tool_api::context::ToolUseContext,
+        context: tool_api::context::ToolUseContext,
         _: tool_api::progress::ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let input: serde_json::Value = input
@@ -201,7 +227,9 @@ impl Tool for AskTool {
         }
         let WaitReply {
             message_id, text, ..
-        } = match self.ask.open(Wait::Question) {
+        } = match self.ask.open(Wait::Question(
+            context.tool_use_id.as_ref().map(|id| id.as_str()),
+        )) {
             Err(reason) => return Err(ToolError::Internal(reason.into())),
             Ok(None) => self.ask.park().await,
             Ok(Some(reply)) => reply,

@@ -118,7 +118,9 @@ pub struct TeamTaskCheckpoint {
     pub continuable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
-    /// Present when continuing needs the requester's answer to this question.
+    /// Present when continuing needs a reply to this wait: the requester's
+    /// answer to a question, the decision on a proposal, or the other Bot's
+    /// reply to a delegation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<TeamTaskWait>,
     pub checkpoint_digest: String,

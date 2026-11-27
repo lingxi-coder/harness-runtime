@@ -565,13 +565,25 @@ async fn run(
                             protocol,
                         })
                         .ok()
-                        .and_then(|state| state.checkpoint.wait);
+                        .and_then(|state| {
+                            let wait = state.checkpoint.wait?;
+                            let call = state
+                                .pending
+                                .into_iter()
+                                .find(|call| call.logical_step_id == wait.logical_step_id)
+                                .map(|call| call.tool_use_id);
+                            Some((wait, call))
+                        });
                         // The first unfinished call must be the wait this
                         // process opened. An earlier call of the response that
                         // was refused has no result on the transcript yet, and
-                        // pausing would report it as the wait: the task fails
-                        // instead.
-                        if waiting.as_ref().is_some_and(|wait| !ask.opened(wait)) {
+                        // pausing would report it as the wait (and hand its
+                        // reply to the call that opened the wait): the task
+                        // fails instead.
+                        if waiting
+                            .as_ref()
+                            .is_some_and(|(wait, call)| !ask.opened(wait, call.as_deref()))
+                        {
                             return Err(TeamProcessError::Worker);
                         }
                         let waiting = waiting.is_some();

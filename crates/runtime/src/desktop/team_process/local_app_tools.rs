@@ -922,6 +922,7 @@ mod tests {
                 local_apps,
                 delegate: None,
                 no_reply: None,
+                visualization: None,
             })
         };
         let without = read_tools(None);

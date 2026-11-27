@@ -779,6 +779,7 @@ mod tests {
             local_apps: None,
             delegate: Some(tools),
             no_reply: None,
+            visualization: None,
         }
         .names();
         assert!(names.iter().any(|name| name == DELEGATE), "{names:?}");
@@ -792,6 +793,7 @@ mod tests {
             local_apps: None,
             delegate: None,
             no_reply: None,
+            visualization: None,
         }
         .names();
         assert!(!names.iter().any(|name| name == DELEGATE));
